@@ -1,13 +1,13 @@
-package main
+package agent
 
 import (
 	"context"
 	"fmt"
 	"io"
 	"net"
+	"strings"
 
-	"github.com/google/uuid" // Make sure to add this import
-	"github.com/tmc/langchaingo/tools"
+	"github.com/google/uuid"
 )
 
 // StatefulPythonTool now has a session ID.
@@ -64,4 +64,42 @@ func (t *StatefulPythonTool) Close() {
 	}
 }
 
-var _ tools.Tool = &StatefulPythonTool{}
+// executePythonCode extracts code from a string, executes it, and returns the result
+func executePythonCode(ctx context.Context, pythonTool *StatefulPythonTool, text string) (string, string, bool) {
+	startTag := "<python>"
+	endTag := "</python>"
+
+	startIdx := strings.Index(text, startTag)
+	if startIdx == -1 {
+		return "", "", false
+	}
+
+	endIdx := strings.Index(text[startIdx:], endTag)
+	if endIdx == -1 {
+		return "", "", false
+	}
+
+	codeStart := startIdx + len(startTag)
+	codeEnd := startIdx + endIdx
+	pythonCode := strings.TrimSpace(text[codeStart:codeEnd])
+
+	if pythonCode == "" {
+		return "", "", false
+	}
+
+	fmt.Println("\n--- Executing Python Code ---")
+	fmt.Printf("Code to execute:\n%s\n", pythonCode)
+	fmt.Println("--- Execution Output ---")
+
+	execResult, err := pythonTool.Call(ctx, pythonCode)
+	if err != nil {
+		fmt.Printf("Error executing Python: %v\n", err)
+		execResult = "Error: " + err.Error()
+	} else {
+		fmt.Print(execResult)
+	}
+	fmt.Println("\n--- End Execution ---")
+
+	// Return the code, the result, and a flag indicating code was executed
+	return pythonCode, execResult, true
+}
