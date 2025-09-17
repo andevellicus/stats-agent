@@ -23,9 +23,11 @@ def execute_code(session_id, code):
         output = redirected_output.getvalue()
         try:
             last_line = code.strip().split('\n')[-1]
-            result = eval(last_line, session_state)
-            if result is not None:
-                output += str(result)
+            # Avoid eval on multi-line statements like 'with'
+            if '\n' not in code.strip():
+                result = eval(last_line, session_state)
+                if result is not None:
+                    output += str(result)
         except:
             pass
         return output
@@ -73,6 +75,11 @@ def main():
                 print("-" * 30)
 
                 result = execute_code(session_id, code)
+
+                # If the result is empty, send a confirmation message to prevent hanging.
+                if not result.strip():
+                    result = "Success: Code executed with no output."
+
                 print(f"Result: {result}")
                 print("=" * 30)
                 conn.sendall(result.encode('utf-8'))
