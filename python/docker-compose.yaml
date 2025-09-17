@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  # The Stateful Python Executor Service
+  python-executor:
+    # Build the image from the Dockerfile in the current directory
+    build: .
+    container_name: python-executor-container
+    # Map port 9999 inside the container to port 9999 on our host machine
+    ports:
+      - "9999:9999"
+    # Mount the working directory to /app/workspace inside the container
+    volumes:
+      - ../workspace:/app/workspace

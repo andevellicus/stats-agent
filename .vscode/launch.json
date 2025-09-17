@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Go Agent",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}", // Tells debugger to run the main package
+      // This is the most important part!
+      // It runs your app in the integrated terminal.
+      "console": "integratedTerminal"
+    }
+  ]
+}
