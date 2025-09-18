@@ -1,14 +1,16 @@
-package agent
+package tools
 
 import (
+	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"strings"
 
 	"github.com/google/uuid"
 )
+
+const EOM_TOKEN = "<|EOM|>"
 
 // StatefulPythonTool now has a session ID.
 type StatefulPythonTool struct {
@@ -23,7 +25,6 @@ func NewStatefulPythonTool(ctx context.Context, address string) (*StatefulPython
 		return nil, fmt.Errorf("could not connect to Python executor: %w", err)
 	}
 
-	// Each tool instance gets a unique ID to sandbox its state.
 	sessionID := uuid.New().String()
 
 	return &StatefulPythonTool{conn: conn, sessionID: sessionID}, nil
@@ -34,11 +35,11 @@ func (t *StatefulPythonTool) Name() string {
 }
 
 func (t *StatefulPythonTool) Description() string {
-	return "Executes Python code in a persistent, sandboxed session. Variables and data are remembered across calls for the same agent."
+	return "Executes Python code in a persistent, sandboxed session."
 }
 
+// Call now reads from the connection until it sees the EOM_TOKEN.
 func (t *StatefulPythonTool) Call(ctx context.Context, input string) (string, error) {
-	// Prepend the session ID to the code before sending.
 	message := fmt.Sprintf("%s|%s", t.sessionID, input)
 
 	_, err := t.conn.Write([]byte(message))
@@ -46,16 +47,25 @@ func (t *StatefulPythonTool) Call(ctx context.Context, input string) (string, er
 		return "", fmt.Errorf("failed to send code to Python server: %w", err)
 	}
 
-	buf := make([]byte, 4096)
-	n, err := t.conn.Read(buf)
+	// Use a buffered reader to read until the EOM token is found.
+	reader := bufio.NewReader(t.conn)
+	fullResponse, err := reader.ReadString('>')
 	if err != nil {
-		if err == io.EOF {
-			return "", fmt.Errorf("connection closed by Python server")
-		}
 		return "", fmt.Errorf("failed to read result from Python server: %w", err)
 	}
 
-	return string(buf[:n]), nil
+	// Check if the response ends with the EOM token.
+	// This handles cases where the token itself might be split across reads.
+	for !strings.HasSuffix(fullResponse, EOM_TOKEN) {
+		nextChunk, err := reader.ReadString('>')
+		if err != nil {
+			return "", fmt.Errorf("failed to read full response from Python server: %w", err)
+		}
+		fullResponse += nextChunk
+	}
+
+	// Trim the EOM token from the final response.
+	return strings.TrimSuffix(fullResponse, EOM_TOKEN), nil
 }
 
 func (t *StatefulPythonTool) Close() {
@@ -64,8 +74,8 @@ func (t *StatefulPythonTool) Close() {
 	}
 }
 
-// executePythonCode extracts code from a string, executes it, and returns the result
-func executePythonCode(ctx context.Context, pythonTool *StatefulPythonTool, text string) (string, string, bool) {
+// ExecutePythonCode extracts code from a string, executes it, and returns the result.
+func (t *StatefulPythonTool) ExecutePythonCode(ctx context.Context, text string) (string, string, bool) {
 	startTag := "<python>"
 	endTag := "</python>"
 
@@ -91,7 +101,7 @@ func executePythonCode(ctx context.Context, pythonTool *StatefulPythonTool, text
 	fmt.Printf("Code to execute:\n%s\n", pythonCode)
 	fmt.Println("--- Execution Output ---")
 
-	execResult, err := pythonTool.Call(ctx, pythonCode)
+	execResult, err := t.Call(ctx, pythonCode)
 	if err != nil {
 		fmt.Printf("Error executing Python: %v\n", err)
 		execResult = "Error: " + err.Error()
@@ -100,6 +110,5 @@ func executePythonCode(ctx context.Context, pythonTool *StatefulPythonTool, text
 	}
 	fmt.Println("\n--- End Execution ---")
 
-	// Return the code, the result, and a flag indicating code was executed
 	return pythonCode, execResult, true
 }

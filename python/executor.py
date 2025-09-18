@@ -2,6 +2,9 @@ import socket
 import sys
 import io
 
+# A special token to signal the end of a message.
+EOM_TOKEN = "<|EOM|>"
+
 # This is now our session manager.
 # It will map a session_id to its own private state dictionary.
 sessions = {}
@@ -18,18 +21,9 @@ def execute_code(session_id, code):
     old_stdout = sys.stdout
     redirected_output = sys.stdout = io.StringIO()
     try:
-        # Crucially, we execute the code using the *session_state*
+        # We execute the code using the session_state and capture any printed output.
         exec(code, session_state)
         output = redirected_output.getvalue()
-        try:
-            last_line = code.strip().split('\n')[-1]
-            # Avoid eval on multi-line statements like 'with'
-            if '\n' not in code.strip():
-                result = eval(last_line, session_state)
-                if result is not None:
-                    output += str(result)
-        except:
-            pass
         return output
     except Exception as e:
         # Return a more descriptive error message
@@ -82,7 +76,10 @@ def main():
 
                 print(f"Result: {result}")
                 print("=" * 30)
-                conn.sendall(result.encode('utf-8'))
+
+                # Append the EOM token to the result before sending.
+                message_to_send = result + EOM_TOKEN
+                conn.sendall(message_to_send.encode('utf-8'))
         except socket.error as e:
             print(f"Socket error: {e}")
         finally:
