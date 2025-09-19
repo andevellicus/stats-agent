@@ -1,67 +1,125 @@
 package rag
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
+	"net/http"
 	"regexp"
 	"sort"
+	"stats-agent/config"
 	"strings"
+	"time"
+
+	"io"
 
 	"github.com/google/uuid"
 	"github.com/ollama/ollama/api"
 	"github.com/philippgille/chromem-go"
 )
 
-// RAG struct now includes the messageStore and summarizationModel.
 type RAG struct {
-	db                 *chromem.DB
-	messageStore       map[string]string // The "Document Store" for full FACT content
-	ollamaClient       *api.Client
-	embedder           chromem.EmbeddingFunc
-	embeddingModel     string
-	summarizationModel string
+	cfg          *config.Config
+	db           *chromem.DB
+	messageStore map[string]string
+	embedder     chromem.EmbeddingFunc
+}
+type LlamaCppEmbeddingRequest struct {
+	Content string `json:"content"`
 }
 
-// createOllamaEmbedding creates an embedding function using the Ollama API.
-func createOllamaEmbedding(ollamaClient *api.Client, modelName string) chromem.EmbeddingFunc {
+// Corrected struct to handle the nested array response from the server
+type LlamaCppEmbeddingResponse []struct {
+	Embedding [][]float32 `json:"embedding"`
+}
+type LlamaCppChatRequest struct {
+	Messages []api.Message `json:"messages"`
+	Stream   bool          `json:"stream"`
+}
+type LlamaCppChatResponse struct {
+	Choices []struct {
+		Message api.Message `json:"message"`
+	} `json:"choices"`
+}
+
+// createLlamaCppEmbedding now correctly handles the nested array
+func createLlamaCppEmbedding(cfg *config.Config) chromem.EmbeddingFunc {
 	return func(ctx context.Context, doc string) ([]float32, error) {
-		req := &api.EmbeddingRequest{
-			Model:  modelName,
-			Prompt: doc,
+		reqBody := LlamaCppEmbeddingRequest{
+			Content: doc,
 		}
-		resp, err := ollamaClient.Embeddings(ctx, req)
+		jsonBody, err := json.Marshal(reqBody)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to marshal embedding request body: %w", err)
 		}
-		float32Embedding := make([]float32, len(resp.Embedding))
-		for i, v := range resp.Embedding {
-			float32Embedding[i] = float32(v)
+
+		url := fmt.Sprintf("%s/v1/embeddings", cfg.EmbeddingLLMHost)
+		var resp *http.Response
+
+		for i := 0; i < cfg.MaxRetries; i++ {
+			req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+			if err != nil {
+				return nil, fmt.Errorf("failed to create embedding request: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+
+			client := &http.Client{}
+			resp, err = client.Do(req)
+			if err != nil {
+				return nil, fmt.Errorf("failed to send embedding request: %w", err)
+			}
+
+			if resp.StatusCode != http.StatusServiceUnavailable {
+				break
+			}
+
+			resp.Body.Close()
+			log.Printf("Embedding model is loading, retrying in %v...", cfg.RetryDelaySeconds)
+			time.Sleep(cfg.RetryDelaySeconds)
 		}
-		return float32Embedding, nil
+		defer resp.Body.Close()
+
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read embedding response body: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("llama.cpp server returned non-200 status for embedding: %s, body: %s", resp.Status, string(bodyBytes))
+		}
+
+		var embeddingResponse LlamaCppEmbeddingResponse
+		if err := json.Unmarshal(bodyBytes, &embeddingResponse); err != nil {
+			log.Printf("Failed to decode embedding response body. Raw response: %s", string(bodyBytes))
+			return nil, fmt.Errorf("failed to decode embedding response body: %w", err)
+		}
+
+		if len(embeddingResponse) > 0 && len(embeddingResponse[0].Embedding) > 0 {
+			return embeddingResponse[0].Embedding[0], nil
+		}
+
+		return nil, fmt.Errorf("embedding response was empty")
 	}
 }
 
-// New creates a new RAG instance.
-func New(ctx context.Context, ollamaClient *api.Client, embeddingModel string, summarizationModel string) (*RAG, error) {
+func New(cfg *config.Config) (*RAG, error) {
 	db := chromem.NewDB()
-	embedder := createOllamaEmbedding(ollamaClient, embeddingModel)
+	embedder := createLlamaCppEmbedding(cfg)
 	_, err := db.GetOrCreateCollection("long-term-memory", nil, embedder)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create initial collection: %w", err)
 	}
 	rag := &RAG{
-		db:                 db,
-		messageStore:       make(map[string]string),
-		ollamaClient:       ollamaClient,
-		embedder:           embedder,
-		embeddingModel:     embeddingModel,
-		summarizationModel: summarizationModel,
+		cfg:          cfg,
+		db:           db,
+		messageStore: make(map[string]string),
+		embedder:     embedder,
 	}
 	return rag, nil
 }
-
-// generateSummary now correctly uses the Chat method to create a concise fact.
 func (r *RAG) generateSummary(ctx context.Context, code, result string) (string, error) {
 	systemPrompt := `You are an expert at creating concise, searchable facts. Based on the Python code and its output,
 	generate a single, descriptive sentence that captures the key finding or action.
@@ -79,29 +137,74 @@ Output:
 		{Role: "user", Content: userPrompt},
 	}
 
-	req := &api.ChatRequest{
-		Model:    r.summarizationModel,
-		Messages: messages,
-		Stream:   &[]bool{false}[0],
-	}
-
-	var chatResponse api.ChatResponse
-	err := r.ollamaClient.Chat(ctx, req, func(resp api.ChatResponse) error {
-		chatResponse = resp
-		return nil
-	})
+	summary, err := getLLMResponse(ctx, r.cfg.SummarizationLLMHost, messages, r.cfg)
 	if err != nil {
 		return "", fmt.Errorf("llm chat call failed for summary: %w", err)
 	}
 
-	if chatResponse.Message.Content == "" {
+	if summary == "" {
 		return "", fmt.Errorf("llm returned an empty summary")
 	}
 
-	return strings.TrimSpace(chatResponse.Message.Content), nil
+	return strings.TrimSpace(summary), nil
 }
+func getLLMResponse(ctx context.Context, llamaCppHost string, messages []api.Message, cfg *config.Config) (string, error) {
+	reqBody := LlamaCppChatRequest{
+		Messages: messages,
+		Stream:   false,
+	}
 
-// AddMessagesToStore is now fully optimized to avoid redundancy.
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request body: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/v1/chat/completions", llamaCppHost)
+	var resp *http.Response
+
+	for i := 0; i < cfg.MaxRetries; i++ {
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+		if err != nil {
+			return "", fmt.Errorf("failed to create request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{}
+		resp, err = client.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("failed to send request to llama.cpp server: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			break
+		}
+
+		resp.Body.Close()
+		log.Printf("LLM is loading, retrying in %v...", cfg.RetryDelaySeconds)
+		time.Sleep(cfg.RetryDelaySeconds)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read llm response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("llama.cpp server returned non-200 status: %s, body: %s", resp.Status, string(bodyBytes))
+	}
+
+	var chatResponse LlamaCppChatResponse
+	if err := json.Unmarshal(bodyBytes, &chatResponse); err != nil {
+		return "", fmt.Errorf("failed to decode response body: %w", err)
+	}
+
+	if len(chatResponse.Choices) > 0 {
+		return chatResponse.Choices[0].Message.Content, nil
+	}
+
+	return "", fmt.Errorf("no response choices from llama.cpp server")
+}
 func (r *RAG) AddMessagesToStore(ctx context.Context, messages []api.Message) error {
 	collection := r.db.GetCollection("long-term-memory", r.embedder)
 	if collection == nil {
@@ -162,7 +265,7 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, messages []api.Message) er
 			// This handles user messages and standalone assistant messages (that don't call tools)
 			doc.Content = msg.Content
 			doc.Metadata["role"] = msg.Role
-			// **OPTIMIZATION**: No message_id is needed as we'll use the content directly.
+			// No message_id is needed as we'll use the content directly.
 		}
 
 		documentsToEmbed = append(documentsToEmbed, doc)
@@ -177,8 +280,6 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, messages []api.Message) er
 	}
 	return nil
 }
-
-// Query now uses the optimized retrieval logic.
 func (r *RAG) Query(ctx context.Context, query string, nResults int) (string, error) {
 	collection := r.db.GetCollection("long-term-memory", r.embedder)
 	if collection == nil {
@@ -210,15 +311,13 @@ func (r *RAG) Query(ctx context.Context, query string, nResults int) (string, er
 		results = results[:nResults]
 	}
 
-	var context strings.Builder
-	context.WriteString("Relevant information from long-term memory:\n")
+	var contextBuilder strings.Builder
+	contextBuilder.WriteString("<memory>\n") // Opening tag
 
-	// **OPTIMIZATION**: Use the more efficient retrieval logic.
 	for _, result := range results {
 		role := result.Metadata["role"]
 
 		if role == "fact" {
-			// Facts need the messageStore lookup to get the full content.
 			messageID, ok := result.Metadata["message_id"]
 			if !ok {
 				log.Printf("Warning: fact document is missing a message_id.")
@@ -229,12 +328,12 @@ func (r *RAG) Query(ctx context.Context, query string, nResults int) (string, er
 				log.Printf("Warning: could not find full fact content for id %s.", messageID)
 				continue
 			}
-			context.WriteString(fmt.Sprintf("- %s: %s\n", role, fullContent))
+			contextBuilder.WriteString(fmt.Sprintf("- %s: %s\n", role, fullContent))
 		} else {
-			// Non-facts can use the content from the vector DB directly.
-			context.WriteString(fmt.Sprintf("- %s: %s\n", role, result.Content))
+			contextBuilder.WriteString(fmt.Sprintf("- %s: %s\n", role, result.Content))
 		}
 	}
 
-	return context.String(), nil
+	contextBuilder.WriteString("</memory>\n") // Closing tag
+	return contextBuilder.String(), nil
 }

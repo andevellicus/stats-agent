@@ -5,63 +5,45 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net/http"
-	"net/url"
 	"os"
-	"strings"
-
 	"stats-agent/agent"
 	"stats-agent/config"
 	"stats-agent/rag"
 	"stats-agent/tools"
-
-	"github.com/ollama/ollama/api"
 )
 
 func main() {
-	cfg := config.Load()
 	ctx := context.Background()
+	cfg := config.Load()
 
 	pythonTool, err := tools.NewStatefulPythonTool(ctx, cfg.PythonExecutorAddress)
 	if err != nil {
-		log.Fatalf("Failed to connect to Python container. Is it running? Error: %v", err)
+		log.Fatalf("Failed to initialize Python tool: %v", err)
 	}
 	defer pythonTool.Close()
 
-	var ollamaClient *api.Client
-	ollamaHost := cfg.OllamaHost
-	if ollamaHost == "" {
-		ollamaHost = "http://127.0.0.1:11434"
-	}
-	cleanOllamaHost := strings.TrimSuffix(ollamaHost, "/")
-	ollamaURL, err := url.Parse(cleanOllamaHost)
+	// Pass the specific hosts to the RAG service
+	rag, err := rag.New(cfg)
 	if err != nil {
-		log.Fatalf("Invalid OLLAMA_HOST URL: %v", err)
-	}
-	ollamaClient = api.NewClient(ollamaURL, http.DefaultClient)
-
-	// The call to rag.New is now simpler.
-	rag, err := rag.New(ctx, ollamaClient, cfg.EmbeddingModel, cfg.SummarizationModel)
-	if err != nil {
-		log.Fatalf("Failed to create RAG instance: %v", err)
+		log.Fatalf("Failed to initialize RAG: %v", err)
 	}
 
-	agent := agent.NewAgent(ctx, ollamaClient, pythonTool, rag, cfg.Model, cfg.MaxTurns, cfg.RAGResults)
+	// Pass the main host to the Agent
+	statsAgent := agent.NewAgent(cfg, pythonTool, rag)
 
-	// ... (scanner loop is unchanged) ...
 	scanner := bufio.NewScanner(os.Stdin)
-	for {
-		fmt.Print("You: ")
-		if !scanner.Scan() {
-			break
-		}
+	fmt.Println("Welcome to the Stats Agent. How can I help you today?")
+	fmt.Print("> ")
+	for scanner.Scan() {
 		input := scanner.Text()
 		if input == "exit" {
 			break
 		}
-		agent.Run(ctx, input)
+		statsAgent.Run(ctx, input)
+		fmt.Print("> ")
 	}
+
 	if err := scanner.Err(); err != nil {
-		log.Fatal(err)
+		log.Println("Error reading from stdin:", err)
 	}
 }

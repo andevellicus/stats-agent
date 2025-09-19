@@ -1,6 +1,4 @@
-CLAUDE.md
-.claude/
-
 __debug_bin*
 
 workspace/
+models/

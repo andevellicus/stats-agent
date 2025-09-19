@@ -1,73 +1,109 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
-	"strings"
-
+	"net/http"
+	"stats-agent/config"
 	"stats-agent/rag"
 	"stats-agent/tools"
+	"strings"
+	"time"
+
+	"io"
 
 	"github.com/ollama/ollama/api"
 )
 
-// Agent struct holds the state for our agent
 type Agent struct {
-	llmClient     *api.Client
-	pythonTool    *tools.StatefulPythonTool
-	rag           *rag.RAG
-	history       []api.Message // This is the short-term memory
-	maxTurns      int
-	contextLength int
-	ragResults    int
+	cfg        *config.Config
+	pythonTool *tools.StatefulPythonTool
+	rag        *rag.RAG
+	history    []api.Message
 }
 
-// NewAgent creates a new agent
-func NewAgent(ctx context.Context, llmClient *api.Client, pythonTool *tools.StatefulPythonTool, rag *rag.RAG, modelName string, maxTurns int, ragResults int) *Agent {
-	showReq := &api.ShowRequest{Model: modelName}
-	showResp, err := llmClient.Show(ctx, showReq)
+type TokenizeRequest struct {
+	Content string `json:"content"`
+}
+
+type TokenizeResponse struct {
+	Tokens []int `json:"tokens"`
+}
+
+func NewAgent(cfg *config.Config, pythonTool *tools.StatefulPythonTool, rag *rag.RAG) *Agent {
+	log.Printf("Using context window size: %d", cfg.ContextLength)
+	return &Agent{
+		cfg:        cfg,
+		pythonTool: pythonTool,
+		rag:        rag,
+	}
+}
+
+func (a *Agent) countTokens(ctx context.Context, text string) (int, error) {
+	reqBody := TokenizeRequest{
+		Content: text,
+	}
+	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
-		log.Fatalf("Failed to get model info: %v", err)
+		return 0, fmt.Errorf("failed to marshal tokenize request body: %w", err)
 	}
 
-	var contextLength int
-	if val, ok := showResp.ModelInfo["llama.context_length"]; ok {
-		if floatVal, ok := val.(float64); ok {
-			contextLength = int(floatVal)
+	url := fmt.Sprintf("%s/tokenize", a.cfg.MainLLMHost)
+	var resp *http.Response
+
+	for i := 0; i < 5; i++ {
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+		if err != nil {
+			return 0, fmt.Errorf("failed to create tokenize request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{}
+		resp, err = client.Do(req)
+		if err != nil {
+			return 0, fmt.Errorf("failed to send tokenize request to llama.cpp server: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			break // Success or non-retryable error
+		}
+
+		resp.Body.Close()
+		log.Printf("Tokenize endpoint is loading, retrying in %v...", 2*time.Second)
+		time.Sleep(2 * time.Second)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("llama.cpp server returned non-200 status for tokenize: %s, body: %s", resp.Status, string(bodyBytes))
+	}
+
+	var tokenizeResponse TokenizeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tokenizeResponse); err != nil {
+		return 0, fmt.Errorf("failed to decode tokenize response body: %w", err)
+	}
+
+	return len(tokenizeResponse.Tokens), nil
+}
+func (a *Agent) manageMemory(ctx context.Context) {
+	var totalTokens int
+	for _, msg := range a.history {
+		tokens, err := a.countTokens(ctx, msg.Content)
+		if err != nil {
+			log.Printf("Warning: could not count tokens for a message, falling back to character count. Error: %v", err)
+			totalTokens += len(msg.Content) // Fallback
+		} else {
+			totalTokens += tokens
 		}
 	}
 
-	if contextLength == 0 {
-		log.Printf("Warning: Could not determine 'llama.context_length' from model info. Using default of 4096.")
-		contextLength = 4096
-	}
+	contextWindowThreshold := int(float64(a.cfg.ContextLength) * 0.8)
 
-	contextLength = 10 // hamstrung for testing
-
-	log.Printf("Using context window size: %d", contextLength)
-
-	return &Agent{
-		llmClient:     llmClient,
-		pythonTool:    pythonTool,
-		rag:           rag,
-		maxTurns:      maxTurns,
-		contextLength: contextLength,
-		ragResults:    ragResults,
-	}
-}
-
-// manageMemory checks if the short-term history is approaching the context limit.
-// It now includes logic to avoid splitting assistant-tool message pairs.
-func (a *Agent) manageMemory(ctx context.Context) {
-	var totalContentLength int
-	for _, msg := range a.history {
-		totalContentLength += len(msg.Content)
-	}
-
-	contextWindowThreshold := int(float64(a.contextLength) * 0.8)
-
-	if totalContentLength > contextWindowThreshold {
+	if totalTokens > contextWindowThreshold {
 		cutoff := len(a.history) / 2
 
 		// Intelligent Cutoff Logic to prevent splitting an assistant-tool pair.
@@ -104,7 +140,7 @@ func (a *Agent) Run(ctx context.Context, input string) {
 	a.manageMemory(ctx)
 	a.history = append(a.history, api.Message{Role: "user", Content: input})
 
-	longTermContext, err := a.rag.Query(ctx, input, a.ragResults)
+	longTermContext, err := a.rag.Query(ctx, input, a.cfg.RAGResults)
 	if err != nil {
 		log.Println("Error querying RAG for long-term context:", err)
 	}
@@ -115,43 +151,38 @@ func (a *Agent) Run(ctx context.Context, input string) {
 	}
 	messagesForLLM = append(messagesForLLM, a.history...)
 
-	for turn := 0; turn < a.maxTurns; turn++ {
+	for turn := 0; turn < a.cfg.MaxTurns; turn++ {
 		fmt.Print("Agent: ")
+		var llmResponseBuilder strings.Builder
+		err := getLLMResponse(ctx, a.cfg.MainLLMHost, messagesForLLM, func(chunk string) {
+			fmt.Print(chunk)
+			llmResponseBuilder.WriteString(chunk)
+		})
 
-		llmResponse, err := getLLMResponse(ctx, a.llmClient, messagesForLLM)
+		// Add a newline after the streaming is complete
+		fmt.Println()
+
 		if err != nil {
 			log.Println("Error getting LLM response:", err)
 			break
 		}
+		llmResponse := llmResponseBuilder.String()
 		a.history = append(a.history, api.Message{Role: "assistant", Content: llmResponse})
 
 		_, execResult, wasCodeExecuted := a.pythonTool.ExecutePythonCode(ctx, llmResponse)
 
 		if !wasCodeExecuted {
-			break
+			break // The final answer has been streamed, so we can exit.
 		}
 
 		executionMessage := fmt.Sprintf("<execution_results>\n%s\n</execution_results>", execResult)
 		toolMessage := api.Message{Role: "tool", Content: executionMessage}
 		a.history = append(a.history, toolMessage)
 
-		// Always update the context for the next turn
 		messagesForLLM = a.history
 
 		if strings.Contains(execResult, "Error:") {
 			fmt.Println("\n--- Agent observed an error, attempting to self-correct ---")
-			// The loop will continue, using the updated messagesForLLM
 		}
 	}
-
-	// After the loop, generate a final summary response to the user.
-	finalMessages := append(messagesForLLM, api.Message{Role: "user", Content: "Based on the last execution, what is the answer to my original question? Summarize your findings."})
-	finalResponse, err := getLLMResponse(ctx, a.llmClient, finalMessages)
-	if err != nil {
-		log.Println("Error getting final LLM response:", err)
-	} else {
-		a.history = append(a.history, api.Message{Role: "assistant", Content: finalResponse})
-	}
-
-	fmt.Println()
 }

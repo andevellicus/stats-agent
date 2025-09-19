@@ -6,10 +6,10 @@ WORKDIR /app
 
 # Copy the executor script into the container
 COPY executor.py .
+COPY .env .
 
-# (Optional) Install any Python libraries you need for your stats agent
-# For example, to install pandas and numpy:
-RUN pip install pandas numpy matplotlib scikit-learn seaborn 
+# Install any Python libraries you need
+RUN pip install pandas numpy matplotlib scikit-learn seaborn
 
 # Expose the port the server will listen on
 EXPOSE 9999

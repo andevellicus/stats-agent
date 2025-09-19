@@ -1,9 +1,12 @@
 PYTHON_EXECUTOR_ADDRESS: "localhost:9999"
-OLLAMA_HOST: "http://localhost:11434"
+MAIN_LLM_HOST: "http://localhost:8080"
+EMBEDDING_LLM_HOST: "http://localhost:8081"
+SUMMARIZATION_LLM_HOST: "http://localhost:8082"
 MAX_TURNS: 5
-MODEL: "devstral:24b"
-EMBEDDING_MODEL: "bge-large:335m"
-SUMMARIZATION_MODEL: "qwen2.5:7b"
-# EMBEDDING_MODEL: "nomic-embed-text:v1.5"
-# SUMMARIZATION_MODEL: "phi3.5:8b"
 RAG_RESULTS: 5
+#CONTEXT_LENGTH: 131072
+CONTEXT_LENGTH: 10
+
+# --- Retry Logic ---
+MAX_RETRIES: 5
+RETRY_DELAY_SECONDS: 2
