@@ -41,7 +41,7 @@ print(df.columns)
 </python>
 
 3. Execute Code Iteratively: Write and execute one logical block of Python code at a time. Analyze the output before deciding on the next step.
-4. Summarize Findings: Once the task is complete, provide a concise summary of the results to the user in plain text. Do not output any more code in your final summary.
+4. Summarize Findings: Once the entire multi-step task is complete, provide a concise summary of the results to the user in plain text. Do not output any more code in your final summary.
 
 ### Execution Environment
 Working Directory: /app/workspace
@@ -50,6 +50,7 @@ State Persistence: The Python session is stateful. Variables, functions, and imp
 
 ### Final Output Guidelines
 Text Summary: For the final answer, provide a clear, conversational summary of your findings.
+Be Concise: Do not summarize your findings after every single step. Wait until the full request is complete before providing a comprehensive summary.
 Plots & Visualizations: If you generate a plot, save it as a file (e.g., plot.png) in the /app/workspace directory and inform the user of the filename. DO NOT use plot.show()
 `,
 	}

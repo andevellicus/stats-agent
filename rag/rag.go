@@ -16,7 +16,7 @@ import (
 // RAG struct now includes the messageStore and summarizationModel.
 type RAG struct {
 	db                 *chromem.DB
-	messageStore       map[string]string // The "Document Store" for full content
+	messageStore       map[string]string // The "Document Store" for full FACT content
 	ollamaClient       *api.Client
 	embedder           chromem.EmbeddingFunc
 	embeddingModel     string
@@ -101,7 +101,7 @@ Output:
 	return strings.TrimSpace(chatResponse.Message.Content), nil
 }
 
-// AddMessagesToStore now implements the pointer-based system.
+// AddMessagesToStore is now fully optimized to avoid redundancy.
 func (r *RAG) AddMessagesToStore(ctx context.Context, messages []api.Message) error {
 	collection := r.db.GetCollection("long-term-memory", r.embedder)
 	if collection == nil {
@@ -109,68 +109,76 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, messages []api.Message) er
 	}
 
 	var documentsToEmbed []chromem.Document
-	for i := range messages {
-		msg := messages[i]
-		messageID := uuid.New().String()
-		fullContent := ""
-		roleForMeta := msg.Role
+	processedIndices := make(map[int]bool) // Keep track of messages already handled
 
-		// Store the full content of the message exchange for tool calls
-		if i > 0 && msg.Role == "tool" && messages[i-1].Role == "assistant" {
-			prevMsg := messages[i-1]
-			fullContent = fmt.Sprintf("%s\n<execution_results>\n%s\n</execution_results>", prevMsg.Content, msg.Content)
-			roleForMeta = "fact" // Mark this exchange as a "fact"
-		} else {
-			fullContent = msg.Content
+	for i := range messages {
+		if processedIndices[i] {
+			continue // Skip messages that have already been processed as part of a pair
 		}
 
-		// Save the full, original content to our simple document store.
-		r.messageStore[messageID] = fullContent
+		msg := messages[i]
+		doc := chromem.Document{
+			ID:       uuid.New().String(),
+			Metadata: make(map[string]string),
+		}
 
-		var contentToEmbed string
-		// If it's a successful tool execution, generate a summary for embedding.
-		if roleForMeta == "fact" && !strings.Contains(msg.Content, "Error:") {
-			prevMsg := messages[i-1]
-			re := regexp.MustCompile(`(?s)<python>(.*)</python>`)
-			matches := re.FindStringSubmatch(prevMsg.Content)
-			if len(matches) > 1 {
-				code := strings.TrimSpace(matches[1])
-				result := strings.TrimSpace(msg.Content)
-				summary, err := r.generateSummary(ctx, code, result)
-				if err != nil {
-					log.Printf("Warning: could not generate summary for fact, embedding full content instead. Error: %v", err)
-					contentToEmbed = fullContent // Fallback to full content on error
-				} else {
-					contentToEmbed = summary
+		// Look ahead to see if the current message is an assistant message followed by a tool message
+		if msg.Role == "assistant" && i+1 < len(messages) && messages[i+1].Role == "tool" {
+			toolMsg := messages[i+1]
+
+			// Mark both messages as processed so they are not handled individually
+			processedIndices[i] = true
+			processedIndices[i+1] = true
+
+			// Combine them into a single "fact"
+			fullFactContent := fmt.Sprintf("%s\n<execution_results>\n%s\n</execution_results>", msg.Content, toolMsg.Content)
+			messageID := uuid.New().String()
+
+			// **OPTIMIZATION**: Only add the full fact to the messageStore.
+			r.messageStore[messageID] = fullFactContent
+			doc.Metadata["role"] = "fact"
+			doc.Metadata["message_id"] = messageID
+
+			// Generate a summary for the fact if it's not an error
+			if !strings.Contains(toolMsg.Content, "Error:") {
+				re := regexp.MustCompile(`(?s)<python>(.*)</python>`)
+				matches := re.FindStringSubmatch(msg.Content)
+				if len(matches) > 1 {
+					code := strings.TrimSpace(matches[1])
+					result := strings.TrimSpace(toolMsg.Content)
+					summary, err := r.generateSummary(ctx, code, result)
+					if err != nil {
+						log.Printf("Warning: could not generate summary for fact, embedding full content. Error: %v", err)
+						doc.Content = fullFactContent
+					} else {
+						doc.Content = summary
+					}
 				}
+			} else {
+				// For errors, embed the full content directly
+				doc.Content = fullFactContent
 			}
 		} else {
-			// For regular messages or errors, embed the full content directly.
-			contentToEmbed = fullContent
+			// This handles user messages and standalone assistant messages (that don't call tools)
+			doc.Content = msg.Content
+			doc.Metadata["role"] = msg.Role
+			// **OPTIMIZATION**: No message_id is needed as we'll use the content directly.
 		}
 
-		documentsToEmbed = append(documentsToEmbed, chromem.Document{
-			ID:      uuid.New().String(),
-			Content: contentToEmbed,
-			Metadata: map[string]string{
-				"role":       roleForMeta,
-				"message_id": messageID, // The "pointer" to the full content
-			},
-		})
+		documentsToEmbed = append(documentsToEmbed, doc)
 	}
 
-	if len(documentsToEmbed) == 0 {
-		return nil
+	if len(documentsToEmbed) > 0 {
+		err := collection.AddDocuments(ctx, documentsToEmbed, 4)
+		if err != nil {
+			return fmt.Errorf("failed to add documents to collection: %w", err)
+		}
+		log.Printf("--- Added %d messages/facts to long-term RAG memory. ---", len(documentsToEmbed))
 	}
-	err := collection.AddDocuments(ctx, documentsToEmbed, 4)
-	if err != nil {
-		return fmt.Errorf("failed to add documents to collection: %w", err)
-	}
-	log.Printf("--- Added %d pointers to long-term RAG memory. ---", len(documentsToEmbed))
 	return nil
 }
 
-// Query now performs two-stage retrieval with nuanced re-ranking.
+// Query now uses the optimized retrieval logic.
 func (r *RAG) Query(ctx context.Context, query string, nResults int) (string, error) {
 	collection := r.db.GetCollection("long-term-memory", r.embedder)
 	if collection == nil {
@@ -180,31 +188,24 @@ func (r *RAG) Query(ctx context.Context, query string, nResults int) (string, er
 		return "", nil
 	}
 
-	// Stage 1: Query the vector DB to get the most relevant concise documents.
-	// We fetch more candidates than we need to give the re-ranking step more to work with.
 	candidateCount := min(nResults*2, collection.Count())
 	results, err := collection.Query(ctx, query, candidateCount, nil, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to query collection: %w", err)
 	}
 
-	// --- NEW: Nuanced Re-ranking Logic ---
 	sort.Slice(results, func(i, j int) bool {
 		scoreI := results[i].Similarity
 		scoreJ := results[j].Similarity
-
-		// Apply a weighted boost for "facts" to favor them in cases of similar scores.
 		if results[i].Metadata["role"] == "fact" {
-			scoreI *= 1.3 // A 30% boost
+			scoreI *= 1.3 // Using a 1.3 boost
 		}
 		if results[j].Metadata["role"] == "fact" {
 			scoreJ *= 1.3
 		}
-
 		return scoreI > scoreJ
 	})
 
-	// Trim the results down to the desired number after re-ranking.
 	if len(results) > nResults {
 		results = results[:nResults]
 	}
@@ -212,22 +213,27 @@ func (r *RAG) Query(ctx context.Context, query string, nResults int) (string, er
 	var context strings.Builder
 	context.WriteString("Relevant information from long-term memory:\n")
 
-	// Stage 2: Use the pointers from the re-ranked docs to fetch the full content.
+	// **OPTIMIZATION**: Use the more efficient retrieval logic.
 	for _, result := range results {
-		messageID, ok := result.Metadata["message_id"]
-		if !ok {
-			log.Printf("Warning: found a document in RAG without a message_id pointer.")
-			continue
-		}
-
-		fullContent, ok := r.messageStore[messageID]
-		if !ok {
-			log.Printf("Warning: could not find full message content for id %s.", messageID)
-			continue
-		}
-
 		role := result.Metadata["role"]
-		context.WriteString(fmt.Sprintf("- %s: %s\n", role, fullContent))
+
+		if role == "fact" {
+			// Facts need the messageStore lookup to get the full content.
+			messageID, ok := result.Metadata["message_id"]
+			if !ok {
+				log.Printf("Warning: fact document is missing a message_id.")
+				continue
+			}
+			fullContent, ok := r.messageStore[messageID]
+			if !ok {
+				log.Printf("Warning: could not find full fact content for id %s.", messageID)
+				continue
+			}
+			context.WriteString(fmt.Sprintf("- %s: %s\n", role, fullContent))
+		} else {
+			// Non-facts can use the content from the vector DB directly.
+			context.WriteString(fmt.Sprintf("- %s: %s\n", role, result.Content))
+		}
 	}
 
 	return context.String(), nil
