@@ -13,16 +13,17 @@ import (
 	"github.com/philippgille/chromem-go"
 )
 
-// RAG struct holds the state for our RAG implementation
+// RAG struct now includes the messageStore and summarizationModel.
 type RAG struct {
-	db           *chromem.DB
-	ollamaClient *api.Client
-	embedder     chromem.EmbeddingFunc
-	model        string
+	db                 *chromem.DB
+	messageStore       map[string]string // The "Document Store" for full content
+	ollamaClient       *api.Client
+	embedder           chromem.EmbeddingFunc
+	embeddingModel     string
+	summarizationModel string
 }
 
-// createOllamaEmbedding is a custom implementation of chromem.EmbeddingFunc
-// that uses the official ollama go client.
+// createOllamaEmbedding creates an embedding function using the Ollama API.
 func createOllamaEmbedding(ollamaClient *api.Client, modelName string) chromem.EmbeddingFunc {
 	return func(ctx context.Context, doc string) ([]float32, error) {
 		req := &api.EmbeddingRequest{
@@ -33,7 +34,6 @@ func createOllamaEmbedding(ollamaClient *api.Client, modelName string) chromem.E
 		if err != nil {
 			return nil, err
 		}
-		// The ollama API returns float64, but chromem-go expects float32, so we convert.
 		float32Embedding := make([]float32, len(resp.Embedding))
 		for i, v := range resp.Embedding {
 			float32Embedding[i] = float32(v)
@@ -43,126 +43,191 @@ func createOllamaEmbedding(ollamaClient *api.Client, modelName string) chromem.E
 }
 
 // New creates a new RAG instance.
-func New(ctx context.Context, ollamaClient *api.Client, model string) (*RAG, error) {
+func New(ctx context.Context, ollamaClient *api.Client, embeddingModel string, summarizationModel string) (*RAG, error) {
 	db := chromem.NewDB()
-	embedder := createOllamaEmbedding(ollamaClient, model)
+	embedder := createOllamaEmbedding(ollamaClient, embeddingModel)
 	_, err := db.GetOrCreateCollection("long-term-memory", nil, embedder)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create initial collection: %w", err)
 	}
 	rag := &RAG{
-		db:           db,
-		ollamaClient: ollamaClient,
-		embedder:     embedder,
-		model:        model,
+		db:                 db,
+		messageStore:       make(map[string]string),
+		ollamaClient:       ollamaClient,
+		embedder:           embedder,
+		embeddingModel:     embeddingModel,
+		summarizationModel: summarizationModel,
 	}
 	return rag, nil
 }
 
-// extractKeywords pulls out potential keywords from a text chunk.
-func extractKeywords(content string) []string {
-	re := regexp.MustCompile(`"([^"]+)"|(\b[A-Z][a-zA-Z]+\b)|(\b\d+\.\d+\b)|(\b\d+\b)`)
-	matches := re.FindAllString(content, -1)
-	var keywords []string
-	for _, match := range matches {
-		keywords = append(keywords, strings.ToLower(strings.Trim(match, `"`)))
+// generateSummary now correctly uses the Chat method to create a concise fact.
+func (r *RAG) generateSummary(ctx context.Context, code, result string) (string, error) {
+	systemPrompt := `You are an expert at creating concise, searchable facts. Based on the Python code and its output,
+	generate a single, descriptive sentence that captures the key finding or action.
+	Start the sentence with "Fact:". Output only the single sentence summary and nothing else.
+	Focus on statistical results, data characteristics, and analytical findings. Include specific numbers when relevant.`
+	userPrompt := fmt.Sprintf(`
+Code:
+%s
+Output:
+%s
+`, code, result)
+
+	messages := []api.Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
 	}
-	return keywords
+
+	req := &api.ChatRequest{
+		Model:    r.summarizationModel,
+		Messages: messages,
+		Stream:   &[]bool{false}[0],
+	}
+
+	var chatResponse api.ChatResponse
+	err := r.ollamaClient.Chat(ctx, req, func(resp api.ChatResponse) error {
+		chatResponse = resp
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("llm chat call failed for summary: %w", err)
+	}
+
+	if chatResponse.Message.Content == "" {
+		return "", fmt.Errorf("llm returned an empty summary")
+	}
+
+	return strings.TrimSpace(chatResponse.Message.Content), nil
 }
 
-// smartChunk splits content based on logical breaks.
-func smartChunk(content string) []string {
-	chunks := strings.Split(content, "\n\n")
-	var nonEmptyChunks []string
-	for _, chunk := range chunks {
-		if strings.TrimSpace(chunk) != "" {
-			nonEmptyChunks = append(nonEmptyChunks, chunk)
-		}
-	}
-	return nonEmptyChunks
-}
-
-// AddMessagesToStore adds conversational turns to the long-term vector store.
+// AddMessagesToStore now implements the pointer-based system.
 func (r *RAG) AddMessagesToStore(ctx context.Context, messages []api.Message) error {
 	collection := r.db.GetCollection("long-term-memory", r.embedder)
 	if collection == nil {
 		return fmt.Errorf("long-term memory collection not found")
 	}
-	var documents []chromem.Document
-	for _, message := range messages {
-		chunks := smartChunk(message.Content)
-		for _, chunk := range chunks {
-			docID := fmt.Sprintf("msg_%s", uuid.New().String())
-			documents = append(documents, chromem.Document{
-				ID:      docID,
-				Content: chunk,
-				Metadata: map[string]string{
-					"role": message.Role,
-				},
-			})
+
+	var documentsToEmbed []chromem.Document
+	for i := range messages {
+		msg := messages[i]
+		messageID := uuid.New().String()
+		fullContent := ""
+		roleForMeta := msg.Role
+
+		// Store the full content of the message exchange for tool calls
+		if i > 0 && msg.Role == "tool" && messages[i-1].Role == "assistant" {
+			prevMsg := messages[i-1]
+			fullContent = fmt.Sprintf("%s\n<execution_results>\n%s\n</execution_results>", prevMsg.Content, msg.Content)
+			roleForMeta = "fact" // Mark this exchange as a "fact"
+		} else {
+			fullContent = msg.Content
 		}
+
+		// Save the full, original content to our simple document store.
+		r.messageStore[messageID] = fullContent
+
+		var contentToEmbed string
+		// If it's a successful tool execution, generate a summary for embedding.
+		if roleForMeta == "fact" && !strings.Contains(msg.Content, "Error:") {
+			prevMsg := messages[i-1]
+			re := regexp.MustCompile(`(?s)<python>(.*)</python>`)
+			matches := re.FindStringSubmatch(prevMsg.Content)
+			if len(matches) > 1 {
+				code := strings.TrimSpace(matches[1])
+				result := strings.TrimSpace(msg.Content)
+				summary, err := r.generateSummary(ctx, code, result)
+				if err != nil {
+					log.Printf("Warning: could not generate summary for fact, embedding full content instead. Error: %v", err)
+					contentToEmbed = fullContent // Fallback to full content on error
+				} else {
+					contentToEmbed = summary
+				}
+			}
+		} else {
+			// For regular messages or errors, embed the full content directly.
+			contentToEmbed = fullContent
+		}
+
+		documentsToEmbed = append(documentsToEmbed, chromem.Document{
+			ID:      uuid.New().String(),
+			Content: contentToEmbed,
+			Metadata: map[string]string{
+				"role":       roleForMeta,
+				"message_id": messageID, // The "pointer" to the full content
+			},
+		})
 	}
-	if len(documents) == 0 {
+
+	if len(documentsToEmbed) == 0 {
 		return nil
 	}
-	err := collection.AddDocuments(ctx, documents, 4)
+	err := collection.AddDocuments(ctx, documentsToEmbed, 4)
 	if err != nil {
 		return fmt.Errorf("failed to add documents to collection: %w", err)
 	}
-	log.Printf("--- Added %d document chunks to long-term RAG memory. ---", len(documents))
+	log.Printf("--- Added %d pointers to long-term RAG memory. ---", len(documentsToEmbed))
 	return nil
 }
 
-// Query performs a semantic search followed by a keyword-based re-ranking.
+// Query now performs two-stage retrieval with nuanced re-ranking.
 func (r *RAG) Query(ctx context.Context, query string, nResults int) (string, error) {
 	collection := r.db.GetCollection("long-term-memory", r.embedder)
 	if collection == nil {
 		return "", fmt.Errorf("failed to get collection: collection not found")
 	}
-	docCount := collection.Count()
-	if docCount == 0 {
+	if collection.Count() == 0 {
 		return "", nil
 	}
 
-	// 1. Retrieve a larger set of candidates for re-ranking.
-	candidateCount := min(nResults*3, docCount)
-
+	// Stage 1: Query the vector DB to get the most relevant concise documents.
+	// We fetch more candidates than we need to give the re-ranking step more to work with.
+	candidateCount := min(nResults*2, collection.Count())
 	results, err := collection.Query(ctx, query, candidateCount, nil, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to query collection: %w", err)
 	}
 
-	// 2. Re-rank the results based on keyword matching.
-	queryKeywords := extractKeywords(query)
-	for i := range results {
-		contentKeywords := extractKeywords(results[i].Content)
-		scoreBoost := 0.0
-		for _, qk := range queryKeywords {
-			for _, ck := range contentKeywords {
-				if qk == ck {
-					scoreBoost += 0.1 // Add a boost for each keyword match
-				}
-			}
-		}
-		results[i].Similarity += float32(scoreBoost)
-	}
-
-	// Sort the results by their new, boosted similarity score.
+	// --- NEW: Nuanced Re-ranking Logic ---
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Similarity > results[j].Similarity
+		scoreI := results[i].Similarity
+		scoreJ := results[j].Similarity
+
+		// Apply a weighted boost for "facts" to favor them in cases of similar scores.
+		if results[i].Metadata["role"] == "fact" {
+			scoreI *= 1.3 // A 30% boost
+		}
+		if results[j].Metadata["role"] == "fact" {
+			scoreJ *= 1.3
+		}
+
+		return scoreI > scoreJ
 	})
 
-	// 3. Take the top N results from the re-ranked list.
-	finalResults := results
+	// Trim the results down to the desired number after re-ranking.
 	if len(results) > nResults {
-		finalResults = results[:nResults]
+		results = results[:nResults]
 	}
 
 	var context strings.Builder
 	context.WriteString("Relevant information from long-term memory:\n")
-	for _, result := range finalResults {
+
+	// Stage 2: Use the pointers from the re-ranked docs to fetch the full content.
+	for _, result := range results {
+		messageID, ok := result.Metadata["message_id"]
+		if !ok {
+			log.Printf("Warning: found a document in RAG without a message_id pointer.")
+			continue
+		}
+
+		fullContent, ok := r.messageStore[messageID]
+		if !ok {
+			log.Printf("Warning: could not find full message content for id %s.", messageID)
+			continue
+		}
+
 		role := result.Metadata["role"]
-		context.WriteString(fmt.Sprintf("- %s: %s\n", role, result.Content))
+		context.WriteString(fmt.Sprintf("- %s: %s\n", role, fullContent))
 	}
 
 	return context.String(), nil

@@ -31,26 +31,24 @@ func main() {
 	var ollamaClient *api.Client
 	ollamaHost := cfg.OllamaHost
 	if ollamaHost == "" {
-		// Default to localhost if not specified
 		ollamaHost = "http://127.0.0.1:11434"
 	}
-
 	cleanOllamaHost := strings.TrimSuffix(ollamaHost, "/")
-
 	ollamaURL, err := url.Parse(cleanOllamaHost)
 	if err != nil {
 		log.Fatalf("Invalid OLLAMA_HOST URL: %v", err)
 	}
 	ollamaClient = api.NewClient(ollamaURL, http.DefaultClient)
 
-	// Create the RAG instance, now passing the official client and embedding model name.
-	rag, err := rag.New(ctx, ollamaClient, cfg.EmbeddingModel)
+	// The call to rag.New is now simpler.
+	rag, err := rag.New(ctx, ollamaClient, cfg.EmbeddingModel, cfg.SummarizationModel)
 	if err != nil {
-		log.Fatalf("Failed to create RAG: %v", err)
+		log.Fatalf("Failed to create RAG instance: %v", err)
 	}
 
 	agent := agent.NewAgent(ctx, ollamaClient, pythonTool, rag, cfg.Model, cfg.MaxTurns, cfg.RAGResults)
 
+	// ... (scanner loop is unchanged) ...
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
 		fmt.Print("You: ")
@@ -61,10 +59,8 @@ func main() {
 		if input == "exit" {
 			break
 		}
-
 		agent.Run(ctx, input)
 	}
-
 	if err := scanner.Err(); err != nil {
 		log.Fatal(err)
 	}
