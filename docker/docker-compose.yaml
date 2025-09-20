@@ -14,7 +14,7 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    command: "-m ${MAIN_LLM_MODEL_PATH} --host 0.0.0.0 --port ${MAIN_LLM_PORT} -ngl ${N_GPU_LAYERS}"
+    command: "-m ${MAIN_LLM_MODEL_PATH} --host 0.0.0.0 --port ${MAIN_LLM_PORT} -ngl ${N_GPU_LAYERS} -c 16384 --temp 0.3 --top_p 0.9"
 
   embedding-llm:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
@@ -31,7 +31,7 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    command: "-m ${EMBEDDING_LLM_MODEL_PATH} --host 0.0.0.0 --port ${EMBEDDING_LLM_PORT} --embedding -ngl ${N_GPU_LAYERS}"
+    command: "-m ${EMBEDDING_LLM_MODEL_PATH} --host 0.0.0.0 --port ${EMBEDDING_LLM_PORT} --embedding -ngl ${N_GPU_LAYERS} --batch-size 2048"
 
   summarization-llm:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
@@ -48,7 +48,7 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    command: "-m ${SUMMARIZATION_LLM_MODEL_PATH} --host 0.0.0.0 --port ${SUMMARIZATION_LLM_PORT} -ngl ${N_GPU_LAYERS}"
+    command: "-m ${SUMMARIZATION_LLM_MODEL_PATH} --host 0.0.0.0 --port ${SUMMARIZATION_LLM_PORT} -ngl ${N_GPU_LAYERS} --temp 0.3 --top_p 0.9"
 
   python-executor:
     build:

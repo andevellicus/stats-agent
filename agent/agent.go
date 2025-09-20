@@ -152,37 +152,63 @@ func (a *Agent) Run(ctx context.Context, input string) {
 	messagesForLLM = append(messagesForLLM, a.history...)
 
 	for turn := 0; turn < a.cfg.MaxTurns; turn++ {
-		fmt.Print("Agent: ")
 		var llmResponseBuilder strings.Builder
-		err := getLLMResponse(ctx, a.cfg.MainLLMHost, messagesForLLM, func(chunk string) {
+		// We only print the "Agent: " prefix if we know it's a streaming, conversational response
+		isFirstChunk := true
+
+		err := getLLMResponse(ctx, a.cfg.MainLLMHost, messagesForLLM, a.cfg, func(chunk string) {
+			if isFirstChunk && !strings.Contains(chunk, "<python>") {
+				fmt.Print("Agent: ")
+			}
+			isFirstChunk = false
 			fmt.Print(chunk)
 			llmResponseBuilder.WriteString(chunk)
 		})
 
-		// Add a newline after the streaming is complete
-		fmt.Println()
+		llmResponse := llmResponseBuilder.String()
+		if !strings.HasSuffix(llmResponse, "\n") {
+			fmt.Println()
+		}
 
 		if err != nil {
 			log.Println("Error getting LLM response:", err)
 			break
 		}
-		llmResponse := llmResponseBuilder.String()
+
 		a.history = append(a.history, api.Message{Role: "assistant", Content: llmResponse})
 
 		_, execResult, wasCodeExecuted := a.pythonTool.ExecutePythonCode(ctx, llmResponse)
 
 		if !wasCodeExecuted {
-			break // The final answer has been streamed, so we can exit.
+			// The agent has provided a summary or conversational response, so the task is complete.
+			return
 		}
 
 		executionMessage := fmt.Sprintf("<execution_results>\n%s\n</execution_results>", execResult)
 		toolMessage := api.Message{Role: "tool", Content: executionMessage}
 		a.history = append(a.history, toolMessage)
-
 		messagesForLLM = a.history
 
 		if strings.Contains(execResult, "Error:") {
 			fmt.Println("\n--- Agent observed an error, attempting to self-correct ---")
 		}
+	}
+
+	// After the loop finishes (either by max turns or error), generate a final summary.
+	summaryPrompt := "Based on the analysis so far, what is the answer to my original question? Please provide the final summary."
+	finalMessages := append(messagesForLLM, api.Message{Role: "user", Content: summaryPrompt})
+
+	fmt.Print("Agent: ")
+	var finalResponseBuilder strings.Builder
+	err = getLLMResponse(ctx, a.cfg.MainLLMHost, finalMessages, a.cfg, func(chunk string) {
+		fmt.Print(chunk)
+		finalResponseBuilder.WriteString(chunk)
+	})
+	fmt.Println()
+
+	if err != nil {
+		log.Println("Error getting final LLM response:", err)
+	} else {
+		a.history = append(a.history, api.Message{Role: "assistant", Content: finalResponseBuilder.String()})
 	}
 }

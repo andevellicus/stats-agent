@@ -2,11 +2,10 @@ PYTHON_EXECUTOR_ADDRESS: "localhost:9999"
 MAIN_LLM_HOST: "http://localhost:8080"
 EMBEDDING_LLM_HOST: "http://localhost:8081"
 SUMMARIZATION_LLM_HOST: "http://localhost:8082"
-MAX_TURNS: 5
+MAX_TURNS: 10
 RAG_RESULTS: 5
-#CONTEXT_LENGTH: 131072
-CONTEXT_LENGTH: 10
+CONTEXT_LENGTH: 16384
 
-# --- Retry Logic ---
+# --- Retry Logic For Connecting to Llama.CPP ---
 MAX_RETRIES: 5
 RETRY_DELAY_SECONDS: 2

@@ -9,7 +9,7 @@ COPY executor.py .
 COPY .env .
 
 # Install any Python libraries you need
-RUN pip install pandas numpy matplotlib scikit-learn seaborn
+RUN pip install pandas numpy matplotlib scikit-learn seaborn statsmodels
 
 # Expose the port the server will listen on
 EXPOSE 9999
