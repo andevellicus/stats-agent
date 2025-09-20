@@ -5,8 +5,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -16,6 +17,9 @@ import (
 
 	"github.com/ollama/ollama/api"
 )
+
+// Define a specific error type for context window issues
+var ErrContextWindowExceeded = errors.New("context window exceeded")
 
 type LlamaCppStreamChoice struct {
 	Delta struct {
@@ -32,11 +36,16 @@ type LlamaCppChatRequest struct {
 }
 
 // getLLMResponse now includes a client-side timeout to prevent freezing on empty streams.
-func getLLMResponse(ctx context.Context, llamaCppHost string, messages []api.Message, cfg *config.Config, streamHandler func(string)) error {
+func getLLMResponse(ctx context.Context, llamaCppHost string, messages []api.Message, cfg *config.Config) (<-chan string, error) {
 	systemMessage := api.Message{
 		Role: "system",
 		Content: `
 You are an expert statistical data analyst. Think like a data scientist: explore, discover, interpret, and adapt.
+
+### Core Working Environment & State
+- **Persistent Session:** You are working in a persistent Python session. Variables, functions, and dataframes you define in one turn will be available in all subsequent turns. Do not reload data or repeat import statements unless necessary.
+- **Directory:** Your working directory is /app/workspace/. All files must be saved here.
+- **Tool Usage:** You MUST use <python></python> tags for all executable code. This is the only way your code will be run.
 
 ### Long-Term Memory & Context
 When you see a <memory>...</memory> block at conversation start:
@@ -45,8 +54,6 @@ When you see a <memory>...</memory> block at conversation start:
 
 ### Core Approach
 Work through problems naturally, explaining your reasoning as you go. After each code block, discuss what you found and why it matters. Let your discoveries guide your next steps.
-
-Use <python></python> tags for ALL Python code. This is the ONLY way code will execute.
 
 ### Statistical Rigor Requirements
 ALWAYS report:
@@ -200,85 +207,94 @@ for group in ['treatment', 'control']:
 - Stop when analysis is complete
 `,
 	}
-
 	chatMessages := append([]api.Message{systemMessage}, messages...)
-
 	reqBody := LlamaCppChatRequest{
 		Messages: chatMessages,
 		Stream:   true,
 	}
-
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
-		return fmt.Errorf("failed to marshal request body: %w", err)
+		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
 	url := fmt.Sprintf("%s/v1/chat/completions", llamaCppHost)
-	var resp *http.Response
 
-	for i := 0; i < cfg.MaxRetries; i++ {
-		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
-		if err != nil {
-			return fmt.Errorf("failed to create request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "text/event-stream")
-		req.Header.Set("Cache-Control", "no-cache")
-		req.Header.Set("Connection", "keep-alive")
+	// Create the channel that will stream the response
+	responseChan := make(chan string)
 
-		// Add a timeout to the client to prevent blocking on empty streams
-		client := &http.Client{
-			Timeout: 30 * time.Second, // Adjust timeout as needed
-		}
-		resp, err = client.Do(req)
-		if err != nil {
-			// Check if the error is a timeout, which we can treat as an empty response
-			if err, ok := err.(net.Error); ok && err.Timeout() {
-				return nil // It's not an error, just an empty stream.
+	go func() {
+		defer close(responseChan)
+
+		// This entire block now runs in the background
+		var resp *http.Response
+		var err error
+
+		for i := 0; i < cfg.MaxRetries; i++ {
+			req, reqErr := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+			if reqErr != nil {
+				log.Printf("Error creating request: %v", reqErr)
+				return
 			}
-			return fmt.Errorf("failed to send request: %w", err)
-		}
+			// ... (headers and client setup are the same) ...
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "text/event-stream")
+			req.Header.Set("Cache-Control", "no-cache")
+			req.Header.Set("Connection", "keep-alive")
 
-		if resp.StatusCode != http.StatusServiceUnavailable {
-			break
-		}
+			client := &http.Client{
+				Timeout: 30 * time.Second,
+			}
 
-		resp.Body.Close()
-		log.Printf("Model is loading, retrying in %v...", cfg.RetryDelaySeconds)
-		time.Sleep(cfg.RetryDelaySeconds)
-	}
-	defer resp.Body.Close()
+			resp, err = client.Do(req)
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					log.Println("Request timed out.")
+					return
+				}
+				log.Printf("Error sending request: %v", err)
+				return
+			}
 
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := ioutil.ReadAll(resp.Body)
-		return fmt.Errorf("llama.cpp server returned non-200 status: %s, body: %s", resp.Status, string(bodyBytes))
-	}
-
-	// Read the streaming response
-	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "data: ") {
-			data := strings.TrimPrefix(line, "data: ")
-			if data == "[DONE]" {
+			if resp.StatusCode != http.StatusServiceUnavailable {
 				break
 			}
+			resp.Body.Close()
+			time.Sleep(cfg.RetryDelaySeconds)
+		}
+		defer resp.Body.Close()
 
-			var streamResp LlamaCppStreamResponse
-			if err := json.Unmarshal([]byte(data), &streamResp); err != nil {
-				log.Printf("Error unmarshalling stream data: %v", err)
-				continue
+		if resp.StatusCode != http.StatusOK {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			if strings.Contains(string(bodyBytes), "exceeds the available context size") {
+				log.Println("Error: context window exceeded") // Log the specific error
+			} else {
+				log.Printf("Error: llama.cpp server returned non-200 status: %s", resp.Status)
 			}
+			return
+		}
 
-			if len(streamResp.Choices) > 0 {
-				streamHandler(streamResp.Choices[0].Delta.Content)
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "data: ") {
+				data := strings.TrimPrefix(line, "data: ")
+				if data == "[DONE]" {
+					break
+				}
+
+				var streamResp LlamaCppStreamResponse
+				if err := json.Unmarshal([]byte(data), &streamResp); err == nil {
+					if len(streamResp.Choices) > 0 {
+						responseChan <- streamResp.Choices[0].Delta.Content
+					}
+				}
 			}
 		}
-	}
 
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("error reading stream: %w", err)
-	}
+		if err := scanner.Err(); err != nil {
+			log.Printf("Error reading stream: %v", err)
+		}
+	}()
 
-	return nil
+	return responseChan, nil
 }

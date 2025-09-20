@@ -54,7 +54,7 @@ func (a *Agent) countTokens(ctx context.Context, text string) (int, error) {
 	url := fmt.Sprintf("%s/tokenize", a.cfg.MainLLMHost)
 	var resp *http.Response
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
 		if err != nil {
 			return 0, fmt.Errorf("failed to create tokenize request: %w", err)
@@ -101,7 +101,7 @@ func (a *Agent) manageMemory(ctx context.Context) {
 		}
 	}
 
-	contextWindowThreshold := int(float64(a.cfg.ContextLength) * 0.8)
+	contextWindowThreshold := int(float64(a.cfg.ContextLength) * 0.5)
 
 	if totalTokens > contextWindowThreshold {
 		cutoff := len(a.history) / 2
@@ -145,34 +145,59 @@ func (a *Agent) Run(ctx context.Context, input string) {
 		log.Println("Error querying RAG for long-term context:", err)
 	}
 
-	messagesForLLM := []api.Message{}
 	if longTermContext != "" {
-		messagesForLLM = append(messagesForLLM, api.Message{Role: "system", Content: longTermContext})
+		contextTokens, err := a.countTokens(ctx, longTermContext)
+		if err == nil && contextTokens > int(float64(a.cfg.ContextLength)*0.75) {
+			log.Printf("--- Proactive check: RAG context is too large (%d tokens). Summarizing... ---", contextTokens)
+			summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(ctx, longTermContext)
+			if summaryErr == nil {
+				longTermContext = summarizedContext
+			}
+		}
 	}
-	messagesForLLM = append(messagesForLLM, a.history...)
 
 	for turn := 0; turn < a.cfg.MaxTurns; turn++ {
+		messagesForLLM := []api.Message{}
+		if longTermContext != "" {
+			messagesForLLM = append(messagesForLLM, api.Message{Role: "system", Content: longTermContext})
+		}
+		messagesForLLM = append(messagesForLLM, a.history...)
+
 		var llmResponseBuilder strings.Builder
-		// We only print the "Agent: " prefix if we know it's a streaming, conversational response
 		isFirstChunk := true
 
-		err := getLLMResponse(ctx, a.cfg.MainLLMHost, messagesForLLM, a.cfg, func(chunk string) {
+		// **NEW**: Call the concurrent function and read from the channel
+		responseChan, err := getLLMResponse(ctx, a.cfg.MainLLMHost, messagesForLLM, a.cfg)
+		if err != nil {
+			log.Println("Error getting LLM response channel:", err)
+			break
+		}
+
+		// Read the streaming response from the channel
+		for chunk := range responseChan {
 			if isFirstChunk && !strings.Contains(chunk, "<python>") {
 				fmt.Print("Agent: ")
 			}
 			isFirstChunk = false
 			fmt.Print(chunk)
 			llmResponseBuilder.WriteString(chunk)
-		})
+		}
 
 		llmResponse := llmResponseBuilder.String()
 		if !strings.HasSuffix(llmResponse, "\n") {
 			fmt.Println()
 		}
 
-		if err != nil {
-			log.Println("Error getting LLM response:", err)
-			break
+		if llmResponse == "" {
+			log.Println("LLM response was empty, likely due to a context window error. Attempting to summarize context.")
+			// This is our reactive fallback
+			summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(ctx, longTermContext)
+			if summaryErr != nil {
+				log.Println("--- Recovery failed: Could not summarize RAG context. Aborting turn. ---")
+				break
+			}
+			longTermContext = summarizedContext
+			continue // Retry the turn
 		}
 
 		a.history = append(a.history, api.Message{Role: "assistant", Content: llmResponse})
@@ -180,35 +205,17 @@ func (a *Agent) Run(ctx context.Context, input string) {
 		_, execResult, wasCodeExecuted := a.pythonTool.ExecutePythonCode(ctx, llmResponse)
 
 		if !wasCodeExecuted {
-			// The agent has provided a summary or conversational response, so the task is complete.
 			return
 		}
 
 		executionMessage := fmt.Sprintf("<execution_results>\n%s\n</execution_results>", execResult)
 		toolMessage := api.Message{Role: "tool", Content: executionMessage}
 		a.history = append(a.history, toolMessage)
-		messagesForLLM = a.history
 
 		if strings.Contains(execResult, "Error:") {
 			fmt.Println("\n--- Agent observed an error, attempting to self-correct ---")
+		} else {
+			break
 		}
-	}
-
-	// After the loop finishes (either by max turns or error), generate a final summary.
-	summaryPrompt := "Based on the analysis so far, what is the answer to my original question? Please provide the final summary."
-	finalMessages := append(messagesForLLM, api.Message{Role: "user", Content: summaryPrompt})
-
-	fmt.Print("Agent: ")
-	var finalResponseBuilder strings.Builder
-	err = getLLMResponse(ctx, a.cfg.MainLLMHost, finalMessages, a.cfg, func(chunk string) {
-		fmt.Print(chunk)
-		finalResponseBuilder.WriteString(chunk)
-	})
-	fmt.Println()
-
-	if err != nil {
-		log.Println("Error getting final LLM response:", err)
-	} else {
-		a.history = append(a.history, api.Message{Role: "assistant", Content: finalResponseBuilder.String()})
 	}
 }

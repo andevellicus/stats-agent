@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"regexp"
@@ -21,6 +20,8 @@ import (
 	"github.com/philippgille/chromem-go"
 )
 
+const maxEmbeddingChars = 1500 // A safe character limit based on the model's 512 token limit.
+
 type RAG struct {
 	cfg          *config.Config
 	db           *chromem.DB
@@ -31,7 +32,6 @@ type LlamaCppEmbeddingRequest struct {
 	Content string `json:"content"`
 }
 
-// Corrected struct to handle the nested array response from the server
 type LlamaCppEmbeddingResponse []struct {
 	Embedding [][]float32 `json:"embedding"`
 }
@@ -45,7 +45,237 @@ type LlamaCppChatResponse struct {
 	} `json:"choices"`
 }
 
-// createLlamaCppEmbedding now correctly handles the nested array
+func New(cfg *config.Config) (*RAG, error) {
+	db := chromem.NewDB()
+	embedder := createLlamaCppEmbedding(cfg)
+	_, err := db.GetOrCreateCollection("long-term-memory", nil, embedder)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create initial collection: %w", err)
+	}
+	rag := &RAG{
+		cfg:          cfg,
+		db:           db,
+		messageStore: make(map[string]string),
+		embedder:     embedder,
+	}
+	return rag, nil
+}
+
+func (r *RAG) generateFactSummary(ctx context.Context, code, result string) (string, error) {
+	finalResult := result
+	if strings.Contains(result, "Error:") {
+		finalResult = compressMiddle(result, 4000, 1000, 2000)
+	}
+
+	systemPrompt := `You are an expert at creating concise, searchable facts.
+	Your task is to generate a single, descriptive sentence that captures the key finding, action, 
+	or error from the provided code and output.
+	CRITICAL RULE: The summary MUST be a single sentence and less than 100 words.
+	Start the sentence with "Fact:". Output only the single sentence summary and nothing else.`
+	userPrompt := fmt.Sprintf("Code:\n%s\nOutput:\n%s", code, finalResult)
+
+	messages := []api.Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
+	}
+
+	summary, err := getLLMResponse(ctx, r.cfg.SummarizationLLMHost, messages, r.cfg)
+	if err != nil {
+		return "", fmt.Errorf("llm chat call failed for summary: %w", err)
+	}
+	if summary == "" {
+		return "", fmt.Errorf("llm returned an empty summary")
+	}
+	return strings.TrimSpace(summary), nil
+}
+
+func (r *RAG) AddMessagesToStore(ctx context.Context, messages []api.Message) error {
+	collection := r.db.GetCollection("long-term-memory", r.embedder)
+	if collection == nil {
+		return fmt.Errorf("long-term memory collection not found")
+	}
+
+	var documentsToEmbed []chromem.Document
+	processedIndices := make(map[int]bool)
+
+	for i := range messages {
+		if processedIndices[i] {
+			continue
+		}
+
+		msg := messages[i]
+		var contentToEmbed string
+		metadata := make(map[string]string)
+		documentID := uuid.New().String() // Each message gets a unique parent ID
+
+		if msg.Role == "assistant" && i+1 < len(messages) && messages[i+1].Role == "tool" {
+			toolMsg := messages[i+1]
+			processedIndices[i] = true
+			processedIndices[i+1] = true
+
+			fullFactContent := fmt.Sprintf("%s\n<execution_results>\n%s\n</execution_results>", msg.Content, toolMsg.Content)
+			r.messageStore[documentID] = fullFactContent // Store the full fact
+			metadata["role"] = "fact"
+			metadata["document_id"] = documentID
+
+			re := regexp.MustCompile(`(?s)<python>(.*)</python>`)
+			matches := re.FindStringSubmatch(msg.Content)
+			if len(matches) > 1 {
+				code := strings.TrimSpace(matches[1])
+				result := strings.TrimSpace(toolMsg.Content)
+				summary, err := r.generateFactSummary(ctx, code, result)
+				if err != nil {
+					log.Printf("Warning: LLM fact summarization failed, using fallback. Error: %v", err)
+					contentToEmbed = "Fact: A code execution event occurred but could not be summarized."
+				} else {
+					contentToEmbed = summary
+				}
+			} else {
+				contentToEmbed = "Fact: An assistant action with a tool execution occurred."
+			}
+		} else {
+			r.messageStore[documentID] = msg.Content // Store the full user/assistant message
+			contentToEmbed = msg.Content
+			metadata["role"] = msg.Role
+			metadata["document_id"] = documentID
+		}
+
+		// Chunking is based on the final content we intend to embed.
+		if len(contentToEmbed) > maxEmbeddingChars {
+			log.Printf("--- Chunking oversized '%s' message for embedding. ---", metadata["role"])
+			for j := 0; j < len(contentToEmbed); j += maxEmbeddingChars {
+				end := min(j+maxEmbeddingChars, len(contentToEmbed))
+				chunkContent := contentToEmbed[j:end]
+
+				chunkDoc := chromem.Document{
+					ID:       uuid.New().String(),
+					Content:  chunkContent,
+					Metadata: metadata,
+				}
+				documentsToEmbed = append(documentsToEmbed, chunkDoc)
+			}
+		} else {
+			// If it's not oversized (which includes all summarized facts), add it as a single document.
+			doc := chromem.Document{
+				ID:       uuid.New().String(),
+				Content:  contentToEmbed,
+				Metadata: metadata,
+			}
+			documentsToEmbed = append(documentsToEmbed, doc)
+		}
+	}
+
+	if len(documentsToEmbed) > 0 {
+		err := collection.AddDocuments(ctx, documentsToEmbed, 4)
+		if err != nil {
+			return fmt.Errorf("failed to add documents to collection: %w", err)
+		}
+		log.Printf("--- Added %d document chunks to long-term RAG memory. ---", len(documentsToEmbed))
+	}
+	return nil
+}
+
+func (r *RAG) Query(ctx context.Context, query string, nResults int) (string, error) {
+	collection := r.db.GetCollection("long-term-memory", r.embedder)
+	if collection == nil {
+		return "", fmt.Errorf("failed to get collection: collection not found")
+	}
+	if collection.Count() == 0 {
+		return "", nil
+	}
+
+	candidateCount := min(nResults*5, collection.Count())
+	results, err := collection.Query(ctx, query, candidateCount, nil, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to query collection: %w", err)
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		scoreI := results[i].Similarity
+		scoreJ := results[j].Similarity
+
+		// Boost the score if the document is a fact
+		if results[i].Metadata["role"] == "fact" {
+			scoreI *= 1.4
+		}
+		if results[j].Metadata["role"] == "fact" {
+			scoreJ *= 1.4
+		}
+		return scoreI > scoreJ
+	})
+
+	var contextBuilder strings.Builder
+	contextBuilder.WriteString("<memory>\n")
+
+	processedDocIDs := make(map[string]bool)
+	addedDocs := 0
+
+	for _, result := range results {
+		if addedDocs >= nResults {
+			break
+		}
+
+		docID, ok := result.Metadata["document_id"]
+		if !ok {
+			log.Printf("Warning: document is missing a document_id, skipping.")
+			continue
+		}
+
+		if !processedDocIDs[docID] {
+			fullContent, contentOk := r.messageStore[docID]
+			if !contentOk {
+				log.Printf("Warning: could not find full content for document id %s.", docID)
+				continue
+			}
+
+			role := result.Metadata["role"]
+			contextBuilder.WriteString(fmt.Sprintf("- %s: %s\n", role, fullContent))
+
+			processedDocIDs[docID] = true
+			addedDocs++
+		}
+	}
+
+	contextBuilder.WriteString("</memory>\n")
+	return contextBuilder.String(), nil
+}
+
+// SummarizeLongTermMemory takes a large context string and condenses it.
+func (r *RAG) SummarizeLongTermMemory(ctx context.Context, context string) (string, error) {
+	systemPrompt := `You are an expert at summarizing conversational and analytical history.
+	The following text contains a series of facts and conversational turns.
+	Condense this information into a concise summary that captures the key findings, actions, and unanswered questions.
+	Focus on retaining the most critical information that would be needed to continue the analysis.`
+	userPrompt := fmt.Sprintf("History to summarize:\n%s", context)
+
+	messages := []api.Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
+	}
+
+	summary, err := getLLMResponse(ctx, r.cfg.SummarizationLLMHost, messages, r.cfg)
+	if err != nil {
+		return "", fmt.Errorf("llm chat call failed for memory summary: %w", err)
+	}
+
+	if summary == "" {
+		return "", fmt.Errorf("llm returned an empty summary for memory")
+	}
+
+	// Wrap the summary in the same tags for consistency
+	return fmt.Sprintf("<memory>\n- %s\n</memory>", strings.TrimSpace(summary)), nil
+}
+
+func compressMiddle(s string, maxLength int, preserveStart int, preserveEnd int) string {
+	if len(s) <= maxLength {
+		return s
+	}
+	if preserveStart+preserveEnd >= len(s) {
+		return s
+	}
+	return s[:preserveStart] + "\n\n[... content compressed ...]\n\n" + s[len(s)-preserveEnd:]
+}
+
 func createLlamaCppEmbedding(cfg *config.Config) chromem.EmbeddingFunc {
 	return func(ctx context.Context, doc string) ([]float32, error) {
 		reqBody := LlamaCppEmbeddingRequest{
@@ -105,49 +335,6 @@ func createLlamaCppEmbedding(cfg *config.Config) chromem.EmbeddingFunc {
 	}
 }
 
-func New(cfg *config.Config) (*RAG, error) {
-	db := chromem.NewDB()
-	embedder := createLlamaCppEmbedding(cfg)
-	_, err := db.GetOrCreateCollection("long-term-memory", nil, embedder)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create initial collection: %w", err)
-	}
-	rag := &RAG{
-		cfg:          cfg,
-		db:           db,
-		messageStore: make(map[string]string),
-		embedder:     embedder,
-	}
-	return rag, nil
-}
-func (r *RAG) generateSummary(ctx context.Context, code, result string) (string, error) {
-	systemPrompt := `You are an expert at creating concise, searchable facts. Based on the Python code and its output,
-	generate a single, descriptive sentence that captures the key finding or action.
-	Start the sentence with "Fact:". Output only the single sentence summary and nothing else.
-	Focus on statistical results, data characteristics, and analytical findings. Include specific numbers when relevant.`
-	userPrompt := fmt.Sprintf(`
-Code:
-%s
-Output:
-%s
-`, code, result)
-
-	messages := []api.Message{
-		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: userPrompt},
-	}
-
-	summary, err := getLLMResponse(ctx, r.cfg.SummarizationLLMHost, messages, r.cfg)
-	if err != nil {
-		return "", fmt.Errorf("llm chat call failed for summary: %w", err)
-	}
-
-	if summary == "" {
-		return "", fmt.Errorf("llm returned an empty summary")
-	}
-
-	return strings.TrimSpace(summary), nil
-}
 func getLLMResponse(ctx context.Context, llamaCppHost string, messages []api.Message, cfg *config.Config) (string, error) {
 	reqBody := LlamaCppChatRequest{
 		Messages: messages,
@@ -185,7 +372,7 @@ func getLLMResponse(ctx context.Context, llamaCppHost string, messages []api.Mes
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("failed to read llm response body: %w", err)
 	}
@@ -204,136 +391,4 @@ func getLLMResponse(ctx context.Context, llamaCppHost string, messages []api.Mes
 	}
 
 	return "", fmt.Errorf("no response choices from llama.cpp server")
-}
-func (r *RAG) AddMessagesToStore(ctx context.Context, messages []api.Message) error {
-	collection := r.db.GetCollection("long-term-memory", r.embedder)
-	if collection == nil {
-		return fmt.Errorf("long-term memory collection not found")
-	}
-
-	var documentsToEmbed []chromem.Document
-	processedIndices := make(map[int]bool) // Keep track of messages already handled
-
-	for i := range messages {
-		if processedIndices[i] {
-			continue // Skip messages that have already been processed as part of a pair
-		}
-
-		msg := messages[i]
-		doc := chromem.Document{
-			ID:       uuid.New().String(),
-			Metadata: make(map[string]string),
-		}
-
-		// Look ahead to see if the current message is an assistant message followed by a tool message
-		if msg.Role == "assistant" && i+1 < len(messages) && messages[i+1].Role == "tool" {
-			toolMsg := messages[i+1]
-
-			// Mark both messages as processed so they are not handled individually
-			processedIndices[i] = true
-			processedIndices[i+1] = true
-
-			// Combine them into a single "fact"
-			fullFactContent := fmt.Sprintf("%s\n<execution_results>\n%s\n</execution_results>", msg.Content, toolMsg.Content)
-			messageID := uuid.New().String()
-
-			// **OPTIMIZATION**: Only add the full fact to the messageStore.
-			r.messageStore[messageID] = fullFactContent
-			doc.Metadata["role"] = "fact"
-			doc.Metadata["message_id"] = messageID
-
-			// Generate a summary for the fact if it's not an error
-			if !strings.Contains(toolMsg.Content, "Error:") {
-				re := regexp.MustCompile(`(?s)<python>(.*)</python>`)
-				matches := re.FindStringSubmatch(msg.Content)
-				if len(matches) > 1 {
-					code := strings.TrimSpace(matches[1])
-					result := strings.TrimSpace(toolMsg.Content)
-					summary, err := r.generateSummary(ctx, code, result)
-					if err != nil {
-						log.Printf("Warning: could not generate summary for fact, embedding full content. Error: %v", err)
-						doc.Content = fullFactContent
-					} else {
-						doc.Content = summary
-					}
-				}
-			} else {
-				// For errors, embed the full content directly
-				doc.Content = fullFactContent
-			}
-		} else {
-			// This handles user messages and standalone assistant messages (that don't call tools)
-			doc.Content = msg.Content
-			doc.Metadata["role"] = msg.Role
-			// No message_id is needed as we'll use the content directly.
-		}
-
-		documentsToEmbed = append(documentsToEmbed, doc)
-	}
-
-	if len(documentsToEmbed) > 0 {
-		err := collection.AddDocuments(ctx, documentsToEmbed, 4)
-		if err != nil {
-			return fmt.Errorf("failed to add documents to collection: %w", err)
-		}
-		log.Printf("--- Added %d messages/facts to long-term RAG memory. ---", len(documentsToEmbed))
-	}
-	return nil
-}
-func (r *RAG) Query(ctx context.Context, query string, nResults int) (string, error) {
-	collection := r.db.GetCollection("long-term-memory", r.embedder)
-	if collection == nil {
-		return "", fmt.Errorf("failed to get collection: collection not found")
-	}
-	if collection.Count() == 0 {
-		return "", nil
-	}
-
-	candidateCount := min(nResults*2, collection.Count())
-	results, err := collection.Query(ctx, query, candidateCount, nil, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to query collection: %w", err)
-	}
-
-	sort.Slice(results, func(i, j int) bool {
-		scoreI := results[i].Similarity
-		scoreJ := results[j].Similarity
-		if results[i].Metadata["role"] == "fact" {
-			scoreI *= 1.3 // Using a 1.3 boost
-		}
-		if results[j].Metadata["role"] == "fact" {
-			scoreJ *= 1.3
-		}
-		return scoreI > scoreJ
-	})
-
-	if len(results) > nResults {
-		results = results[:nResults]
-	}
-
-	var contextBuilder strings.Builder
-	contextBuilder.WriteString("<memory>\n") // Opening tag
-
-	for _, result := range results {
-		role := result.Metadata["role"]
-
-		if role == "fact" {
-			messageID, ok := result.Metadata["message_id"]
-			if !ok {
-				log.Printf("Warning: fact document is missing a message_id.")
-				continue
-			}
-			fullContent, ok := r.messageStore[messageID]
-			if !ok {
-				log.Printf("Warning: could not find full fact content for id %s.", messageID)
-				continue
-			}
-			contextBuilder.WriteString(fmt.Sprintf("- %s: %s\n", role, fullContent))
-		} else {
-			contextBuilder.WriteString(fmt.Sprintf("- %s: %s\n", role, result.Content))
-		}
-	}
-
-	contextBuilder.WriteString("</memory>\n") // Closing tag
-	return contextBuilder.String(), nil
 }
