@@ -18,6 +18,8 @@ type Config struct {
 	ContextLength         int           `mapstructure:"CONTEXT_LENGTH"`
 	MaxRetries            int           `mapstructure:"MAX_RETRIES"`
 	RetryDelaySeconds     time.Duration `mapstructure:"RETRY_DELAY_SECONDS"`
+	ConsecutiveErrors     int           `mapstructure:"CONSECUTIVE_ERRORS"`
+	LLMRequestTimeout     time.Duration `mapstructure:"LLM_REQUEST_TIMEOUT"`
 }
 
 func Load() *Config {
@@ -36,6 +38,8 @@ func Load() *Config {
 	viper.SetDefault("CONTEXT_LENGTH", 4096)
 	viper.SetDefault("MAX_RETRIES", 5)
 	viper.SetDefault("RETRY_DELAY_SECONDS", 2)
+	viper.SetDefault("CONSECUTIVE_ERRORS", 3)
+	viper.SetDefault("LLM_REQUEST_TIMEOUT", 300)
 
 	if err := viper.ReadInConfig(); err != nil {
 		log.Printf("Warning: could not read config file, using defaults/env vars. Error: %s", err)
@@ -47,6 +51,7 @@ func Load() *Config {
 
 	// Convert seconds to a proper time.Duration
 	config.RetryDelaySeconds = config.RetryDelaySeconds * time.Second
+	config.LLMRequestTimeout = config.LLMRequestTimeout * time.Second
 
 	return &config
 }

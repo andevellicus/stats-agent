@@ -150,7 +150,12 @@ Then fix and proceed.
 - Limit categorical outputs: value_counts().head(10)
 
 ### Final Summary Requirements
-End with a summary that includes:
+When your analysis is complete and you have answered the user's question, you MUST wrap your final, conclusive summary in <summary></summary> tags. 
+This signals that you are finished with the task. 
+
+**CRITICAL RULE:** Do NOT use the <python> tool to print the summary. The summary must be a conversational response, not code.
+
+The summary must include:
 
 **Key Findings:**
 - Finding 1: [Exact statistics with N, percentages, test results]
@@ -235,14 +240,13 @@ for group in ['treatment', 'control']:
 				log.Printf("Error creating request: %v", reqErr)
 				return
 			}
-			// ... (headers and client setup are the same) ...
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Accept", "text/event-stream")
 			req.Header.Set("Cache-Control", "no-cache")
 			req.Header.Set("Connection", "keep-alive")
 
 			client := &http.Client{
-				Timeout: 30 * time.Second,
+				Timeout: cfg.LLMRequestTimeout,
 			}
 
 			resp, err = client.Do(req)
