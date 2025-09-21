@@ -1,0 +1,118 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "templ:generate",
+      "type": "shell",
+      "command": "${env:HOME}/go/bin/templ",
+      "args": ["generate", "web/templates"],
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "silent",
+        "focus": false,
+        "panel": "shared",
+        "showReuseMessage": true,
+        "clear": false
+      },
+      "problemMatcher": [],
+      "detail": "Generate Go code from templ templates"
+    },
+    {
+      "label": "templ:watch",
+      "type": "shell",
+      "command": "${env:HOME}/go/bin/templ",
+      "args": ["generate", "--watch", "web/templates"],
+      "group": "build",
+      "isBackground": true,
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "dedicated",
+        "showReuseMessage": true,
+        "clear": false
+      },
+      "problemMatcher": [
+        {
+          "owner": "templ",
+          "fileLocation": "absolute",
+          "pattern": {
+            "regexp": "^(.*):(\\d+):(\\d+):\\s+(warning|error):\\s+(.*)$",
+            "file": 1,
+            "line": 2,
+            "column": 3,
+            "severity": 4,
+            "message": 5
+          }
+        }
+      ],
+      "detail": "Watch and regenerate templ templates on changes"
+    },
+    {
+      "label": "tailwind:build",
+      "type": "shell",
+      "command": "tailwindcss",
+      "args": [
+        "-i", "./web/static/input.css",
+        "-o", "./web/static/output.css",
+        "--minify"
+      ],
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "silent",
+        "focus": false,
+        "panel": "shared",
+        "showReuseMessage": true,
+        "clear": false
+      },
+      "problemMatcher": [],
+      "detail": "Build and minify Tailwind CSS"
+    },
+    {
+      "label": "build:web-assets",
+      "dependsOrder": "parallel",
+      "dependsOn": ["templ:generate", "tailwind:build"],
+      "group": "build",
+      "detail": "Build all web assets (templ + tailwind)"
+    },
+    {
+      "label": "start:watchers",
+      "dependsOn": ["templ:watch"],
+      "group": "build",
+      "isBackground": true,
+      "detail": "Start file watchers for development"
+    },
+    {
+      "label": "go:build",
+      "type": "go",
+      "command": "build",
+      "args": ["-o", "stats-agent"],
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "silent",
+        "focus": false,
+        "panel": "shared",
+        "showReuseMessage": true,
+        "clear": false
+      },
+      "problemMatcher": "$go",
+      "detail": "Build Go binary"
+    },
+    {
+      "label": "build:all",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "build:web-assets",
+        "go:build"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "detail": "Build everything (web assets + Go binary)"
+    }
+  ]
+}

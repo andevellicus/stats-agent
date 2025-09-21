@@ -1,0 +1,93 @@
+package layout
+
+templ Base(title string) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="UTF-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+			<title>{ title } - Stats Agent</title>
+			<link rel="preconnect" href="https://fonts.googleapis.com"/>
+			<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+			<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
+			<link rel="stylesheet" href="/static/output.css"/>
+			<script src="https://unpkg.com/htmx.org@1.9.12"></script>
+			<script>
+				// Global SSE handler for loading indicators
+				document.addEventListener('DOMContentLoaded', function() {
+					// Find all SSE loader elements and start connections
+					const loaders = document.querySelectorAll('.sse-loader');
+					loaders.forEach(function(loader) {
+						const sessionId = loader.getAttribute('data-session-id');
+						const messageId = loader.getAttribute('data-message-id');
+
+						if (!sessionId || !messageId) return;
+
+						const eventSource = new EventSource('/chat/stream?session_id=' + encodeURIComponent(sessionId) + '&user_message_id=' + encodeURIComponent(messageId));
+
+						eventSource.onmessage = function(event) {
+							console.log('SSE Message:', event.data);
+							if (event.data.includes('<div')) {
+								// Remove loading indicator and add agent response
+								loader.remove();
+								document.getElementById('messages').insertAdjacentHTML('beforeend', event.data);
+								eventSource.close();
+							}
+						};
+
+						eventSource.onerror = function(event) {
+							console.error('SSE Error:', event);
+							loader.innerHTML = '<div class="chat-message chat-message--agent"><div class="font-medium text-xs mb-1 text-gray-500">Stats Agent</div><div class="text-red-500 text-xs">Connection error</div></div>';
+							eventSource.close();
+						};
+					});
+				});
+
+				// Also handle dynamically added SSE loaders
+				document.addEventListener('htmx:afterSettle', function() {
+					const newLoaders = document.querySelectorAll('.sse-loader:not([data-sse-initialized])');
+					newLoaders.forEach(function(loader) {
+						loader.setAttribute('data-sse-initialized', 'true');
+						const sessionId = loader.getAttribute('data-session-id');
+						const messageId = loader.getAttribute('data-message-id');
+
+						if (!sessionId || !messageId) return;
+
+						const eventSource = new EventSource('/chat/stream?session_id=' + encodeURIComponent(sessionId) + '&user_message_id=' + encodeURIComponent(messageId));
+
+						eventSource.onmessage = function(event) {
+							console.log('SSE Message:', event.data);
+							if (event.data.includes('<div')) {
+								loader.remove();
+								document.getElementById('messages').insertAdjacentHTML('beforeend', event.data);
+								eventSource.close();
+							}
+						};
+
+						eventSource.onerror = function(event) {
+							console.error('SSE Error:', event);
+							loader.innerHTML = '<div class="chat-message chat-message--agent"><div class="font-medium text-xs mb-1 text-gray-500">Stats Agent</div><div class="text-red-500 text-xs">Connection error</div></div>';
+							eventSource.close();
+						};
+					});
+				});
+			</script>
+		</head>
+		<body class="bg-gray-50 min-h-screen font-sans antialiased">
+			{ children... }
+		</body>
+	</html>
+}
+
+templ Header(title string, sessionID string) {
+	<header class="bg-white shadow-sm border-b border-gray-200 px-4 py-3">
+		<div class="flex items-center justify-between">
+			<h1 class="text-xl font-semibold text-gray-900">{ title }</h1>
+			if sessionID != "" {
+				<div class="text-xs text-gray-500 font-mono bg-gray-50 px-2 py-1 rounded">
+					{ sessionID }
+				</div>
+			}
+		</div>
+	</header>
+}

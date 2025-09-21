@@ -1,0 +1,32 @@
+package components
+
+templ ChatForm(sessionID string) {
+	<div class="bg-white border-t border-gray-200 p-4">
+		<form
+			hx-post="/chat"
+			hx-target="#messages"
+			hx-swap="beforeend"
+			hx-on::after-request="this.reset(); document.getElementById('message-input').focus()"
+			class="flex gap-3"
+		>
+			<input type="hidden" name="session_id" value={ sessionID }/>
+			<div class="flex-1">
+				<input
+					id="message-input"
+					name="message"
+					type="text"
+					placeholder="Ask me about your data or upload a dataset..."
+					class="chat-input"
+					autofocus
+					required
+				/>
+			</div>
+			<button type="submit" class="btn-primary">
+				Send
+			</button>
+		</form>
+		<div class="mt-2 text-xs text-gray-500">
+			Tip: You can ask me to analyze CSV files, perform statistical tests, create visualizations, and more!
+		</div>
+	</div>
+}

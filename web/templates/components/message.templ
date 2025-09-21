@@ -1,0 +1,50 @@
+package components
+
+import "stats-agent/web/types"
+
+templ UserMessage(msg types.ChatMessage) {
+	<div class="flex justify-end">
+		<div class="chat-message chat-message--user">
+			<div class="font-medium text-xs mb-1 opacity-90">You</div>
+			<div class="whitespace-pre-wrap">{ msg.Content }</div>
+		</div>
+	</div>
+	<!-- Simple SSE connection for agent response -->
+	<div id={ "loading-" + msg.ID }
+		 class="flex justify-start sse-loader"
+		 data-session-id={ msg.SessionID }
+		 data-message-id={ msg.ID }>
+		<div class="chat-message chat-message--agent">
+			<div class="font-medium text-xs mb-1 text-gray-500">Stats Agent</div>
+			<div class="flex items-center space-x-2">
+				<div class="flex space-x-1">
+					<div class="loading-dots"></div>
+					<div class="loading-dots"></div>
+					<div class="loading-dots"></div>
+				</div>
+				<span class="text-gray-400 text-xs">Analyzing...</span>
+			</div>
+		</div>
+	</div>
+}
+
+templ AgentMessage(msg types.ChatMessage) {
+	<div class="flex justify-start">
+		<div class="chat-message chat-message--agent">
+			<div class="font-medium text-xs mb-1 text-gray-500">Stats Agent</div>
+			<div class="whitespace-pre-wrap text-gray-700">{ msg.Content }</div>
+		</div>
+	</div>
+}
+
+templ WelcomeMessage() {
+	<div class="flex justify-center">
+		<div class="bg-blue-50 border border-blue-200 rounded-xl p-3 max-w-md text-center">
+			<div class="text-blue-800 font-medium text-sm">Welcome to Stats Agent</div>
+			<div class="text-blue-600 text-xs mt-1 leading-relaxed">
+				I'm here to help you analyze data and answer statistical questions.
+				You can upload datasets and ask me to perform various analyses.
+			</div>
+		</div>
+	</div>
+}

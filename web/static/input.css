@@ -1,0 +1,146 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom components for the stats agent */
+@layer components {
+  .chat-message {
+    max-width: 24rem;
+    border-radius: 0.75rem;
+    padding: 0.75rem 1rem;
+    line-height: 1.5;
+    font-size: 0.9rem;
+  }
+
+  @media (min-width: 1024px) {
+    .chat-message {
+      max-width: 32rem;
+      font-size: 0.95rem;
+    }
+  }
+
+  .chat-message--user {
+    background-color: rgb(59 130 246);
+    color: white;
+    font-weight: 400;
+  }
+
+  .chat-message--agent {
+    background-color: white;
+    color: rgb(55 65 81);
+    border: 1px solid rgb(229 231 235);
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  }
+
+  .chat-input {
+    width: 100%;
+    padding: 0.875rem 1rem;
+    border: 2px solid rgb(229 231 235);
+    border-radius: 0.75rem;
+    transition: all 0.15s ease-in-out;
+    font-size: 0.95rem;
+    font-weight: 400;
+  }
+
+  .chat-input:focus {
+    outline: none;
+    border-color: rgb(59 130 246);
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+  }
+
+  .btn-primary {
+    padding: 0.875rem 1.25rem;
+    background-color: rgb(59 130 246);
+    color: white;
+    font-weight: 500;
+    border-radius: 0.75rem;
+    transition: all 0.2s ease-in-out;
+    font-size: 0.9rem;
+  }
+
+  .btn-primary:hover {
+    background-color: rgb(37 99 235);
+    transform: translateY(-1px);
+  }
+
+  .btn-primary:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px rgb(59 130 246), 0 0 0 4px rgba(59, 130, 246, 0.2);
+  }
+
+  .code-block {
+    background-color: rgb(15 23 42);
+    border-radius: 0.75rem;
+    overflow: hidden;
+    margin: 0.75rem 0;
+    border: 1px solid rgb(30 41 59);
+  }
+
+  .code-header {
+    background-color: rgb(30 41 59);
+    padding: 0.625rem 1rem;
+    color: rgb(148 163 184);
+    font-size: 0.8rem;
+    font-weight: 500;
+    font-family: theme('fontFamily.mono');
+    border-bottom: 1px solid rgb(51 65 85);
+  }
+
+  .code-content {
+    padding: 1rem;
+    color: rgb(34 197 94);
+    font-size: 0.85rem;
+    font-family: theme('fontFamily.mono');
+    line-height: 1.6;
+  }
+
+  .output-content {
+    padding: 1rem;
+    color: rgb(203 213 225);
+    font-size: 0.85rem;
+    background-color: rgb(30 41 59);
+    font-family: theme('fontFamily.mono');
+    line-height: 1.6;
+  }
+
+  .loading-dots {
+    width: 0.5rem;
+    height: 0.5rem;
+    background-color: rgb(156 163 175);
+    border-radius: 50%;
+    animation: bounce 1s infinite;
+  }
+
+  .loading-dots:nth-child(2) {
+    animation-delay: 0.1s;
+  }
+
+  .loading-dots:nth-child(3) {
+    animation-delay: 0.2s;
+  }
+}
+
+/* Custom scrollbar for chat */
+@layer utilities {
+  .chat-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(203 213 225) rgb(241 245 249);
+  }
+
+  .chat-scroll::-webkit-scrollbar {
+    width: 0.25rem;
+  }
+
+  .chat-scroll::-webkit-scrollbar-track {
+    background-color: rgb(241 245 249);
+  }
+
+  .chat-scroll::-webkit-scrollbar-thumb {
+    background-color: rgb(203 213 225);
+    border-radius: 0.125rem;
+  }
+
+  .chat-scroll::-webkit-scrollbar-thumb:hover {
+    background-color: rgb(148 163 184);
+  }
+}

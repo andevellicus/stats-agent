@@ -1,0 +1,35 @@
+package pages
+
+import "stats-agent/web/templates/layout"
+import "stats-agent/web/templates/components"
+
+templ ChatPage(sessionID string) {
+	@layout.Base("Chat") {
+		<div class="flex flex-col h-screen max-w-4xl mx-auto">
+			@layout.Header("Stats Agent Chat", sessionID)
+
+			<!-- Chat Container -->
+			<div class="flex-1 flex flex-col min-h-0">
+				<!-- Messages Area -->
+				<div id="messages" class="flex-1 overflow-y-auto chat-scroll p-3 space-y-3">
+					@components.WelcomeMessage()
+				</div>
+
+				<!-- Input Area -->
+				@components.ChatForm(sessionID)
+			</div>
+		</div>
+
+		<script>
+			// Auto-scroll to bottom when new messages are added
+			const messagesContainer = document.getElementById('messages');
+			const observer = new MutationObserver(() => {
+				messagesContainer.scrollTop = messagesContainer.scrollHeight;
+			});
+			observer.observe(messagesContainer, { childList: true });
+
+			// Focus input on page load
+			document.getElementById('message-input').focus();
+		</script>
+	}
+}

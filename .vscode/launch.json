@@ -10,6 +10,32 @@
       // This is the most important part!
       // It runs your app in the integrated terminal.
       "console": "integratedTerminal"
+    },
+    {
+      "name": "Run Go Agent (Web Mode)",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}",
+      "args": ["-web", "-port=5050"],
+      "preLaunchTask": "build:web-assets"
+    },
+    {
+      "name": "Run Go Agent (Web Mode - Port 3000)",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}",
+      "args": ["-web", "-port=3000"],
+      "preLaunchTask": "build:web-assets"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Debug Web Mode with Watchers",
+      "configurations": ["Run Go Agent (Web Mode)"],
+      "preLaunchTask": "start:watchers",
+      "stopAll": true
     }
   ]
 }
