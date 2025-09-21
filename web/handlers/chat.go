@@ -160,20 +160,37 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWriter, session *ChatSession, input string, sessionID string, userMessageID string) {
 	agentMessageID := generateMessageID()
 
-	// Send a simple initial message to establish connection
-	fmt.Fprintf(w, "data: %s\n\n", agentMessageID)
+	// Send initial loading indicator replacement message
+	fmt.Fprintf(w, "data: <div id=\"%s\" class=\"flex justify-start\"><div class=\"chat-message chat-message--agent\"><div class=\"font-medium text-xs mb-1 text-gray-500\">Stats Agent</div><div id=\"content-%s\" class=\"whitespace-pre-wrap text-gray-700\"></div></div></div>\n\n", agentMessageID, agentMessageID)
 	w.(http.Flusher).Flush()
 
-	// Run the agent and collect the response
-	response, err := h.webAgent.RunForWeb(ctx, input)
+	// Send script to remove loading indicator
+	fmt.Fprintf(w, "data: <script>document.getElementById('loading-%s')?.remove();</script>\n\n", userMessageID)
+	w.(http.Flusher).Flush()
+
+	// Buffer to collect streaming content
+	var contentBuffer strings.Builder
+
+	// Run the agent with streaming callback
+	response, err := h.webAgent.RunForWebStream(ctx, input, func(chunk string) {
+		contentBuffer.WriteString(chunk)
+		// Send incremental content update
+		escapedContent := strings.ReplaceAll(contentBuffer.String(), `"`, `\"`)
+		escapedContent = strings.ReplaceAll(escapedContent, "\n", "\\n")
+		escapedContent = strings.ReplaceAll(escapedContent, "\r", "")
+
+		fmt.Fprintf(w, "data: <script>document.getElementById('content-%s').textContent = `%s`;</script>\n\n", agentMessageID, escapedContent)
+		w.(http.Flusher).Flush()
+	})
+
 	if err != nil {
 		h.logger.Error("Agent execution failed", zap.Error(err))
-		fmt.Fprintf(w, "data: ERROR: %v\n\n", err)
+		fmt.Fprintf(w, "data: <script>document.getElementById('content-%s').innerHTML = '<div class=\"text-red-500\">Error: %v</div>';</script>\n\n", agentMessageID, err)
 		w.(http.Flusher).Flush()
 		return
 	}
 
-	// Format the response
+	// Format final response with parsed content
 	var responseContent strings.Builder
 	if response.Content != "" {
 		responseContent.WriteString(response.Content)
@@ -192,8 +209,18 @@ func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWr
 		}
 	}
 
-	// Send the final response as a simple agent message component
+	// Send final formatted content
 	finalContent := responseContent.String()
+	if finalContent != "" {
+		escapedFinal := strings.ReplaceAll(finalContent, `"`, `\"`)
+		escapedFinal = strings.ReplaceAll(escapedFinal, "\n", "\\n")
+		escapedFinal = strings.ReplaceAll(escapedFinal, "\r", "")
+
+		fmt.Fprintf(w, "data: <script>document.getElementById('content-%s').textContent = `%s`;</script>\n\n", agentMessageID, escapedFinal)
+		w.(http.Flusher).Flush()
+	}
+
+	// Add final message to session
 	agentMessage := types.ChatMessage{
 		Role:      "assistant",
 		Content:   finalContent,
@@ -201,25 +228,9 @@ func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWr
 		SessionID: sessionID,
 	}
 
-	// Add to session
 	session.mu.Lock()
 	session.Messages = append(session.Messages, agentMessage)
 	session.mu.Unlock()
-
-	// Render the agent message component
-	var buf strings.Builder
-	component := components.AgentMessage(agentMessage)
-	err = component.Render(ctx, &buf)
-	if err != nil {
-		h.logger.Error("Failed to render agent message", zap.Error(err))
-		fmt.Fprintf(w, "data: <div class=\"text-red-500\">Error rendering response</div>\n\n")
-		w.(http.Flusher).Flush()
-		return
-	}
-
-	// Send the rendered component
-	fmt.Fprintf(w, "data: %s\n\n", buf.String())
-	w.(http.Flusher).Flush()
 }
 
 func generateSessionID() string {

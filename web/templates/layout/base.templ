@@ -28,10 +28,18 @@ templ Base(title string) {
 						eventSource.onmessage = function(event) {
 							console.log('SSE Message:', event.data);
 							if (event.data.includes('<div')) {
-								// Remove loading indicator and add agent response
-								loader.remove();
+								// Add the agent response container
 								document.getElementById('messages').insertAdjacentHTML('beforeend', event.data);
-								eventSource.close();
+							} else if (event.data.includes('<script>')) {
+								// Execute streaming updates
+								const scriptContent = event.data.match(/<script>(.*?)<\/script>/);
+								if (scriptContent && scriptContent[1]) {
+									try {
+										eval(scriptContent[1]);
+									} catch (e) {
+										console.error('Error executing SSE script:', e);
+									}
+								}
 							}
 						};
 
@@ -58,9 +66,18 @@ templ Base(title string) {
 						eventSource.onmessage = function(event) {
 							console.log('SSE Message:', event.data);
 							if (event.data.includes('<div')) {
-								loader.remove();
+								// Add the agent response container
 								document.getElementById('messages').insertAdjacentHTML('beforeend', event.data);
-								eventSource.close();
+							} else if (event.data.includes('<script>')) {
+								// Execute streaming updates
+								const scriptContent = event.data.match(/<script>(.*?)<\/script>/);
+								if (scriptContent && scriptContent[1]) {
+									try {
+										eval(scriptContent[1]);
+									} catch (e) {
+										console.error('Error executing SSE script:', e);
+									}
+								}
 							}
 						};
 
