@@ -206,15 +206,10 @@ func (a *Agent) Run(ctx context.Context, input string) {
 
 		a.history = append(a.history, api.Message{Role: "assistant", Content: llmResponse})
 
-		// Check for the summary tag to end the conversation gracefully.
-		if strings.Contains(llmResponse, "<summary>") {
-			return // The task is complete.
-		}
-
 		_, execResult, wasCodeExecuted := a.pythonTool.ExecutePythonCode(ctx, llmResponse)
 
 		if !wasCodeExecuted {
-			break
+			return
 		}
 
 		executionMessage := fmt.Sprintf("<execution_results>\n%s\n</execution_results>", execResult)
@@ -230,23 +225,25 @@ func (a *Agent) Run(ctx context.Context, input string) {
 		}
 	}
 
-	// This final summary is triggered after the loop finishes for any reason.
-	summaryPrompt := "Based on the analysis so far, what is the answer to my original question? Please provide the final summary as outlined in your instructions, including the <summary> tag."
-	finalMessages := append(messagesForLLM, api.Message{Role: "user", Content: summaryPrompt})
+	/*
+		// This final summary is triggered after the loop finishes for any reason.
+		summaryPrompt := "Based on the analysis so far, what is the answer to my original question? Please provide the final summary as outlined in your instructions, including the <summary> tag."
+		finalMessages := append(messagesForLLM, api.Message{Role: "user", Content: summaryPrompt})
 
-	fmt.Print("Agent: ")
-	var finalResponseBuilder strings.Builder
-	finalResponseChan, err := getLLMResponse(ctx, a.cfg.MainLLMHost, finalMessages, a.cfg)
-	if err != nil {
-		log.Println("Error getting final LLM response channel:", err)
-		return
-	}
+		fmt.Print("Agent: ")
+		var finalResponseBuilder strings.Builder
+		finalResponseChan, err := getLLMResponse(ctx, a.cfg.MainLLMHost, finalMessages, a.cfg)
+		if err != nil {
+			log.Println("Error getting final LLM response channel:", err)
+			return
+		}
 
-	for chunk := range finalResponseChan {
-		fmt.Print(chunk)
-		finalResponseBuilder.WriteString(chunk)
-	}
-	fmt.Println()
+		for chunk := range finalResponseChan {
+			fmt.Print(chunk)
+			finalResponseBuilder.WriteString(chunk)
+		}
+		fmt.Println()
 
-	a.history = append(a.history, api.Message{Role: "assistant", Content: finalResponseBuilder.String()})
+		a.history = append(a.history, api.Message{Role: "assistant", Content: finalResponseBuilder.String()})
+	*/
 }
