@@ -101,20 +101,18 @@ func (t *StatefulPythonTool) ExecutePythonCode(ctx context.Context, text string)
 	}
 
 	t.logger.Info("Executing Python code", zap.String("code", pythonCode))
-	fmt.Println("\n--- Executing Python Code ---")
-	fmt.Printf("Code to execute:\n%s\n", pythonCode)
-	fmt.Println("--- Execution Output ---")
 
 	execResult, err := t.Call(ctx, pythonCode)
 	if err != nil {
 		t.logger.Error("Error executing Python code", zap.Error(err))
-		fmt.Printf("Error executing Python: %v\n", err)
 		execResult = "Error: " + err.Error()
 	} else {
 		t.logger.Debug("Python code executed successfully", zap.String("result_preview", execResult[:min(100, len(execResult))]))
-		fmt.Print(execResult)
 	}
-	fmt.Println("\n--- End Execution ---")
+
+	// ONLY print the execution result, wrapped in tags.
+	// This is the only output from this function that goes to the web UI stream.
+	fmt.Printf("<execution_result>%s</execution_result>", execResult)
 
 	return pythonCode, execResult, true
 }

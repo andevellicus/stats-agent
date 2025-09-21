@@ -2,109 +2,54 @@ package layout
 
 templ Base(title string) {
 	<!DOCTYPE html>
-	<html lang="en">
+	<html lang="en" class="h-full bg-gradient-to-br from-slate-50 to-blue-50">
 		<head>
 			<meta charset="UTF-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 			<title>{ title } - Stats Agent</title>
+			<!-- Modern Font Loading -->
 			<link rel="preconnect" href="https://fonts.googleapis.com"/>
 			<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-			<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
-			<link rel="stylesheet" href="/static/output.css"/>
+			<link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&display=swap" rel="stylesheet"/>
+			<link rel="stylesheet" href="/static/css/output.css"/>
+			<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"/>
 			<script src="https://unpkg.com/htmx.org@1.9.12"></script>
-			<script>
-				// Global SSE handler for loading indicators
-				document.addEventListener('DOMContentLoaded', function() {
-					// Find all SSE loader elements and start connections
-					const loaders = document.querySelectorAll('.sse-loader');
-					loaders.forEach(function(loader) {
-						const sessionId = loader.getAttribute('data-session-id');
-						const messageId = loader.getAttribute('data-message-id');
-
-						if (!sessionId || !messageId) return;
-
-						const eventSource = new EventSource('/chat/stream?session_id=' + encodeURIComponent(sessionId) + '&user_message_id=' + encodeURIComponent(messageId));
-
-						eventSource.onmessage = function(event) {
-							console.log('SSE Message:', event.data);
-							if (event.data.includes('<div')) {
-								// Add the agent response container
-								document.getElementById('messages').insertAdjacentHTML('beforeend', event.data);
-							} else if (event.data.includes('<script>')) {
-								// Execute streaming updates
-								const scriptContent = event.data.match(/<script>(.*?)<\/script>/);
-								if (scriptContent && scriptContent[1]) {
-									try {
-										eval(scriptContent[1]);
-									} catch (e) {
-										console.error('Error executing SSE script:', e);
-									}
-								}
-							}
-						};
-
-						eventSource.onerror = function(event) {
-							console.error('SSE Error:', event);
-							loader.innerHTML = '<div class="chat-message chat-message--agent"><div class="font-medium text-xs mb-1 text-gray-500">Stats Agent</div><div class="text-red-500 text-xs">Connection error</div></div>';
-							eventSource.close();
-						};
-					});
-				});
-
-				// Also handle dynamically added SSE loaders
-				document.addEventListener('htmx:afterSettle', function() {
-					const newLoaders = document.querySelectorAll('.sse-loader:not([data-sse-initialized])');
-					newLoaders.forEach(function(loader) {
-						loader.setAttribute('data-sse-initialized', 'true');
-						const sessionId = loader.getAttribute('data-session-id');
-						const messageId = loader.getAttribute('data-message-id');
-
-						if (!sessionId || !messageId) return;
-
-						const eventSource = new EventSource('/chat/stream?session_id=' + encodeURIComponent(sessionId) + '&user_message_id=' + encodeURIComponent(messageId));
-
-						eventSource.onmessage = function(event) {
-							console.log('SSE Message:', event.data);
-							if (event.data.includes('<div')) {
-								// Add the agent response container
-								document.getElementById('messages').insertAdjacentHTML('beforeend', event.data);
-							} else if (event.data.includes('<script>')) {
-								// Execute streaming updates
-								const scriptContent = event.data.match(/<script>(.*?)<\/script>/);
-								if (scriptContent && scriptContent[1]) {
-									try {
-										eval(scriptContent[1]);
-									} catch (e) {
-										console.error('Error executing SSE script:', e);
-									}
-								}
-							}
-						};
-
-						eventSource.onerror = function(event) {
-							console.error('SSE Error:', event);
-							loader.innerHTML = '<div class="chat-message chat-message--agent"><div class="font-medium text-xs mb-1 text-gray-500">Stats Agent</div><div class="text-red-500 text-xs">Connection error</div></div>';
-							eventSource.close();
-						};
-					});
-				});
-			</script>
+			<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+			<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+			<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+			<script src="/static/js/app.js" defer></script>
 		</head>
-		<body class="bg-gray-50 min-h-screen font-sans antialiased">
-			{ children... }
+		<body class="h-full font-sans antialiased text-gray-900 bg-gradient-to-br from-slate-50 to-blue-50">
+			<div class="flex flex-col h-full">
+				@Header("Stats Agent", "")
+				<main class="flex-1 overflow-y-auto">
+					{ children... }
+				</main>
+			</div>
 		</body>
 	</html>
 }
 
 templ Header(title string, sessionID string) {
-	<header class="bg-white shadow-sm border-b border-gray-200 px-4 py-3">
-		<div class="flex items-center justify-between">
-			<h1 class="text-xl font-semibold text-gray-900">{ title }</h1>
-			if sessionID != "" {
-				<div class="text-xs text-gray-500 font-mono bg-gray-50 px-2 py-1 rounded">
-					{ sessionID }
+	<header class="bg-gradient-to-r from-slate-900 via-purple-900 to-slate-900 text-white shadow-xl border-b border-white/10">
+		<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+			<div class="flex items-center justify-between h-16 backdrop-blur-sm">
+				<div class="flex items-center">
+					<div class="flex-shrink-0">
+						<svg class="h-8 w-8 text-indigo-400 drop-shadow-sm" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+						</svg>
+					</div>
+					<div class="ml-3">
+						<h1 class="text-xl font-bold font-display bg-gradient-to-r from-white to-blue-100 bg-clip-text text-transparent drop-shadow-sm tracking-tight">{ title }</h1>
+					</div>
 				</div>
-			}
+				if sessionID != "" {
+					<div class="text-sm font-mono bg-black/20 backdrop-blur-sm border border-white/10 px-3 py-1 rounded-lg">
+						{ sessionID }
+					</div>
+				}
+			</div>
 		</div>
 	</header>
 }

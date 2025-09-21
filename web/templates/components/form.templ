@@ -1,32 +1,28 @@
 package components
 
 templ ChatForm(sessionID string) {
-	<div class="bg-white border-t border-gray-200 p-4">
-		<form
-			hx-post="/chat"
-			hx-target="#messages"
-			hx-swap="beforeend"
-			hx-on::after-request="this.reset(); document.getElementById('message-input').focus()"
-			class="flex gap-3"
-		>
-			<input type="hidden" name="session_id" value={ sessionID }/>
-			<div class="flex-1">
-				<input
-					id="message-input"
-					name="message"
-					type="text"
-					placeholder="Ask me about your data or upload a dataset..."
-					class="chat-input"
-					autofocus
-					required
-				/>
-			</div>
-			<button type="submit" class="btn-primary">
-				Send
-			</button>
-		</form>
-		<div class="mt-2 text-xs text-gray-500">
-			Tip: You can ask me to analyze CSV files, perform statistical tests, create visualizations, and more!
+	<form
+		hx-post="/chat"
+		hx-target="#messages"
+		hx-swap="beforeend"
+		hx-on::after-request="this.reset(); document.getElementById('message-input').focus()"
+		class="flex items-end space-x-4"
+	>
+		<input type="hidden" name="session_id" value={ sessionID }/>
+		<div class="flex-1">
+			<textarea
+				id="message-input"
+				name="message"
+				placeholder="Ask a question about your data..."
+				class="w-full p-4 border border-gray-300 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none shadow-sm hover:shadow-md transition-shadow duration-200 bg-white/90 backdrop-blur-sm"
+				rows="1"
+				autofocus
+				required
+				onkeydown="submitOnEnter(event)"
+			></textarea>
 		</div>
-	</div>
+		<button type="submit" class="p-4 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-2xl hover:from-indigo-700 hover:to-purple-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 transition-all duration-200 shadow-lg hover:shadow-xl transform hover:scale-105">
+			<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+		</button>
+	</form>
 }

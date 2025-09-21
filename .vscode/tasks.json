@@ -54,8 +54,8 @@
       "type": "shell",
       "command": "tailwindcss",
       "args": [
-        "-i", "./web/static/input.css",
-        "-o", "./web/static/output.css",
+        "-i", "./web/static/css/input.css",
+        "-o", "./web/static/css/output.css",
         "--minify"
       ],
       "group": "build",

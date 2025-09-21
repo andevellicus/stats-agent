@@ -3,20 +3,57 @@ module.exports = {
   content: [
     "./web/templates/**/*.{templ,go}",
     "./web/static/**/*.html",
+    "./web/static/js/**/*.js",
   ],
   theme: {
     extend: {
-      colors: {
-        'gray-850': '#1e293b',
+      fontFamily: {
+        'sans': [
+          'Inter Variable',
+          'Inter',
+          'SF Pro Display',
+          '-apple-system',
+          'BlinkMacSystemFont',
+          'Segoe UI Variable',
+          'Segoe UI',
+          'system-ui',
+          'sans-serif'
+        ],
+        'mono': [
+          'JetBrains Mono Variable',
+          'JetBrains Mono',
+          'Fira Code',
+          'SF Mono',
+          'Monaco',
+          'Cascadia Code',
+          'Roboto Mono',
+          'Consolas',
+          'monospace'
+        ],
+        'display': [
+          'Cal Sans',
+          'Inter Variable',
+          'Inter',
+          'SF Pro Display',
+          'system-ui',
+          'sans-serif'
+        ]
       },
       animation: {
-        'bounce-slow': 'bounce 1.5s infinite',
+        'bounce-slow': 'bounce 2s infinite',
+        'fade-in': 'fadeIn 0.5s ease-in-out',
+        'slide-up': 'slideUp 0.3s ease-out',
       },
-      fontFamily: {
-        'mono': ['JetBrains Mono', 'Monaco', 'Consolas', 'Courier New', 'monospace'],
-        'sans': ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'Helvetica Neue', 'Arial', 'sans-serif'],
-      },
+      keyframes: {
+        fadeIn: {
+          '0%': { opacity: '0' },
+          '100%': { opacity: '1' },
+        },
+        slideUp: {
+          '0%': { transform: 'translateY(10px)', opacity: '0' },
+          '100%': { transform: 'translateY(0)', opacity: '1' },
+        }
+      }
     },
   },
-  plugins: [],
 }

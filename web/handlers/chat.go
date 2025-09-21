@@ -2,8 +2,12 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
+	"os"
 	"stats-agent/agent"
 	"stats-agent/web/templates/components"
 	"stats-agent/web/templates/pages"
@@ -33,6 +37,11 @@ type ChatSession struct {
 type ChatRequest struct {
 	Message   string `json:"message" form:"message"`
 	SessionID string `json:"session_id" form:"session_id"`
+}
+
+type StreamData struct {
+	Type    string `json:"type"`
+	Content string `json:"content,omitempty"`
 }
 
 func NewChatHandler(agent *agent.Agent, logger *zap.Logger) *ChatHandler {
@@ -119,8 +128,10 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 	c.Header("Connection", "keep-alive")
 	c.Header("Access-Control-Allow-Origin", "*")
 
-	// Test connection first
-	fmt.Fprintf(c.Writer, "data: Connection established\n\n")
+	// Test connection first - send as JSON
+	data := StreamData{Type: "connection_established"}
+	jsonData, _ := json.Marshal(data)
+	fmt.Fprintf(c.Writer, "data: %s\n\n", jsonData)
 	c.Writer.(http.Flusher).Flush()
 
 	h.mu.RLock()
@@ -160,77 +171,163 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWriter, session *ChatSession, input string, sessionID string, userMessageID string) {
 	agentMessageID := generateMessageID()
 
-	// Send initial loading indicator replacement message
-	fmt.Fprintf(w, "data: <div id=\"%s\" class=\"flex justify-start\"><div class=\"chat-message chat-message--agent\"><div class=\"font-medium text-xs mb-1 text-gray-500\">Stats Agent</div><div id=\"content-%s\" class=\"whitespace-pre-wrap text-gray-700\"></div></div></div>\n\n", agentMessageID, agentMessageID)
-	w.(http.Flusher).Flush()
+	// Create a mutex to synchronize writes to the response writer
+	var writeMu sync.Mutex
 
-	// Send script to remove loading indicator
-	fmt.Fprintf(w, "data: <script>document.getElementById('loading-%s')?.remove();</script>\n\n", userMessageID)
-	w.(http.Flusher).Flush()
+	// Helper function to safely write SSE data
+	writeSSEData := func(data StreamData) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
 
-	// Buffer to collect streaming content
-	var contentBuffer strings.Builder
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 
-	// Run the agent with streaming callback
-	response, err := h.webAgent.RunForWebStream(ctx, input, func(chunk string) {
-		contentBuffer.WriteString(chunk)
-		// Send incremental content update
-		escapedContent := strings.ReplaceAll(contentBuffer.String(), `"`, `\"`)
-		escapedContent = strings.ReplaceAll(escapedContent, "\n", "\\n")
-		escapedContent = strings.ReplaceAll(escapedContent, "\r", "")
+		jsonData, err := json.Marshal(data)
+		if err != nil {
+			return err
+		}
 
-		fmt.Fprintf(w, "data: <script>document.getElementById('content-%s').textContent = `%s`;</script>\n\n", agentMessageID, escapedContent)
-		w.(http.Flusher).Flush()
-	})
+		_, err = fmt.Fprintf(w, "data: %s\n\n", jsonData)
+		if err != nil {
+			return err
+		}
 
-	if err != nil {
-		h.logger.Error("Agent execution failed", zap.Error(err))
-		fmt.Fprintf(w, "data: <script>document.getElementById('content-%s').innerHTML = '<div class=\"text-red-500\">Error: %v</div>';</script>\n\n", agentMessageID, err)
-		w.(http.Flusher).Flush()
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		return nil
+	}
+
+	// Send message to remove loading indicator
+	if err := writeSSEData(StreamData{Type: "remove_loader", Content: "loading-" + userMessageID}); err != nil {
+		h.logger.Error("Failed to send remove loader message", zap.Error(err))
 		return
 	}
 
-	// Format final response with parsed content
-	var responseContent strings.Builder
-	if response.Content != "" {
-		responseContent.WriteString(response.Content)
+	// Send message to create the agent message container
+	if err := writeSSEData(StreamData{Type: "create_container", Content: agentMessageID}); err != nil {
+		h.logger.Error("Failed to send create container message", zap.Error(err))
+		return
 	}
 
-	// Add code blocks and outputs
-	for i, code := range response.CodeBlocks {
-		responseContent.WriteString("\n\n**Python Code:**\n```python\n")
-		responseContent.WriteString(code)
-		responseContent.WriteString("\n```")
+	// Pipe to capture stdout
+	r, pipeW, err := os.Pipe()
+	if err != nil {
+		h.logger.Error("Failed to create pipe", zap.Error(err))
+		writeSSEData(StreamData{Type: "error", Content: "Internal server error"})
+		return
+	}
 
-		if i < len(response.OutputBlocks) {
-			responseContent.WriteString("\n\n**Output:**\n```\n")
-			responseContent.WriteString(response.OutputBlocks[i])
-			responseContent.WriteString("\n```")
+	originalStdout := os.Stdout
+	os.Stdout = pipeW
+	log.SetOutput(pipeW)
+
+	// Channel to signal when agent is done
+	agentDone := make(chan error, 1)
+	streamDone := make(chan error, 1)
+
+	// Buffer to accumulate all output for final processing
+	var outputBuffer strings.Builder
+	var bufferMu sync.Mutex
+
+	// Goroutine to stream the captured output
+	go func() {
+		defer close(streamDone)
+
+		buf := make([]byte, 1024)
+		for {
+			select {
+			case <-ctx.Done():
+				streamDone <- ctx.Err()
+				return
+			default:
+			}
+
+			n, err := r.Read(buf)
+			if err != nil {
+				if err != io.EOF {
+					h.logger.Error("Error reading from stdout pipe", zap.Error(err))
+					streamDone <- err
+				} else {
+					streamDone <- nil
+				}
+				return
+			}
+
+			if n > 0 {
+				chunk := string(buf[:n])
+
+				// Add to buffer for final processing
+				bufferMu.Lock()
+				outputBuffer.WriteString(chunk)
+				bufferMu.Unlock()
+
+				// Stream raw chunks for real-time display (without tag processing)
+				data := StreamData{Type: "chunk", Content: chunk}
+				if err := writeSSEData(data); err != nil {
+					h.logger.Error("Error writing chunk data", zap.Error(err))
+					streamDone <- err
+					return
+				}
+			}
+		}
+	}()
+
+	// Run the agent
+	go func() {
+		defer func() {
+			// Restore stdout
+			os.Stdout = originalStdout
+			log.SetOutput(originalStdout)
+			pipeW.Close()
+			r.Close()
+		}()
+
+		defer close(agentDone)
+
+		h.agent.Run(ctx, input)
+		agentDone <- nil
+	}()
+
+	// Wait for either agent completion or context cancellation
+	select {
+	case <-ctx.Done():
+		h.logger.Info("Context cancelled, closing SSE connection")
+		return
+	case err := <-agentDone:
+		if err != nil {
+			h.logger.Error("Agent execution failed", zap.Error(err))
+			writeSSEData(StreamData{Type: "error", Content: "Agent execution failed"})
+			return
+		}
+
+		// Wait a moment for any remaining output to be streamed
+		select {
+		case <-streamDone:
+		case <-ctx.Done():
+			return
+		}
+
+		// Process the complete accumulated output for tag conversion
+		bufferMu.Lock()
+		completeOutput := outputBuffer.String()
+		bufferMu.Unlock()
+
+		processedOutput := processAgentOutput(completeOutput)
+
+		// Send the fully processed content
+		if err := writeSSEData(StreamData{Type: "final_content", Content: processedOutput}); err != nil {
+			h.logger.Error("Failed to send final content", zap.Error(err))
+		}
+
+		// Send end of stream message
+		if err := writeSSEData(StreamData{Type: "end"}); err != nil {
+			h.logger.Error("Failed to send end message", zap.Error(err))
 		}
 	}
-
-	// Send final formatted content
-	finalContent := responseContent.String()
-	if finalContent != "" {
-		escapedFinal := strings.ReplaceAll(finalContent, `"`, `\"`)
-		escapedFinal = strings.ReplaceAll(escapedFinal, "\n", "\\n")
-		escapedFinal = strings.ReplaceAll(escapedFinal, "\r", "")
-
-		fmt.Fprintf(w, "data: <script>document.getElementById('content-%s').textContent = `%s`;</script>\n\n", agentMessageID, escapedFinal)
-		w.(http.Flusher).Flush()
-	}
-
-	// Add final message to session
-	agentMessage := types.ChatMessage{
-		Role:      "assistant",
-		Content:   finalContent,
-		ID:        agentMessageID,
-		SessionID: sessionID,
-	}
-
-	session.mu.Lock()
-	session.Messages = append(session.Messages, agentMessage)
-	session.mu.Unlock()
 }
 
 func generateSessionID() string {
@@ -239,4 +336,24 @@ func generateSessionID() string {
 
 func generateMessageID() string {
 	return "msg_" + uuid.New().String()
+}
+
+// StreamBuffer holds partial content for processing streaming tags
+type StreamBuffer struct {
+	buffer strings.Builder
+	mu     sync.Mutex
+}
+
+// processAgentOutput converts <python> and <execution_result> tags to markdown code blocks
+// This version handles streaming content by maintaining a buffer for complete processing
+func processAgentOutput(content string) string {
+	// Convert Python code blocks
+	content = strings.ReplaceAll(content, "<python>", "\n```python\n")
+	content = strings.ReplaceAll(content, "</python>", "\n```\n")
+
+	// Convert execution result blocks
+	content = strings.ReplaceAll(content, "<execution_result>", "\n```\n")
+	content = strings.ReplaceAll(content, "</execution_result>", "\n```\n")
+
+	return content
 }
