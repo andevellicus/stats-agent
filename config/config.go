@@ -1,10 +1,11 @@
 package config
 
 import (
-	"log"
+	"fmt"
 	"time"
 
 	"github.com/spf13/viper"
+	"go.uber.org/zap"
 )
 
 // Config holds the application's configuration
@@ -22,7 +23,7 @@ type Config struct {
 	LLMRequestTimeout     time.Duration `mapstructure:"LLM_REQUEST_TIMEOUT"`
 }
 
-func Load() *Config {
+func Load(logger *zap.Logger) *Config {
 	var config Config
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
@@ -42,11 +43,17 @@ func Load() *Config {
 	viper.SetDefault("LLM_REQUEST_TIMEOUT", 300)
 
 	if err := viper.ReadInConfig(); err != nil {
-		log.Printf("Warning: could not read config file, using defaults/env vars. Error: %s", err)
+		if logger != nil {
+			logger.Warn("Could not read config file, using defaults/env vars", zap.Error(err))
+		}
 	}
 
 	if err := viper.Unmarshal(&config); err != nil {
-		log.Fatalf("Unable to decode into struct, %v", err)
+		if logger != nil {
+			logger.Fatal("Unable to decode into struct", zap.Error(err))
+		} else {
+			panic(fmt.Sprintf("Unable to decode config into struct: %v", err))
+		}
 	}
 
 	// Convert seconds to a proper time.Duration

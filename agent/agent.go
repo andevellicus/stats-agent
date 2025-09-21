@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"stats-agent/config"
 	"stats-agent/rag"
@@ -16,6 +15,7 @@ import (
 	"io"
 
 	"github.com/ollama/ollama/api"
+	"go.uber.org/zap"
 )
 
 type Agent struct {
@@ -23,6 +23,7 @@ type Agent struct {
 	pythonTool *tools.StatefulPythonTool
 	rag        *rag.RAG
 	history    []api.Message
+	logger     *zap.Logger
 }
 
 type TokenizeRequest struct {
@@ -33,12 +34,13 @@ type TokenizeResponse struct {
 	Tokens []int `json:"tokens"`
 }
 
-func NewAgent(cfg *config.Config, pythonTool *tools.StatefulPythonTool, rag *rag.RAG) *Agent {
-	log.Printf("Using context window size: %d", cfg.ContextLength)
+func NewAgent(cfg *config.Config, pythonTool *tools.StatefulPythonTool, rag *rag.RAG, logger *zap.Logger) *Agent {
+	logger.Info("Agent initialized", zap.Int("context_window_size", cfg.ContextLength))
 	return &Agent{
 		cfg:        cfg,
 		pythonTool: pythonTool,
 		rag:        rag,
+		logger:     logger,
 	}
 }
 func (a *Agent) countTokens(ctx context.Context, text string) (int, error) {
@@ -71,7 +73,7 @@ func (a *Agent) countTokens(ctx context.Context, text string) (int, error) {
 		}
 
 		resp.Body.Close()
-		log.Printf("Tokenize endpoint is loading, retrying in %v...", 2*time.Second)
+		a.logger.Warn("Tokenize endpoint is loading, retrying", zap.Duration("retry_delay", 2*time.Second))
 		time.Sleep(2 * time.Second)
 	}
 	defer resp.Body.Close()
@@ -94,7 +96,7 @@ func (a *Agent) manageMemory(ctx context.Context) {
 	for _, msg := range a.history {
 		tokens, err := a.countTokens(ctx, msg.Content)
 		if err != nil {
-			log.Printf("Warning: could not count tokens for a message, falling back to character count. Error: %v", err)
+			a.logger.Warn("Could not count tokens for a message, falling back to character count", zap.Error(err))
 			totalTokens += len(msg.Content) // Fallback
 		} else {
 			totalTokens += tokens
@@ -112,7 +114,7 @@ func (a *Agent) manageMemory(ctx context.Context) {
 
 			if lastMessageInBatch.Role == "assistant" && strings.Contains(lastMessageInBatch.Content, "<python>") && firstMessageOutOfBatch.Role == "tool" {
 				cutoff++
-				log.Println("--- Adjusted memory cutoff to prevent splitting an assistant-tool pair. ---")
+				a.logger.Info("Adjusted memory cutoff to prevent splitting an assistant-tool pair")
 			}
 		}
 
@@ -124,11 +126,11 @@ func (a *Agent) manageMemory(ctx context.Context) {
 
 		err := a.rag.AddMessagesToStore(ctx, messagesToStore)
 		if err != nil {
-			log.Printf("Error adding messages to long-term memory: %v", err)
+			a.logger.Error("Error adding messages to long-term memory", zap.Error(err))
 		}
 
 		a.history = a.history[cutoff:]
-		log.Printf("--- Memory threshold reached. Moved %d oldest messages to long-term RAG store. ---", len(messagesToStore))
+		a.logger.Info("Memory threshold reached. Moved messages to long-term RAG store", zap.Int("messages_moved", len(messagesToStore)))
 	}
 }
 
@@ -138,13 +140,13 @@ func (a *Agent) Run(ctx context.Context, input string) {
 
 	longTermContext, err := a.rag.Query(ctx, input, a.cfg.RAGResults)
 	if err != nil {
-		log.Println("Error querying RAG for long-term context:", err)
+		a.logger.Error("Error querying RAG for long-term context", zap.Error(err))
 	}
 
 	if longTermContext != "" {
 		contextTokens, err := a.countTokens(ctx, longTermContext)
 		if err == nil && contextTokens > int(float64(a.cfg.ContextLength)*0.75) {
-			log.Printf("--- Proactive check: RAG context is too large (%d tokens). Summarizing... ---", contextTokens)
+			a.logger.Info("Proactive check: RAG context is too large, summarizing", zap.Int("context_tokens", contextTokens))
 			summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(ctx, longTermContext)
 			if summaryErr == nil {
 				longTermContext = summarizedContext
@@ -160,7 +162,7 @@ func (a *Agent) Run(ctx context.Context, input string) {
 		a.manageMemory(ctx)
 		// Check for consecutive errors to break out of a death loop
 		if consecutiveErrors >= a.cfg.ConsecutiveErrors {
-			log.Printf("--- Agent produced %d consecutive errors. Breaking loop to request user feedback. ---", a.cfg.ConsecutiveErrors)
+			a.logger.Warn("Agent produced consecutive errors, breaking loop to request user feedback", zap.Int("consecutive_errors", a.cfg.ConsecutiveErrors))
 			break
 		}
 
@@ -173,9 +175,9 @@ func (a *Agent) Run(ctx context.Context, input string) {
 		var llmResponseBuilder strings.Builder
 		isFirstChunk := true
 
-		responseChan, err := getLLMResponse(ctx, a.cfg.MainLLMHost, messagesForLLM, a.cfg)
+		responseChan, err := getLLMResponse(ctx, a.cfg.MainLLMHost, messagesForLLM, a.cfg, a.logger)
 		if err != nil {
-			log.Println("Error getting LLM response channel:", err)
+			a.logger.Error("Error getting LLM response channel", zap.Error(err))
 			break
 		}
 
@@ -194,10 +196,10 @@ func (a *Agent) Run(ctx context.Context, input string) {
 		}
 
 		if llmResponse == "" {
-			log.Println("LLM response was empty, likely due to a context window error. Attempting to summarize context.")
+			a.logger.Warn("LLM response was empty, likely due to a context window error. Attempting to summarize context")
 			summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(ctx, longTermContext)
 			if summaryErr != nil {
-				log.Println("--- Recovery failed: Could not summarize RAG context. Aborting turn. ---")
+				a.logger.Error("Recovery failed: Could not summarize RAG context. Aborting turn", zap.Error(summaryErr))
 				break
 			}
 			longTermContext = summarizedContext

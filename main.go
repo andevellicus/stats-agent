@@ -4,32 +4,41 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"stats-agent/agent"
 	"stats-agent/config"
 	"stats-agent/rag"
 	"stats-agent/tools"
+
+	"go.uber.org/zap"
 )
 
 func main() {
 	ctx := context.Background()
-	cfg := config.Load()
 
-	pythonTool, err := tools.NewStatefulPythonTool(ctx, cfg.PythonExecutorAddress)
+	// Initialize logger
+	logger, err := config.InitLogger()
 	if err != nil {
-		log.Fatalf("Failed to initialize Python tool: %v", err)
+		fmt.Printf("Failed to initialize logger: %v\n", err)
+		os.Exit(1)
+	}
+	defer config.Cleanup()
+	cfg := config.Load(logger)
+
+	pythonTool, err := tools.NewStatefulPythonTool(ctx, cfg.PythonExecutorAddress, logger)
+	if err != nil {
+		logger.Fatal("Failed to initialize Python tool", zap.Error(err))
 	}
 	defer pythonTool.Close()
 
 	// Pass the specific hosts to the RAG service
-	rag, err := rag.New(cfg)
+	rag, err := rag.New(cfg, logger)
 	if err != nil {
-		log.Fatalf("Failed to initialize RAG: %v", err)
+		logger.Fatal("Failed to initialize RAG", zap.Error(err))
 	}
 
 	// Pass the main host to the Agent
-	statsAgent := agent.NewAgent(cfg, pythonTool, rag)
+	statsAgent := agent.NewAgent(cfg, pythonTool, rag, logger)
 
 	scanner := bufio.NewScanner(os.Stdin)
 	fmt.Println("Welcome to the Stats Agent. How can I help you today?")
@@ -44,6 +53,6 @@ func main() {
 	}
 
 	if err := scanner.Err(); err != nil {
-		log.Println("Error reading from stdin:", err)
+		logger.Error("Error reading from stdin", zap.Error(err))
 	}
 }

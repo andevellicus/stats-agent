@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"regexp"
 	"sort"
@@ -18,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ollama/ollama/api"
 	"github.com/philippgille/chromem-go"
+	"go.uber.org/zap"
 )
 
 const maxEmbeddingChars = 1500 // A safe character limit based on the model's 512 token limit.
@@ -27,6 +27,7 @@ type RAG struct {
 	db           *chromem.DB
 	messageStore map[string]string
 	embedder     chromem.EmbeddingFunc
+	logger       *zap.Logger
 }
 type LlamaCppEmbeddingRequest struct {
 	Content string `json:"content"`
@@ -45,9 +46,9 @@ type LlamaCppChatResponse struct {
 	} `json:"choices"`
 }
 
-func New(cfg *config.Config) (*RAG, error) {
+func New(cfg *config.Config, logger *zap.Logger) (*RAG, error) {
 	db := chromem.NewDB()
-	embedder := createLlamaCppEmbedding(cfg)
+	embedder := createLlamaCppEmbedding(cfg, logger)
 	_, err := db.GetOrCreateCollection("long-term-memory", nil, embedder)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create initial collection: %w", err)
@@ -57,6 +58,7 @@ func New(cfg *config.Config) (*RAG, error) {
 		db:           db,
 		messageStore: make(map[string]string),
 		embedder:     embedder,
+		logger:       logger,
 	}
 	return rag, nil
 }
@@ -79,7 +81,7 @@ func (r *RAG) generateFactSummary(ctx context.Context, code, result string) (str
 		{Role: "user", Content: userPrompt},
 	}
 
-	summary, err := getLLMResponse(ctx, r.cfg.SummarizationLLMHost, messages, r.cfg)
+	summary, err := getLLMResponse(ctx, r.cfg.SummarizationLLMHost, messages, r.cfg, r.logger)
 	if err != nil {
 		return "", fmt.Errorf("llm chat call failed for summary: %w", err)
 	}
@@ -125,7 +127,7 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, messages []api.Message) er
 				result := strings.TrimSpace(toolMsg.Content)
 				summary, err := r.generateFactSummary(ctx, code, result)
 				if err != nil {
-					log.Printf("Warning: LLM fact summarization failed, using fallback. Error: %v", err)
+					r.logger.Warn("LLM fact summarization failed, using fallback", zap.Error(err))
 					contentToEmbed = "Fact: A code execution event occurred but could not be summarized."
 				} else {
 					contentToEmbed = summary
@@ -142,7 +144,7 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, messages []api.Message) er
 
 		// Chunking is based on the final content we intend to embed.
 		if len(contentToEmbed) > maxEmbeddingChars {
-			log.Printf("--- Chunking oversized '%s' message for embedding. ---", metadata["role"])
+			r.logger.Info("Chunking oversized message for embedding", zap.String("role", metadata["role"]))
 			for j := 0; j < len(contentToEmbed); j += maxEmbeddingChars {
 				end := min(j+maxEmbeddingChars, len(contentToEmbed))
 				chunkContent := contentToEmbed[j:end]
@@ -170,7 +172,7 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, messages []api.Message) er
 		if err != nil {
 			return fmt.Errorf("failed to add documents to collection: %w", err)
 		}
-		log.Printf("--- Added %d document chunks to long-term RAG memory. ---", len(documentsToEmbed))
+		r.logger.Info("Added document chunks to long-term RAG memory", zap.Int("chunks_added", len(documentsToEmbed)))
 	}
 	return nil
 }
@@ -217,14 +219,14 @@ func (r *RAG) Query(ctx context.Context, query string, nResults int) (string, er
 
 		docID, ok := result.Metadata["document_id"]
 		if !ok {
-			log.Printf("Warning: document is missing a document_id, skipping.")
+			r.logger.Warn("Document is missing a document_id, skipping")
 			continue
 		}
 
 		if !processedDocIDs[docID] {
 			fullContent, contentOk := r.messageStore[docID]
 			if !contentOk {
-				log.Printf("Warning: could not find full content for document id %s.", docID)
+				r.logger.Warn("Could not find full content for document id", zap.String("document_id", docID))
 				continue
 			}
 
@@ -253,7 +255,7 @@ func (r *RAG) SummarizeLongTermMemory(ctx context.Context, context string) (stri
 		{Role: "user", Content: userPrompt},
 	}
 
-	summary, err := getLLMResponse(ctx, r.cfg.SummarizationLLMHost, messages, r.cfg)
+	summary, err := getLLMResponse(ctx, r.cfg.SummarizationLLMHost, messages, r.cfg, r.logger)
 	if err != nil {
 		return "", fmt.Errorf("llm chat call failed for memory summary: %w", err)
 	}
@@ -276,7 +278,7 @@ func compressMiddle(s string, maxLength int, preserveStart int, preserveEnd int)
 	return s[:preserveStart] + "\n\n[... content compressed ...]\n\n" + s[len(s)-preserveEnd:]
 }
 
-func createLlamaCppEmbedding(cfg *config.Config) chromem.EmbeddingFunc {
+func createLlamaCppEmbedding(cfg *config.Config, logger *zap.Logger) chromem.EmbeddingFunc {
 	return func(ctx context.Context, doc string) ([]float32, error) {
 		reqBody := LlamaCppEmbeddingRequest{
 			Content: doc,
@@ -307,7 +309,7 @@ func createLlamaCppEmbedding(cfg *config.Config) chromem.EmbeddingFunc {
 			}
 
 			resp.Body.Close()
-			log.Printf("Embedding model is loading, retrying in %v...", cfg.RetryDelaySeconds)
+			logger.Warn("Embedding model is loading, retrying", zap.Duration("retry_delay", cfg.RetryDelaySeconds))
 			time.Sleep(cfg.RetryDelaySeconds)
 		}
 		defer resp.Body.Close()
@@ -323,7 +325,7 @@ func createLlamaCppEmbedding(cfg *config.Config) chromem.EmbeddingFunc {
 
 		var embeddingResponse LlamaCppEmbeddingResponse
 		if err := json.Unmarshal(bodyBytes, &embeddingResponse); err != nil {
-			log.Printf("Failed to decode embedding response body. Raw response: %s", string(bodyBytes))
+			logger.Error("Failed to decode embedding response body", zap.String("raw_response", string(bodyBytes)), zap.Error(err))
 			return nil, fmt.Errorf("failed to decode embedding response body: %w", err)
 		}
 
@@ -335,7 +337,7 @@ func createLlamaCppEmbedding(cfg *config.Config) chromem.EmbeddingFunc {
 	}
 }
 
-func getLLMResponse(ctx context.Context, llamaCppHost string, messages []api.Message, cfg *config.Config) (string, error) {
+func getLLMResponse(ctx context.Context, llamaCppHost string, messages []api.Message, cfg *config.Config, logger *zap.Logger) (string, error) {
 	reqBody := LlamaCppChatRequest{
 		Messages: messages,
 		Stream:   false,
@@ -367,7 +369,7 @@ func getLLMResponse(ctx context.Context, llamaCppHost string, messages []api.Mes
 		}
 
 		resp.Body.Close()
-		log.Printf("LLM is loading, retrying in %v...", cfg.RetryDelaySeconds)
+		logger.Warn("LLM is loading, retrying", zap.Duration("retry_delay", cfg.RetryDelaySeconds))
 		time.Sleep(cfg.RetryDelaySeconds)
 	}
 	defer resp.Body.Close()

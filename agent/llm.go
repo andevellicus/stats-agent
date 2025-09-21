@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"stats-agent/config"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ollama/ollama/api"
+	"go.uber.org/zap"
 )
 
 // Define a specific error type for context window issues
@@ -36,7 +36,7 @@ type LlamaCppChatRequest struct {
 }
 
 // getLLMResponse now includes a client-side timeout to prevent freezing on empty streams.
-func getLLMResponse(ctx context.Context, llamaCppHost string, messages []api.Message, cfg *config.Config) (<-chan string, error) {
+func getLLMResponse(ctx context.Context, llamaCppHost string, messages []api.Message, cfg *config.Config, logger *zap.Logger) (<-chan string, error) {
 	systemMessage := api.Message{
 		Role: "system",
 		Content: `
@@ -232,7 +232,7 @@ for group in ['treatment', 'control']:
 		for i := 0; i < cfg.MaxRetries; i++ {
 			req, reqErr := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
 			if reqErr != nil {
-				log.Printf("Error creating request: %v", reqErr)
+				logger.Error("Error creating request", zap.Error(reqErr))
 				return
 			}
 			req.Header.Set("Content-Type", "application/json")
@@ -247,10 +247,10 @@ for group in ['treatment', 'control']:
 			resp, err = client.Do(req)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					log.Println("Request timed out.")
+					logger.Warn("Request timed out")
 					return
 				}
-				log.Printf("Error sending request: %v", err)
+				logger.Error("Error sending request", zap.Error(err))
 				return
 			}
 
@@ -265,9 +265,9 @@ for group in ['treatment', 'control']:
 		if resp.StatusCode != http.StatusOK {
 			bodyBytes, _ := io.ReadAll(resp.Body)
 			if strings.Contains(string(bodyBytes), "exceeds the available context size") {
-				log.Println("Error: context window exceeded") // Log the specific error
+				logger.Error("Context window exceeded")
 			} else {
-				log.Printf("Error: llama.cpp server returned non-200 status: %s", resp.Status)
+				logger.Error("LLM server returned non-200 status", zap.String("status", resp.Status))
 			}
 			return
 		}
@@ -291,7 +291,7 @@ for group in ['treatment', 'control']:
 		}
 
 		if err := scanner.Err(); err != nil {
-			log.Printf("Error reading stream: %v", err)
+			logger.Error("Error reading stream", zap.Error(err))
 		}
 	}()
 

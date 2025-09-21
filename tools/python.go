@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
 
 const EOM_TOKEN = "<|EOM|>"
@@ -16,18 +17,20 @@ const EOM_TOKEN = "<|EOM|>"
 type StatefulPythonTool struct {
 	conn      net.Conn
 	sessionID string
+	logger    *zap.Logger
 }
 
 // NewStatefulPythonTool now creates a unique session ID for each instance.
-func NewStatefulPythonTool(ctx context.Context, address string) (*StatefulPythonTool, error) {
+func NewStatefulPythonTool(ctx context.Context, address string, logger *zap.Logger) (*StatefulPythonTool, error) {
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		return nil, fmt.Errorf("could not connect to Python executor: %w", err)
 	}
 
 	sessionID := uuid.New().String()
+	logger.Info("Python tool initialized", zap.String("session_id", sessionID), zap.String("address", address))
 
-	return &StatefulPythonTool{conn: conn, sessionID: sessionID}, nil
+	return &StatefulPythonTool{conn: conn, sessionID: sessionID, logger: logger}, nil
 }
 
 func (t *StatefulPythonTool) Name() string {
@@ -97,15 +100,18 @@ func (t *StatefulPythonTool) ExecutePythonCode(ctx context.Context, text string)
 		return "", "", false
 	}
 
+	t.logger.Info("Executing Python code", zap.String("code", pythonCode))
 	fmt.Println("\n--- Executing Python Code ---")
 	fmt.Printf("Code to execute:\n%s\n", pythonCode)
 	fmt.Println("--- Execution Output ---")
 
 	execResult, err := t.Call(ctx, pythonCode)
 	if err != nil {
+		t.logger.Error("Error executing Python code", zap.Error(err))
 		fmt.Printf("Error executing Python: %v\n", err)
 		execResult = "Error: " + err.Error()
 	} else {
+		t.logger.Debug("Python code executed successfully", zap.String("result_preview", execResult[:min(100, len(execResult))]))
 		fmt.Print(execResult)
 	}
 	fmt.Println("\n--- End Execution ---")
