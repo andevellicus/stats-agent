@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -22,7 +23,6 @@ import (
 
 type ChatHandler struct {
 	agent    *agent.Agent
-	webAgent *WebAgent
 	logger   *zap.Logger
 	sessions map[string]*ChatSession
 	mu       sync.RWMutex
@@ -47,7 +47,6 @@ type StreamData struct {
 func NewChatHandler(agent *agent.Agent, logger *zap.Logger) *ChatHandler {
 	return &ChatHandler{
 		agent:    agent,
-		webAgent: NewWebAgent(agent, logger),
 		logger:   logger,
 		sessions: make(map[string]*ChatSession),
 	}
@@ -165,55 +164,112 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 	}
 
 	// Start streaming the agent response
-	h.streamAgentResponse(ctx, c.Writer, session, userMessage.Content, sessionID, userMessageID)
+	h.streamAgentResponse(ctx, c.Writer, userMessage.Content, userMessageID)
 }
 
-func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWriter, session *ChatSession, input string, sessionID string, userMessageID string) {
-	agentMessageID := generateMessageID()
+// processStreamByWord reads from the stream rune by rune, buffers them into words,
+// and processes each word for tags before sending it to the client.
+func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writeSSEData func(StreamData) error) {
+	reader := bufio.NewReader(r)
+	var currentWord strings.Builder
 
-	// Create a mutex to synchronize writes to the response writer
+	// processToken is a recursive function that handles tags within a word/token.
+	var processToken func(string)
+	processToken = func(token string) {
+		// Base case for recursion
+		if token == "" {
+			return
+		}
+
+		// Check for our special tags
+		switch {
+		case strings.Contains(token, "<python>"):
+			parts := strings.SplitN(token, "<python>", 2)
+			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
+			writeSSEData(StreamData{Type: "chunk", Content: "\n```python\n"})
+			processToken(parts[1]) // Recursively process the rest of the token
+		case strings.Contains(token, "</python>"):
+			parts := strings.SplitN(token, "</python>", 2)
+			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
+			writeSSEData(StreamData{Type: "chunk", Content: "\n```\n"})
+			processToken(parts[1])
+		case strings.Contains(token, "<execution_result>"):
+			parts := strings.SplitN(token, "<execution_result>", 2)
+			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
+			writeSSEData(StreamData{Type: "chunk", Content: "\n```\n"})
+			processToken(parts[1])
+		case strings.Contains(token, "</execution_result>"):
+			parts := strings.SplitN(token, "</execution_result>", 2)
+			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
+			writeSSEData(StreamData{Type: "chunk", Content: "\n```\n"})
+			processToken(parts[1])
+		default:
+			// If no tags are found, just write the token as is.
+			writeSSEData(StreamData{Type: "chunk", Content: token})
+		}
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			char, _, err := reader.ReadRune()
+			if err != nil {
+				// End of stream, flush any remaining content in the buffer.
+				if currentWord.Len() > 0 {
+					processToken(currentWord.String())
+				}
+				return
+			}
+
+			currentWord.WriteRune(char)
+
+			// Flush the buffer when we hit a natural delimiter (space or newline).
+			if char == ' ' || char == '\n' {
+				processToken(currentWord.String())
+				currentWord.Reset()
+			}
+		}
+	}
+}
+
+func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWriter, input string, userMessageID string) {
+	agentMessageID := generateMessageID()
 	var writeMu sync.Mutex
 
-	// Helper function to safely write SSE data
 	writeSSEData := func(data StreamData) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
-
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-
 		jsonData, err := json.Marshal(data)
 		if err != nil {
 			return err
 		}
-
 		_, err = fmt.Fprintf(w, "data: %s\n\n", jsonData)
 		if err != nil {
 			return err
 		}
-
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
 		}
 		return nil
 	}
 
-	// Send message to remove loading indicator
 	if err := writeSSEData(StreamData{Type: "remove_loader", Content: "loading-" + userMessageID}); err != nil {
 		h.logger.Error("Failed to send remove loader message", zap.Error(err))
 		return
 	}
 
-	// Send message to create the agent message container
 	if err := writeSSEData(StreamData{Type: "create_container", Content: agentMessageID}); err != nil {
 		h.logger.Error("Failed to send create container message", zap.Error(err))
 		return
 	}
 
-	// Pipe to capture stdout
 	r, pipeW, err := os.Pipe()
 	if err != nil {
 		h.logger.Error("Failed to create pipe", zap.Error(err))
@@ -225,105 +281,40 @@ func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWr
 	os.Stdout = pipeW
 	log.SetOutput(pipeW)
 
-	// Channel to signal when agent is done
 	agentDone := make(chan error, 1)
-	streamDone := make(chan error, 1)
+	streamDone := make(chan struct{})
 
-	// Buffer to accumulate all output for final processing
-	var outputBuffer strings.Builder
-	var bufferMu sync.Mutex
-
-	// Goroutine to stream the captured output
+	// Goroutine to stream the captured output using our new word-by-word processor
 	go func() {
 		defer close(streamDone)
-
-		buf := make([]byte, 1024)
-		for {
-			select {
-			case <-ctx.Done():
-				streamDone <- ctx.Err()
-				return
-			default:
+		h.processStreamByWord(ctx, r, func(data StreamData) error {
+			if err := writeSSEData(data); err != nil {
+				h.logger.Error("Error writing chunk data", zap.Error(err))
+				return err
 			}
-
-			n, err := r.Read(buf)
-			if err != nil {
-				if err != io.EOF {
-					h.logger.Error("Error reading from stdout pipe", zap.Error(err))
-					streamDone <- err
-				} else {
-					streamDone <- nil
-				}
-				return
-			}
-
-			if n > 0 {
-				chunk := string(buf[:n])
-
-				// Add to buffer for final processing
-				bufferMu.Lock()
-				outputBuffer.WriteString(chunk)
-				bufferMu.Unlock()
-
-				// Stream raw chunks for real-time display (without tag processing)
-				data := StreamData{Type: "chunk", Content: chunk}
-				if err := writeSSEData(data); err != nil {
-					h.logger.Error("Error writing chunk data", zap.Error(err))
-					streamDone <- err
-					return
-				}
-			}
-		}
+			return nil
+		})
 	}()
 
-	// Run the agent
+	// Run the agent in a separate goroutine
 	go func() {
 		defer func() {
-			// Restore stdout
 			os.Stdout = originalStdout
 			log.SetOutput(originalStdout)
 			pipeW.Close()
 			r.Close()
 		}()
-
-		defer close(agentDone)
-
 		h.agent.Run(ctx, input)
-		agentDone <- nil
+		close(agentDone)
 	}()
 
-	// Wait for either agent completion or context cancellation
 	select {
 	case <-ctx.Done():
 		h.logger.Info("Context cancelled, closing SSE connection")
-		return
-	case err := <-agentDone:
-		if err != nil {
-			h.logger.Error("Agent execution failed", zap.Error(err))
-			writeSSEData(StreamData{Type: "error", Content: "Agent execution failed"})
-			return
-		}
-
-		// Wait a moment for any remaining output to be streamed
-		select {
-		case <-streamDone:
-		case <-ctx.Done():
-			return
-		}
-
-		// Process the complete accumulated output for tag conversion
-		bufferMu.Lock()
-		completeOutput := outputBuffer.String()
-		bufferMu.Unlock()
-
-		processedOutput := processAgentOutput(completeOutput)
-
-		// Send the fully processed content
-		if err := writeSSEData(StreamData{Type: "final_content", Content: processedOutput}); err != nil {
-			h.logger.Error("Failed to send final content", zap.Error(err))
-		}
-
-		// Send end of stream message
+	case <-agentDone:
+		// Agent finished, wait for the stream processing to complete.
+		<-streamDone
+		// Send the final end-of-stream message.
 		if err := writeSSEData(StreamData{Type: "end"}); err != nil {
 			h.logger.Error("Failed to send end message", zap.Error(err))
 		}
@@ -336,24 +327,4 @@ func generateSessionID() string {
 
 func generateMessageID() string {
 	return "msg_" + uuid.New().String()
-}
-
-// StreamBuffer holds partial content for processing streaming tags
-type StreamBuffer struct {
-	buffer strings.Builder
-	mu     sync.Mutex
-}
-
-// processAgentOutput converts <python> and <execution_result> tags to markdown code blocks
-// This version handles streaming content by maintaining a buffer for complete processing
-func processAgentOutput(content string) string {
-	// Convert Python code blocks
-	content = strings.ReplaceAll(content, "<python>", "\n```python\n")
-	content = strings.ReplaceAll(content, "</python>", "\n```\n")
-
-	// Convert execution result blocks
-	content = strings.ReplaceAll(content, "<execution_result>", "\n```\n")
-	content = strings.ReplaceAll(content, "</execution_result>", "\n```\n")
-
-	return content
 }

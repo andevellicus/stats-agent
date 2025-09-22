@@ -7,6 +7,9 @@ module.exports = {
   ],
   theme: {
     extend: {
+      colors: {
+        'primary': '#0088d6',
+      },
       fontFamily: {
         'sans': [
           'Inter Variable',
