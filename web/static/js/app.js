@@ -1,15 +1,62 @@
-// Auto-scroll to bottom when new messages are added
-function observeMessages() {
-    const messagesContainer = document.getElementById('messages');
-    if (messagesContainer) {
-        const observer = new MutationObserver(() => {
-            messagesContainer.scrollTop = messagesContainer.scrollHeight;
-        });
-        observer.observe(messagesContainer, { childList: true, subtree: true });
-    }
+let activeEventSource = null;
+
+function autoExpand(textarea) {
+    textarea.style.height = 'auto'; // Reset height
+    textarea.style.height = (textarea.scrollHeight) + 'px'; // Set to scroll height
 }
 
-// Focus input on page load
+// This function will be attached to the MutationObserver
+function setupAutoScroll() {
+    const messagesContainer = document.getElementById('messages');
+    if (!messagesContainer) return;
+
+    // This function scrolls the container to the bottom
+    const scrollToBottom = () => {
+        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    };
+
+    // Create an observer instance linked to a callback function
+    const observer = new MutationObserver(scrollToBottom);
+
+    // Start observing the target node for configured mutations
+    observer.observe(messagesContainer, {
+        childList: true, // observe direct children additions/removals
+        subtree: true,   // observe all descendants
+        characterData: true // observe text changes
+    });
+
+    // Initial scroll to bottom
+    scrollToBottom();
+}
+
+function setupFormListener() {
+    const form = document.getElementById('chat-form');
+    const submitButton = document.getElementById('submit-button');
+    const sendIcon = document.getElementById('send-icon');
+    const stopIcon = document.getElementById('stop-icon');
+    const messageInput = document.getElementById('message-input');
+
+    if (!form) return;
+
+    submitButton.addEventListener('click', (event) => {
+        if (activeEventSource) {
+            event.preventDefault();
+            activeEventSource.close();
+            console.log("SSE connection closed by user.");
+        }
+    });
+
+    form.addEventListener('htmx:beforeRequest', () => {
+        sendIcon.classList.add('hidden');
+        stopIcon.classList.remove('hidden');
+        messageInput.disabled = true;
+    });
+
+    form.addEventListener('htmx:afterRequest', () => {
+        messageInput.style.height = 'auto'; // Reset textarea height
+    });
+}
+
 function focusInput() {
     const messageInput = document.getElementById('message-input');
     if (messageInput && document.activeElement !== messageInput) {
@@ -17,7 +64,6 @@ function focusInput() {
     }
 }
 
-// New function to handle copying code to the clipboard with a fallback
 function copyCode(button) {
     const codeBlock = button.closest('.my-4').querySelector('code');
     const textToCopy = codeBlock.textContent;
@@ -31,17 +77,13 @@ function copyCode(button) {
             console.error('Failed to copy text: ', err);
         });
     } else {
-        // Fallback for non-secure contexts (HTTP)
         const textArea = document.createElement("textarea");
         textArea.value = textToCopy;
         textArea.style.position = "fixed";
         textArea.style.opacity = "0";
         document.body.appendChild(textArea);
-        
-        // Use the preventScroll option to stop the page from jumping
-        textArea.focus({ preventScroll: true }); 
+        textArea.focus({ preventScroll: true });
         textArea.select();
-
         try {
             document.execCommand('copy');
             copyText.textContent = 'Copied!';
@@ -53,7 +95,6 @@ function copyCode(button) {
     }
 }
 
-// Update toggleCodeBlock to use the parent container
 function toggleCodeBlock(element) {
     const header = element.closest('.flex.items-center.justify-between');
     const content = header.nextElementSibling;
@@ -70,7 +111,6 @@ function toggleCodeBlock(element) {
     }
 }
 
-// Handle form submission on Enter key
 function submitOnEnter(event) {
     if (event.keyCode == 13 && !event.shiftKey) {
         event.preventDefault();
@@ -78,14 +118,18 @@ function submitOnEnter(event) {
     }
 }
 
-// Initialize all scripts on page load
 document.addEventListener('DOMContentLoaded', () => {
-    observeMessages();
     focusInput();
     initiateSSE();
+    setupFormListener();
+    setupAutoScroll(); // Set up the observer when the page loads
+
+    const messageInput = document.getElementById('message-input');
+    if (messageInput) {
+        messageInput.addEventListener('input', () => autoExpand(messageInput));
+    }
 });
 
-// Re-initialize after HTMX swaps content
 document.body.addEventListener('htmx:afterSwap', function(event) {
     focusInput();
     initiateSSE();
@@ -102,9 +146,26 @@ function initiateSSE() {
 
         const eventSource = new EventSource('/chat/stream?session_id=' + encodeURIComponent(sessionId) + '&user_message_id=' + encodeURIComponent(messageId));
         
+        activeEventSource = eventSource;
+
         let contentBuffer = '';
         let agentMessageContainer = null;
         let debounceTimer;
+
+        const cleanup = () => {
+            const sendIcon = document.getElementById('send-icon');
+            const stopIcon = document.getElementById('stop-icon');
+            const messageInput = document.getElementById('message-input');
+            
+            if (sendIcon && stopIcon) {
+                stopIcon.classList.add('hidden');
+                sendIcon.classList.remove('hidden');
+            }
+            if(messageInput) {
+                messageInput.disabled = false;
+            }
+            activeEventSource = null;
+        };
 
         eventSource.onmessage = function(event) {
             const data = JSON.parse(event.data);
@@ -154,6 +215,7 @@ function initiateSSE() {
                            renderAndProcessContent(contentDiv, contentBuffer);
                         }
                     }
+                    cleanup();
                     break;
                 default:
                     break;
@@ -162,10 +224,7 @@ function initiateSSE() {
 
         eventSource.onerror = function(event) {
             console.error('SSE Error:', event);
-            const loadingIndicator = document.getElementById('loading-' + messageId);
-            if (loadingIndicator) {
-                loadingIndicator.innerHTML = '<div class="text-red-500 text-xs">Connection error</div>';
-            }
+            cleanup();
             eventSource.close();
         };
     });
@@ -176,6 +235,17 @@ function renderAndProcessContent(contentDiv, content) {
     if (cleanedContent === "undefined") return;
     
     contentDiv.innerHTML = marked.parse(cleanedContent || '');
+
+    contentDiv.querySelectorAll('.agent-status-message').forEach(statusElement => {
+        const statusText = statusElement.textContent;
+        const template = document.getElementById('agent-status-template');
+        if (template) {
+            const statusClone = template.cloneNode(true);
+            statusClone.id = '';
+            statusClone.querySelector('span').textContent = statusText;
+            statusElement.replaceWith(statusClone);
+        }
+    });
 
     contentDiv.querySelectorAll('pre > code:not([data-collapsible="true"])').forEach(block => {
         const preElement = block.parentElement;

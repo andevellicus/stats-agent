@@ -1,11 +1,13 @@
 package components
 
 templ ChatForm(sessionID string) {
+	// Give the form an ID so we can attach event listeners
 	<form
+		id="chat-form"
 		hx-post="/chat"
 		hx-target="#messages"
 		hx-swap="beforeend"
-		hx-on::after-request="this.reset(); document.getElementById('message-input').focus()"
+		hx-on::after-request="this.reset()"
 		class="flex items-end space-x-4"
 	>
 		<input type="hidden" name="session_id" value={ sessionID }/>
@@ -19,10 +21,15 @@ templ ChatForm(sessionID string) {
 				autofocus
 				required
 				onkeydown="submitOnEnter(event)"
+				oninput="autoExpand(this)"
 			></textarea>
 		</div>
-		<button type="submit" class="p-4 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-2xl hover:from-indigo-700 hover:to-purple-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 transition-all duration-200 shadow-lg hover:shadow-xl transform hover:scale-105">
-			<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+		// Give the button an ID for JS to control it
+		<button id="submit-button" type="submit" class="p-4 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-2xl hover:from-indigo-700 hover:to-purple-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 transition-all duration-200 shadow-lg hover:shadow-xl transform hover:scale-105 relative flex items-center justify-center">
+			// The Send icon (▶) with an ID
+			<span id="send-icon" class="text-xl">▶</span>
+			// The Stop icon (■) with an ID, initially hidden
+			<span id="stop-icon" class="text-xl hidden">■</span>
 		</button>
 	</form>
 }

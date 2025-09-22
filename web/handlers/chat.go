@@ -203,6 +203,17 @@ func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writ
 			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
 			writeSSEData(StreamData{Type: "chunk", Content: "\n```\n"})
 			processToken(parts[1])
+		case strings.Contains(token, "<agent_status>"):
+			parts := strings.SplitN(token, "<agent_status>", 2)
+			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
+			// Convert the tag to a div with a specific class for the frontend
+			writeSSEData(StreamData{Type: "chunk", Content: `<div class="agent-status-message">`})
+			processToken(parts[1])
+		case strings.Contains(token, "</agent_status>"):
+			parts := strings.SplitN(token, "</agent_status>", 2)
+			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
+			writeSSEData(StreamData{Type: "chunk", Content: `</div>`})
+			processToken(parts[1])
 		default:
 			// If no tags are found, just write the token as is.
 			writeSSEData(StreamData{Type: "chunk", Content: token})

@@ -220,7 +220,7 @@ func (a *Agent) Run(ctx context.Context, input string) {
 		a.history = append(a.history, toolMessage)
 
 		if strings.Contains(execResult, "Error:") {
-			fmt.Println("\n--- Agent observed an error, attempting to self-correct ---")
+			fmt.Printf("<agent_status>Agent ran into an error, attempting to self-correct</agent_status>")
 			consecutiveErrors++ // Increment error counter
 			continue
 		} else {
