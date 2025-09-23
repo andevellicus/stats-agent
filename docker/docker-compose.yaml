@@ -23,6 +23,9 @@ services:
       --temp 0.5
       --top-p 0.9
       --top-k 40
+      --mlock
+      --no-mmap
+      --repeat-penalty 1.1
 
   embedding-llm:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda

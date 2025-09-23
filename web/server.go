@@ -61,7 +61,6 @@ func (s *Server) setupRoutes() {
 	// Web routes
 	s.router.GET("/", chatHandler.Index)
 	s.router.POST("/chat", chatHandler.SendMessage)
-	s.router.POST("/upload", chatHandler.UploadFile)
 	s.router.GET("/chat/stream", chatHandler.StreamResponse)
 }
 

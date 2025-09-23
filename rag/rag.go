@@ -73,7 +73,10 @@ func (r *RAG) generateFactSummary(ctx context.Context, code, result string) (str
 	Your task is to generate a single, descriptive sentence that captures the key finding, action, 
 	or error from the provided code and output.
 	CRITICAL RULE: The summary MUST be a single sentence and less than 100 words.
-	Start the sentence with "Fact:". Output only the single sentence summary and nothing else.`
+	Include: operation performed, data involved, key finding, and outcome.
+	Format: "Fact: [operation] on [data] revealed [finding/outcome]"
+	Example: "Fact: Correlation analysis on age and income columns revealed strong positive correlation (r=0.72, p<0.001)"
+	Output only the single sentence summary and nothing else.`
 	userPrompt := fmt.Sprintf("Code:\n%s\nOutput:\n%s", code, finalResult)
 
 	messages := []api.Message{

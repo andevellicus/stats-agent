@@ -106,7 +106,36 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 	session.LastAccess = time.Now()
 	h.mu.Unlock()
 
-	// Add user message to session
+	// **Handle potential file upload**
+	file, err := c.FormFile("file")
+	if err == nil {
+		// A file was included, process it
+		ext := strings.ToLower(filepath.Ext(file.Filename))
+		if ext != ".csv" && ext != ".xlsx" && ext != ".xls" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file type. Please upload a CSV or Excel file."})
+			return
+		}
+
+		workspaceDir := filepath.Join("workspaces", req.SessionID)
+		dst := filepath.Join(workspaceDir, file.Filename)
+		if err := c.SaveUploadedFile(file, dst); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not save file"})
+			return
+		}
+
+		// Add a system message to inform the agent of the new file.
+		systemMessage := types.ChatMessage{
+			Role:      "system",
+			Content:   fmt.Sprintf("The user has uploaded the file: %s. Use this file for your analysis.", file.Filename),
+			ID:        generateMessageID(),
+			SessionID: req.SessionID,
+		}
+		session.mu.Lock()
+		session.Messages = append(session.Messages, systemMessage)
+		session.mu.Unlock()
+	}
+
+	// Add user's text message to session
 	userMessage := types.ChatMessage{
 		Role:      "user",
 		Content:   req.Message,
