@@ -2,9 +2,9 @@ services:
   main-llm:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
     container_name: main-llm-server
-    env_file: .env # Load variables from the .env file
+    env_file: .env
     ports:
-      - "${MAIN_LLM_PORT}:${MAIN_LLM_PORT}" # Use the port variable
+      - "${MAIN_LLM_PORT}:${MAIN_LLM_PORT}"
     volumes:
       - ../models:/models
     deploy:
@@ -14,7 +14,15 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    command: "-m ${MAIN_LLM_MODEL_PATH} --host 0.0.0.0 --port ${MAIN_LLM_PORT} -ngl ${N_GPU_LAYERS} -c 16384 --temp 0.3 --top_p 0.85 --top-k 30"
+    command: >
+      -m ${MAIN_LLM_MODEL_PATH}
+      --host 0.0.0.0
+      --port ${MAIN_LLM_PORT}
+      -ngl ${N_GPU_LAYERS}
+      -c 16384
+      --temp 0.5
+      --top-p 0.9
+      --top-k 40
 
   embedding-llm:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
@@ -31,7 +39,14 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    command: "-m ${EMBEDDING_LLM_MODEL_PATH} --host 0.0.0.0 --port ${EMBEDDING_LLM_PORT} --embedding -ngl ${N_GPU_LAYERS} --batch-size 2048"
+    # No sampling parameters needed for embedding
+    command: >
+      -m ${EMBEDDING_LLM_MODEL_PATH}
+      --host 0.0.0.0
+      --port ${EMBEDDING_LLM_PORT}
+      --embedding
+      -ngl ${N_GPU_LAYERS}
+      --batch-size 2048
 
   summarization-llm:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
@@ -48,14 +63,22 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    command: "-m ${SUMMARIZATION_LLM_MODEL_PATH} --host 0.0.0.0 --port ${SUMMARIZATION_LLM_PORT} -ngl ${N_GPU_LAYERS} --temp 0.3 --top_p 0.9"
+    # Factual and consistent settings for summarization
+    command: >
+      -m ${SUMMARIZATION_LLM_MODEL_PATH}
+      --host 0.0.0.0
+      --port ${SUMMARIZATION_LLM_PORT}
+      -ngl ${N_GPU_LAYERS}
+      --temp 0.2
+      --top-p 0.9
+      --top-k 40
 
   python-executor:
     build:
       context: .
       dockerfile: python.Dockerfile
     container_name: python-executor-container
-    env_file: .env # Also load the .env for UID/GID
+    env_file: .env
     user: "${UID}:${GID}"
     ports:
       - "9999:9999"

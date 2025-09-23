@@ -149,6 +149,13 @@ func (h *ChatHandler) UploadFile(c *gin.Context) {
 		return
 	}
 
+	// **Server-side validation for file type**
+	ext := strings.ToLower(filepath.Ext(file.Filename))
+	if ext != ".csv" && ext != ".xlsx" && ext != ".xls" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file type. Please upload a CSV or Excel file."})
+		return
+	}
+
 	// Save the file to the session's workspace
 	workspaceDir := filepath.Join("workspaces", sessionID)
 	dst := filepath.Join(workspaceDir, file.Filename)

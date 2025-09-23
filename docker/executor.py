@@ -12,30 +12,24 @@ sessions = {}
 
 def execute_code(session_id, code):
     """Executes code within a specific session's state."""
-    # Get the private state for this session.
-    # If the session doesn't exist yet, create an empty state for it.
     if session_id not in sessions:
         sessions[session_id] = {}
     
     session_state = sessions[session_id]
 
-    # Create and change to the session-specific workspace directory
+    # The directory is now created by the Go application.
     workspace_dir = os.path.join('/app/workspaces', session_id)
-    os.makedirs(workspace_dir, exist_ok=True)
     
     original_dir = os.getcwd()
     os.chdir(workspace_dir)
 
-
     old_stdout = sys.stdout
     redirected_output = sys.stdout = io.StringIO()
     try:
-        # We execute the code using the session_state and capture any printed output.
         exec(code, session_state)
         output = redirected_output.getvalue()
         return output
     except Exception as e:
-        # Return a more descriptive error message
         return f"Error: {type(e).__name__}: {str(e)}"
     finally:
         sys.stdout = old_stdout

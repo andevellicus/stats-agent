@@ -244,10 +244,29 @@ func (r *RAG) Query(ctx context.Context, query string, nResults int) (string, er
 
 // SummarizeLongTermMemory takes a large context string and condenses it.
 func (r *RAG) SummarizeLongTermMemory(ctx context.Context, context string) (string, error) {
-	systemPrompt := `You are an expert at summarizing conversational and analytical history.
-	The following text contains a series of facts and conversational turns.
-	Condense this information into a concise summary that captures the key findings, actions, and unanswered questions.
-	Focus on retaining the most critical information that would be needed to continue the analysis.`
+	systemPrompt := `You are an expert at creating concise, searchable facts from code and its output. Your task is to generate a single, descriptive sentence that captures the key finding, action, or error.
+
+	Follow these rules:
+	1. The summary MUST be a single sentence.
+	2. The summary MUST start with "Fact:".
+	3. The summary MUST be less than 100 words.
+
+	Here is an example:
+
+	---
+	**Input:**
+	Code:
+	df.head(3)
+
+	Output:
+	age gender  side
+	0   55      M  left
+	1   60      F  right
+	2   65      M  left
+	---
+	**Your Output:**
+	Fact: The dataframe contains columns for age, gender, and side.
+	---`
 	userPrompt := fmt.Sprintf("History to summarize:\n%s", context)
 
 	messages := []api.Message{
