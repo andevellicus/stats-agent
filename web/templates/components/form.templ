@@ -1,14 +1,13 @@
 package components
 
 templ ChatForm(sessionID string) {
-	// Give the form an ID so we can attach event listeners
 	<form
 		id="chat-form"
 		hx-post="/chat"
 		hx-target="#messages"
 		hx-swap="beforeend"
 		hx-on::after-request="this.reset()"
-		class="flex items-end space-x-4"
+		class="flex items-start space-x-3"
 	>
 		<input type="hidden" name="session_id" value={ sessionID }/>
 		<div class="flex-1">
@@ -16,7 +15,7 @@ templ ChatForm(sessionID string) {
 				id="message-input"
 				name="message"
 				placeholder="Ask a question about your data..."
-				class="w-full p-4 border border-gray-300 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none shadow-sm hover:shadow-md transition-shadow duration-200 bg-white/90 backdrop-blur-sm"
+				class="w-full pt-[10px] pb-[10px] px-4 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none shadow-sm hover:shadow-md transition-shadow duration-200 bg-white/90 backdrop-blur-sm"
 				rows="1"
 				autofocus
 				required
@@ -24,12 +23,19 @@ templ ChatForm(sessionID string) {
 				oninput="autoExpand(this)"
 			></textarea>
 		</div>
-		// Give the button an ID for JS to control it
-		<button id="submit-button" type="submit" class="p-4 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-2xl hover:from-indigo-700 hover:to-purple-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 transition-all duration-200 shadow-lg hover:shadow-xl transform hover:scale-105 relative flex items-center justify-center">
-			// The Send icon (▶) with an ID
-			<span id="send-icon" class="text-xl">▶</span>
-			// The Stop icon (■) with an ID, initially hidden
-			<span id="stop-icon" class="text-xl hidden">■</span>
-		</button>
+		<div class="flex-shrink-0">
+			<button id="submit-button" type="submit" class="p-2.5 bg-blue-500 text-white rounded-xl hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-all duration-200 shadow-lg hover:shadow-xl transform hover:scale-105 relative flex items-center justify-center w-11 h-11">
+				<span id="send-icon" class="flex items-center justify-center">
+					<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path>
+					</svg>
+				</span>
+				<span id="stop-icon" class="hidden flex items-center justify-center">
+					<svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+						<path d="M6 6h12v12H6z"></path>
+					</svg>
+				</span>
+			</button>
+		</div>
 	</form>
 }

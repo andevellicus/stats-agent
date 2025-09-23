@@ -4,19 +4,19 @@ import "stats-agent/web/types"
 
 templ UserMessage(msg types.ChatMessage) {
 	<div class="flex justify-end">
-		<div class="bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-2xl px-5 py-3 max-w-2xl shadow-lg hover:shadow-xl transition-shadow duration-200">
+		<div class="bg-slate-700 text-white rounded-2xl px-5 py-3 max-w-4xl shadow-lg hover:shadow-xl transition-shadow duration-200">
 			<div class="font-semibold text-sm mb-1 opacity-90 font-display">You</div>
-			<div class="prose prose-sm prose-invert max-w-none leading-relaxed font-sans">{ msg.Content }</div>
+			<div class="font-sans text-sm text-white/90">{ msg.Content }</div>
 		</div>
 	</div>
 	<div id={ "loading-" + msg.ID } class="sse-loader" data-session-id={ msg.SessionID } data-message-id={ msg.ID }>
-		<div class="flex justify-start">
-			<div class="bg-white rounded-2xl px-5 py-3 max-w-2xl shadow-md border border-gray-100 hover:shadow-lg transition-shadow duration-200">
-				<div class="font-semibold text-sm text-indigo-600 mb-1 font-display">Stats Agent</div>
+		<div class="flex justify-start w-full">
+			<div class="bg-white rounded-2xl px-5 py-3 w-full shadow-md border border-gray-100 hover:shadow-lg transition-shadow duration-200">
+				<div class="font-semibold text-sm text-primary mb-1 font-display">Stats Agent</div>
 				<div class="flex items-center space-x-2">
-					<div class="h-2 w-2 bg-indigo-400 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
-					<div class="h-2 w-2 bg-indigo-400 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
-					<div class="h-2 w-2 bg-indigo-400 rounded-full animate-bounce"></div>
+					<div class="h-2 w-2 bg-blue-400 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
+					<div class="h-2 w-2 bg-blue-400 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
+					<div class="h-2 w-2 bg-blue-400 rounded-full animate-bounce"></div>
 					<span class="text-sm text-gray-500 ml-2">Thinking...</span>
 				</div>
 			</div>
@@ -25,25 +25,11 @@ templ UserMessage(msg types.ChatMessage) {
 }
 
 templ AgentMessage(msg types.ChatMessage) {
-	<div class="flex justify-start">
-		<div class="bg-white rounded-2xl px-5 py-3 max-w-2xl shadow-md border border-gray-100 
-hover:shadow-lg transition-shadow duration-200">
+	<div class="w-full">
+		<div class="bg-white rounded-2xl px-5 py-3 w-full shadow-md border border-gray-100 hover:shadow-lg transition-shadow duration-200">
 			<div class="font-semibold text-sm text-primary mb-2 font-display">Stats Agent</div>
-			<div class="prose prose-sm max-w-none leading-relaxed text-gray-700 font-sans">
+			<div class="leading-relaxed text-gray-700 font-sans">
 				!templates.MarkdownToHTML(msg.Content)
-			</div>
-		</div>
-	</div>
-}
-
-templ WelcomeMessage() {
-	<div class="flex justify-center">
-		<div class="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200/50 rounded-2xl p-6 max-w-lg text-center shadow-sm">
-			<div class="text-2xl mb-2">🤖</div>
-			<div class="text-primary font-bold font-display text-lg mb-2 tracking-tight">Welcome to Stats Agent</div>
-			<div class="text-blue-600/80 text-sm leading-relaxed">
-				I'm here to help you analyze data and answer statistical questions.
-You can upload datasets and ask me to perform various analyses.
 			</div>
 		</div>
 	</div>

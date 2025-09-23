@@ -1,4 +1,5 @@
 let activeEventSource = null;
+let autoScrollEnabled = true;
 
 function autoExpand(textarea) {
     textarea.style.height = 'auto'; // Reset height
@@ -12,7 +13,9 @@ function setupAutoScroll() {
 
     // This function scrolls the container to the bottom
     const scrollToBottom = () => {
-        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        if (autoScrollEnabled) {
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
     };
 
     // Create an observer instance linked to a callback function
@@ -65,16 +68,27 @@ function focusInput() {
 }
 
 function copyCode(button) {
-    const codeBlock = button.closest('.my-4').querySelector('code');
+    autoScrollEnabled = false;
+    const codeContainer = button.closest('.overflow-hidden');
+    if (!codeContainer) {
+        console.error("Could not find the code container to copy from.");
+        autoScrollEnabled = true;
+        return;
+    }
+    const codeBlock = codeContainer.querySelector('code');
     const textToCopy = codeBlock.textContent;
     const copyText = button.querySelector('.copy-text');
 
     if (navigator.clipboard && window.isSecureContext) {
         navigator.clipboard.writeText(textToCopy).then(() => {
             copyText.textContent = 'Copied!';
-            setTimeout(() => { copyText.textContent = 'Copy'; }, 2000);
+            setTimeout(() => {
+                copyText.textContent = 'Copy';
+                autoScrollEnabled = true;
+            }, 2000);
         }).catch(err => {
             console.error('Failed to copy text: ', err);
+            autoScrollEnabled = true;
         });
     } else {
         const textArea = document.createElement("textarea");
@@ -87,28 +101,36 @@ function copyCode(button) {
         try {
             document.execCommand('copy');
             copyText.textContent = 'Copied!';
-            setTimeout(() => { copyText.textContent = 'Copy'; }, 2000);
+            setTimeout(() => {
+                copyText.textContent = 'Copy';
+                autoScrollEnabled = true;
+            }, 2000);
         } catch (err) {
             console.error('Fallback copy failed: ', err);
+            autoScrollEnabled = true;
         }
         document.body.removeChild(textArea);
     }
 }
 
 function toggleCodeBlock(element) {
+    autoScrollEnabled = false;
     const header = element.closest('.flex.items-center.justify-between');
     const content = header.nextElementSibling;
-    const icon = header.querySelector('.chevron-icon');
-    const actionText = header.querySelector('.action-text');
-    
+    const icon = element.querySelector('.chevron-icon');
+    const actionText = element.querySelector('.action-text');
+
     content.classList.toggle('hidden');
     icon.classList.toggle('rotate-180');
-    
+
     if (content.classList.contains('hidden')) {
         actionText.textContent = 'Show';
     } else {
         actionText.textContent = 'Hide';
     }
+    setTimeout(() => {
+        autoScrollEnabled = true;
+    }, 100);
 }
 
 function submitOnEnter(event) {
@@ -145,7 +167,7 @@ function initiateSSE() {
         if (!sessionId || !messageId) return;
 
         const eventSource = new EventSource('/chat/stream?session_id=' + encodeURIComponent(sessionId) + '&user_message_id=' + encodeURIComponent(messageId));
-        
+
         activeEventSource = eventSource;
 
         let contentBuffer = '';
@@ -156,7 +178,7 @@ function initiateSSE() {
             const sendIcon = document.getElementById('send-icon');
             const stopIcon = document.getElementById('stop-icon');
             const messageInput = document.getElementById('message-input');
-            
+
             if (sendIcon && stopIcon) {
                 stopIcon.classList.add('hidden');
                 sendIcon.classList.remove('hidden');
@@ -169,7 +191,7 @@ function initiateSSE() {
 
         eventSource.onmessage = function(event) {
             const data = JSON.parse(event.data);
-            
+
             switch (data.type) {
                 case 'connection_established':
                     console.log('SSE connection established.');
@@ -185,19 +207,17 @@ function initiateSSE() {
                     agentMessageContainer = document.createElement('div');
                     agentMessageContainer.id = agentMessageId;
                     agentMessageContainer.innerHTML = `
-                        <div class="flex justify-start">
-                            <div class="agent-output bg-white rounded-2xl px-5 py-3 max-w-2xl shadow-md border border-gray-100">
-                                <div class="font-semibold text-sm text-primary mb-2 font-display">Stats Agent</div>
-                                <div id="content-${agentMessageId}" class="prose prose-sm max-w-none leading-relaxed text-gray-700 font-sans"></div>
-                            </div>
-                        </div>
+						<div class="agent-output bg-white rounded-2xl px-5 py-3 w-full shadow-md border border-gray-100">
+							<div class="font-semibold text-sm text-primary mb-2 font-display">Stats Agent</div>
+							<div id="content-${agentMessageId}" class="prose max-w-none leading-relaxed text-gray-700 font-sans"></div>
+						</div>
                     `;
                     document.getElementById('messages').appendChild(agentMessageContainer);
                     break;
                 case 'chunk':
                     if (agentMessageContainer && typeof data.content === 'string') {
                         contentBuffer += data.content;
-                        
+
                         clearTimeout(debounceTimer);
                         debounceTimer = setTimeout(() => {
                             const contentDiv = document.getElementById('content-' + agentMessageContainer.id);
@@ -233,7 +253,7 @@ function initiateSSE() {
 function renderAndProcessContent(contentDiv, content) {
     const cleanedContent = content.replace(/Agent:\s*/g, '').trim();
     if (cleanedContent === "undefined") return;
-    
+
     contentDiv.innerHTML = marked.parse(cleanedContent || '');
 
     contentDiv.querySelectorAll('.agent-status-message').forEach(statusElement => {
@@ -259,10 +279,10 @@ function renderAndProcessContent(contentDiv, content) {
         } else {
             collapsible = createCollapsible(codeContent, 'result');
         }
-        
+
         preElement.replaceWith(collapsible);
         if (typeof hljs !== 'undefined') {
-             collapsible.querySelectorAll('pre code').forEach(newBlock => {
+             collapsible.querySelectorAll('pre code.language-python').forEach(newBlock => {
                 hljs.highlightElement(newBlock);
             });
         }
