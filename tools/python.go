@@ -7,30 +7,27 @@ import (
 	"net"
 	"strings"
 
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
 const EOM_TOKEN = "<|EOM|>"
 
-// StatefulPythonTool now has a session ID.
+// StatefulPythonTool no longer holds a sessionID
 type StatefulPythonTool struct {
-	conn      net.Conn
-	sessionID string
-	logger    *zap.Logger
+	conn   net.Conn
+	logger *zap.Logger
 }
 
-// NewStatefulPythonTool now creates a unique session ID for each instance.
+// NewStatefulPythonTool no longer creates a session ID.
 func NewStatefulPythonTool(ctx context.Context, address string, logger *zap.Logger) (*StatefulPythonTool, error) {
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		return nil, fmt.Errorf("could not connect to Python executor: %w", err)
 	}
 
-	sessionID := uuid.New().String()
-	logger.Info("Python tool initialized", zap.String("session_id", sessionID), zap.String("address", address))
+	logger.Info("Python tool initialized", zap.String("address", address))
 
-	return &StatefulPythonTool{conn: conn, sessionID: sessionID, logger: logger}, nil
+	return &StatefulPythonTool{conn: conn, logger: logger}, nil
 }
 
 func (t *StatefulPythonTool) Name() string {
@@ -41,9 +38,9 @@ func (t *StatefulPythonTool) Description() string {
 	return "Executes Python code in a persistent, sandboxed session."
 }
 
-// Call now reads from the connection until it sees the EOM_TOKEN.
-func (t *StatefulPythonTool) Call(ctx context.Context, input string) (string, error) {
-	message := fmt.Sprintf("%s|%s", t.sessionID, input)
+// Call now accepts the sessionID for each execution.
+func (t *StatefulPythonTool) Call(ctx context.Context, input string, sessionID string) (string, error) {
+	message := fmt.Sprintf("%s|%s", sessionID, input)
 
 	_, err := t.conn.Write([]byte(message))
 	if err != nil {
@@ -77,8 +74,8 @@ func (t *StatefulPythonTool) Close() {
 	}
 }
 
-// ExecutePythonCode extracts code from a string, executes it, and returns the result.
-func (t *StatefulPythonTool) ExecutePythonCode(ctx context.Context, text string) (string, string, bool) {
+// ExecutePythonCode now requires a sessionID to be passed.
+func (t *StatefulPythonTool) ExecutePythonCode(ctx context.Context, text string, sessionID string) (string, string, bool) {
 	startTag := "<python>"
 	endTag := "</python>"
 
@@ -100,9 +97,9 @@ func (t *StatefulPythonTool) ExecutePythonCode(ctx context.Context, text string)
 		return "", "", false
 	}
 
-	t.logger.Info("Executing Python code", zap.String("code", pythonCode))
+	t.logger.Info("Executing Python code", zap.String("code", pythonCode), zap.String("session_id", sessionID))
 
-	execResult, err := t.Call(ctx, pythonCode)
+	execResult, err := t.Call(ctx, pythonCode, sessionID)
 	if err != nil {
 		t.logger.Error("Error executing Python code", zap.Error(err))
 		execResult = "Error: " + err.Error()

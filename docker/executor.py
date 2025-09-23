@@ -1,6 +1,7 @@
 import socket
 import sys
 import io
+import os
 
 # A special token to signal the end of a message.
 EOM_TOKEN = "<|EOM|>"
@@ -18,6 +19,14 @@ def execute_code(session_id, code):
     
     session_state = sessions[session_id]
 
+    # Create and change to the session-specific workspace directory
+    workspace_dir = os.path.join('/app/workspaces', session_id)
+    os.makedirs(workspace_dir, exist_ok=True)
+    
+    original_dir = os.getcwd()
+    os.chdir(workspace_dir)
+
+
     old_stdout = sys.stdout
     redirected_output = sys.stdout = io.StringIO()
     try:
@@ -30,6 +39,8 @@ def execute_code(session_id, code):
         return f"Error: {type(e).__name__}: {str(e)}"
     finally:
         sys.stdout = old_stdout
+        os.chdir(original_dir)
+
 
 def main():
     """Listens for connections and executes code in sandboxed sessions."""

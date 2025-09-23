@@ -107,7 +107,7 @@ func (a *Agent) manageMemory(ctx context.Context) {
 	contextWindowThreshold := int(float64(a.cfg.ContextLength) * 0.50)
 
 	if totalTokens > contextWindowThreshold {
-		fmt.Printf("<agent_status>Managing memory: Archiving older messages to the knowledge base...</agent_status>")
+		fmt.Printf("<agent_status>Archiving older messages to the knowledge base</agent_status>")
 		cutoff := len(a.history) / 2
 
 		if cutoff > 0 && cutoff < len(a.history) {
@@ -137,7 +137,7 @@ func (a *Agent) manageMemory(ctx context.Context) {
 }
 
 // Run starts the agent's interaction loop for a given user input
-func (a *Agent) Run(ctx context.Context, input string) {
+func (a *Agent) Run(ctx context.Context, input string, sessionID string) {
 	a.history = append(a.history, api.Message{Role: "user", Content: input})
 
 	longTermContext, err := a.rag.Query(ctx, input, a.cfg.RAGResults)
@@ -212,7 +212,7 @@ func (a *Agent) Run(ctx context.Context, input string) {
 
 		a.history = append(a.history, api.Message{Role: "assistant", Content: llmResponse})
 
-		_, execResult, wasCodeExecuted := a.pythonTool.ExecutePythonCode(ctx, llmResponse)
+		_, execResult, wasCodeExecuted := a.pythonTool.ExecutePythonCode(ctx, llmResponse, sessionID)
 
 		if !wasCodeExecuted {
 			return

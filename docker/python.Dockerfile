@@ -20,7 +20,7 @@ COPY .env .
 # Install the comprehensive set of Python libraries
 RUN pip install \
     # Core Data Science
-    pandas numpy matplotlib scikit-learn seaborn statsmodels scipy \
+    pandas numpy matplotlib scikit-learn seaborn statsmodels scipy openpyxl \
     # R Integration
     rpy2 tzlocal \
     # Advanced ML

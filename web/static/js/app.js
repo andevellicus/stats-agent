@@ -38,8 +38,36 @@ function setupFormListener() {
     const sendIcon = document.getElementById('send-icon');
     const stopIcon = document.getElementById('stop-icon');
     const messageInput = document.getElementById('message-input');
+    const fileInput = document.getElementById('file-input');
+    const uploadButton = document.getElementById('upload-button');
 
     if (!form) return;
+
+    uploadButton.addEventListener('click', () => fileInput.click());
+
+    fileInput.addEventListener('change', (event) => {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('session_id', document.querySelector('input[name="session_id"]').value);
+
+        fetch('/upload', {
+            method: 'POST',
+            body: formData,
+        })
+        .then(response => response.json())
+        .then(data => {
+            console.log(data.message);
+            // Optionally, display a success message to the user in the chat
+        })
+        .catch(error => {
+            console.error('Error uploading file:', error);
+            // Optionally, display an error message
+        });
+    });
+
 
     submitButton.addEventListener('click', (event) => {
         if (activeEventSource) {

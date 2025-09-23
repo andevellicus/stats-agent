@@ -10,12 +10,14 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"stats-agent/agent"
 	"stats-agent/web/templates/components"
 	"stats-agent/web/templates/pages"
 	"stats-agent/web/types"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -30,9 +32,10 @@ type ChatHandler struct {
 }
 
 type ChatSession struct {
-	ID       string
-	Messages []types.ChatMessage
-	mu       sync.RWMutex
+	ID         string
+	Messages   []types.ChatMessage
+	LastAccess time.Time
+	mu         sync.RWMutex
 }
 
 type ChatRequest struct {
@@ -56,11 +59,20 @@ func NewChatHandler(agent *agent.Agent, logger *zap.Logger) *ChatHandler {
 func (h *ChatHandler) Index(c *gin.Context) {
 	sessionID := generateSessionID()
 
+	// Create session workspace
+	workspaceDir := filepath.Join("workspaces", sessionID)
+	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
+		h.logger.Error("Failed to create workspace directory", zap.Error(err))
+		c.String(http.StatusInternalServerError, "Could not create workspace.")
+		return
+	}
+
 	// Create new session
 	h.mu.Lock()
 	h.sessions[sessionID] = &ChatSession{
-		ID:       sessionID,
-		Messages: []types.ChatMessage{},
+		ID:         sessionID,
+		Messages:   []types.ChatMessage{},
+		LastAccess: time.Now(),
 	}
 	h.mu.Unlock()
 
@@ -91,6 +103,7 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 		}
 		h.sessions[req.SessionID] = session
 	}
+	session.LastAccess = time.Now()
 	h.mu.Unlock()
 
 	// Add user message to session
@@ -111,6 +124,51 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 	component := components.UserMessage(userMessage)
 	c.Header("Content-Type", "text/html")
 	component.Render(c.Request.Context(), c.Writer)
+}
+
+func (h *ChatHandler) UploadFile(c *gin.Context) {
+	sessionID := c.PostForm("session_id")
+	if sessionID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Session ID is required"})
+		return
+	}
+
+	h.mu.RLock()
+	session, exists := h.sessions[sessionID]
+	h.mu.RUnlock()
+
+	if !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Session not found"})
+		return
+	}
+	session.LastAccess = time.Now()
+
+	file, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "File upload error"})
+		return
+	}
+
+	// Save the file to the session's workspace
+	workspaceDir := filepath.Join("workspaces", sessionID)
+	dst := filepath.Join(workspaceDir, file.Filename)
+	if err := c.SaveUploadedFile(file, dst); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not save file"})
+		return
+	}
+
+	// Add a system message to inform the agent of the new file.
+	systemMessage := types.ChatMessage{
+		Role:      "system",
+		Content:   fmt.Sprintf("The user has uploaded a file: %s. Unless specified otherwise, use this file for your analysis.", file.Filename),
+		ID:        generateMessageID(),
+		SessionID: sessionID,
+	}
+	session.mu.Lock()
+	session.Messages = append(session.Messages, systemMessage)
+	session.mu.Unlock()
+
+	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("File %s uploaded successfully.", file.Filename)})
 }
 
 func (h *ChatHandler) StreamResponse(c *gin.Context) {
@@ -143,6 +201,7 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 		c.Writer.(http.Flusher).Flush()
 		return
 	}
+	session.LastAccess = time.Now()
 
 	// Create a context for this streaming session
 	ctx := c.Request.Context()
@@ -165,12 +224,12 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 	}
 
 	// Start streaming the agent response
-	h.streamAgentResponse(ctx, c.Writer, userMessage.Content, userMessageID)
+	h.streamAgentResponse(ctx, c.Writer, userMessage.Content, userMessageID, sessionID)
 }
 
 // processStreamByWord reads from the stream rune by rune, buffers them into words,
 // and processes each word for tags before sending it to the client. This version is stateful.
-func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writeSSEData func(StreamData) error) {
+func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writeSSEData func(StreamData) error, sessionID string) {
 	reader := bufio.NewReader(r)
 	var currentWord strings.Builder
 	var isBufferingImage bool
@@ -190,7 +249,7 @@ func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writ
 				imagePathBuffer.WriteString(parts[0])
 
 				imagePath := strings.TrimSpace(imagePathBuffer.String())
-				webPath := strings.Replace(imagePath, "/app/workspace/", "/workspace/", 1)
+				webPath := filepath.ToSlash(filepath.Join("/workspaces", sessionID, imagePath))
 
 				// Render the ImageBlock component to a buffer and send
 				var buf bytes.Buffer
@@ -274,7 +333,7 @@ func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writ
 	}
 }
 
-func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWriter, input string, userMessageID string) {
+func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWriter, input string, userMessageID string, sessionID string) {
 	agentMessageID := generateMessageID()
 	var writeMu sync.Mutex
 
@@ -333,7 +392,7 @@ func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWr
 				return err
 			}
 			return nil
-		})
+		}, sessionID)
 	}()
 
 	// Run the agent in a separate goroutine
@@ -344,7 +403,7 @@ func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWr
 			pipeW.Close()
 			r.Close()
 		}()
-		h.agent.Run(ctx, input)
+		h.agent.Run(ctx, input, sessionID)
 		close(agentDone)
 	}()
 
@@ -357,6 +416,20 @@ func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWr
 		// Send the final end-of-stream message.
 		if err := writeSSEData(StreamData{Type: "end"}); err != nil {
 			h.logger.Error("Failed to send end message", zap.Error(err))
+		}
+	}
+}
+
+func (h *ChatHandler) CleanupWorkspaces(maxAge time.Duration, logger *zap.Logger) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	for sessionID, session := range h.sessions {
+		if time.Since(session.LastAccess) > maxAge {
+			workspaceDir := filepath.Join("workspaces", sessionID)
+			logger.Info("Cleaning up stale workspace", zap.String("session_id", sessionID), zap.String("workspace", workspaceDir))
+			os.RemoveAll(workspaceDir)
+			delete(h.sessions, sessionID)
 		}
 	}
 }

@@ -13,7 +13,9 @@ import (
 	"stats-agent/tools"
 	"stats-agent/web"
 	"syscall"
+	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -52,6 +54,10 @@ func main() {
 	if *webMode {
 		// Run web server
 		logger.Info("Starting Stats Agent in web mode", zap.String("port", *port))
+
+		// Start the workspace cleanup go routine
+		go web.StartWorkspaceCleanup(24*time.Hour, 24*time.Hour, logger)
+
 		webServer := web.NewServer(statsAgent, logger, cfg)
 
 		// Create context that listens for interrupt signals
@@ -67,14 +73,21 @@ func main() {
 		// Run CLI mode
 		logger.Info("Starting Stats Agent in CLI mode")
 		scanner := bufio.NewScanner(os.Stdin)
-		fmt.Println("Welcome to the Stats Agent. How can I help you today?")
+
+		// Create a temporary session for CLI mode
+		cliSessionID := "cli-session-" + uuid.NewString()
+		cliWorkspace := "workspaces/" + cliSessionID
+		os.MkdirAll(cliWorkspace, 0755)
+		defer os.RemoveAll(cliWorkspace)
+
+		fmt.Printf("Welcome to the Stats Agent. Using temporary workspace: %s\n", cliWorkspace)
 		fmt.Print("> ")
 		for scanner.Scan() {
 			input := scanner.Text()
 			if input == "exit" {
 				break
 			}
-			statsAgent.Run(ctx, input)
+			statsAgent.Run(ctx, input, cliSessionID)
 			fmt.Print("> ")
 		}
 
