@@ -14,7 +14,7 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    command: "-m ${MAIN_LLM_MODEL_PATH} --host 0.0.0.0 --port ${MAIN_LLM_PORT} -ngl ${N_GPU_LAYERS} -c 16384 --temp 0.3 --top_p 0.9"
+    command: "-m ${MAIN_LLM_MODEL_PATH} --host 0.0.0.0 --port ${MAIN_LLM_PORT} -ngl ${N_GPU_LAYERS} -c 16384 --temp 0.1 --top_p 0.85 --top-k 30"
 
   embedding-llm:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda

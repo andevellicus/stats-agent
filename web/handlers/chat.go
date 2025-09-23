@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -168,16 +169,43 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 }
 
 // processStreamByWord reads from the stream rune by rune, buffers them into words,
-// and processes each word for tags before sending it to the client.
+// and processes each word for tags before sending it to the client. This version is stateful.
 func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writeSSEData func(StreamData) error) {
 	reader := bufio.NewReader(r)
 	var currentWord strings.Builder
+	var isBufferingImage bool
+	var imagePathBuffer strings.Builder
 
 	// processToken is a recursive function that handles tags within a word/token.
 	var processToken func(string)
 	processToken = func(token string) {
-		// Base case for recursion
 		if token == "" {
+			return
+		}
+
+		// Handle image buffering state
+		if isBufferingImage {
+			if strings.Contains(token, "</image>") {
+				parts := strings.SplitN(token, "</image>", 2)
+				imagePathBuffer.WriteString(parts[0])
+
+				imagePath := strings.TrimSpace(imagePathBuffer.String())
+				webPath := strings.Replace(imagePath, "/app/workspace/", "/workspace/", 1)
+
+				// Render the ImageBlock component to a buffer and send
+				var buf bytes.Buffer
+				component := components.ImageBlock(webPath)
+				if err := component.Render(ctx, &buf); err == nil {
+					writeSSEData(StreamData{Type: "chunk", Content: buf.String()})
+				}
+
+				// Reset state and process the rest of the token
+				isBufferingImage = false
+				imagePathBuffer.Reset()
+				processToken(parts[1])
+			} else {
+				imagePathBuffer.WriteString(token)
+			}
 			return
 		}
 
@@ -187,7 +215,7 @@ func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writ
 			parts := strings.SplitN(token, "<python>", 2)
 			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
 			writeSSEData(StreamData{Type: "chunk", Content: "\n```python\n"})
-			processToken(parts[1]) // Recursively process the rest of the token
+			processToken(parts[1])
 		case strings.Contains(token, "</python>"):
 			parts := strings.SplitN(token, "</python>", 2)
 			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
@@ -206,7 +234,6 @@ func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writ
 		case strings.Contains(token, "<agent_status>"):
 			parts := strings.SplitN(token, "<agent_status>", 2)
 			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
-			// Convert the tag to a div with a specific class for the frontend
 			writeSSEData(StreamData{Type: "chunk", Content: `<div class="agent-status-message">`})
 			processToken(parts[1])
 		case strings.Contains(token, "</agent_status>"):
@@ -214,8 +241,12 @@ func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writ
 			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
 			writeSSEData(StreamData{Type: "chunk", Content: `</div>`})
 			processToken(parts[1])
+		case strings.Contains(token, "<image>"):
+			parts := strings.SplitN(token, "<image>", 2)
+			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
+			isBufferingImage = true
+			processToken(parts[1])
 		default:
-			// If no tags are found, just write the token as is.
 			writeSSEData(StreamData{Type: "chunk", Content: token})
 		}
 	}
@@ -227,7 +258,6 @@ func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writ
 		default:
 			char, _, err := reader.ReadRune()
 			if err != nil {
-				// End of stream, flush any remaining content in the buffer.
 				if currentWord.Len() > 0 {
 					processToken(currentWord.String())
 				}
@@ -236,7 +266,6 @@ func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writ
 
 			currentWord.WriteRune(char)
 
-			// Flush the buffer when we hit a natural delimiter (space or newline).
 			if char == ' ' || char == '\n' {
 				processToken(currentWord.String())
 				currentWord.Reset()

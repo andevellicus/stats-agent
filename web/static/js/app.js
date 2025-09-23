@@ -254,6 +254,8 @@ function renderAndProcessContent(contentDiv, content) {
     const cleanedContent = content.replace(/Agent:\s*/g, '').trim();
     if (cleanedContent === "undefined") return;
 
+    // The backend now sends pre-rendered HTML for images and other components.
+    // We just need to parse the markdown.
     contentDiv.innerHTML = marked.parse(cleanedContent || '');
 
     contentDiv.querySelectorAll('.agent-status-message').forEach(statusElement => {

@@ -107,6 +107,7 @@ func (a *Agent) manageMemory(ctx context.Context) {
 	contextWindowThreshold := int(float64(a.cfg.ContextLength) * 0.50)
 
 	if totalTokens > contextWindowThreshold {
+		fmt.Printf("<agent_status>Managing memory: Archiving older messages to the knowledge base...</agent_status>")
 		cutoff := len(a.history) / 2
 
 		if cutoff > 0 && cutoff < len(a.history) {
@@ -148,6 +149,7 @@ func (a *Agent) Run(ctx context.Context, input string) {
 		contextTokens, err := a.countTokens(ctx, longTermContext)
 		if err == nil && contextTokens > int(float64(a.cfg.ContextLength)*0.75) {
 			a.logger.Info("Proactive check: RAG context is too large, summarizing", zap.Int("context_tokens", contextTokens))
+			fmt.Printf("<agent_status>Compressing memory to maintain context window...</agent_status>")
 			summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(ctx, longTermContext)
 			if summaryErr == nil {
 				longTermContext = summarizedContext
@@ -198,6 +200,7 @@ func (a *Agent) Run(ctx context.Context, input string) {
 
 		if llmResponse == "" {
 			a.logger.Warn("LLM response was empty, likely due to a context window error. Attempting to summarize context")
+			fmt.Printf("<agent_status>Compressing memory due to a context window error...</agent_status>")
 			summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(ctx, longTermContext)
 			if summaryErr != nil {
 				a.logger.Error("Recovery failed: Could not summarize RAG context. Aborting turn", zap.Error(summaryErr))
@@ -220,7 +223,7 @@ func (a *Agent) Run(ctx context.Context, input string) {
 		a.history = append(a.history, toolMessage)
 
 		if strings.Contains(execResult, "Error:") {
-			fmt.Printf("<agent_status>Agent ran into an error, attempting to self-correct</agent_status>")
+			fmt.Printf("<agent_status>Error - attempting to self-correct</agent_status>")
 			consecutiveErrors++ // Increment error counter
 			continue
 		} else {

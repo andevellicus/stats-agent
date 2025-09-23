@@ -46,6 +46,7 @@ func NewServer(agent *agent.Agent, logger *zap.Logger, config *config.Config) *S
 func (s *Server) setupRoutes() {
 	// Serve static files
 	s.router.Static("/static", "./web/static")
+	s.router.Static("/workspace", "./workspace")
 
 	// Chat handlers
 	chatHandler := handlers.NewChatHandler(s.agent, s.logger)
