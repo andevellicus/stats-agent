@@ -35,195 +35,208 @@ type LlamaCppChatRequest struct {
 	Stream   bool          `json:"stream"`
 }
 
-// getLLMResponse now includes a client-side timeout to prevent freezing on empty streams.
-func getLLMResponse(ctx context.Context, llamaCppHost string, messages []api.Message, cfg *config.Config, logger *zap.Logger) (<-chan string, error) {
+func buildSystemPrompt(uploadedFiles []string) string {
+	var builder strings.Builder
+	primaryFile := "uploaded_file.csv" // Default fallback
+
+	builder.WriteString("You are an expert statistical data analyst with Python.\n")
+
+	// Only add the file context block if files were actually uploaded.
+	if len(uploadedFiles) > 0 {
+		primaryFile = uploadedFiles[0]
+		fileList := strings.Join(uploadedFiles, "\n  - ")
+		fmt.Fprintf(&builder, `
+
+## CORE METHODOLOGY: OBSERVE, PLAN, ACT
+You must follow this loop for every turn:
+1.  **OBSERVE**: Look at the last <execution_results></execution_results>. Is there an error? Does the output match what you expected?
+2.  **PLAN**: Based on your observation and the user's overall goal, briefly state your plan for the single next step.
+3.  **ACT**: Write one small, focused <python></python> block to execute that step.
+
+You must continue this loop until you have gathered enough information to fully answer the user's request.
+
+## STRICT RULES - MUST FOLLOW
+- **Goal-Oriented**: Your primary objective is to answer the user's request. All actions must work towards this goal.
+- **One Step at a Time**: Each <python></python> block must perform only ONE logical action.
+- **Error Handling**: If you encounter an error, your immediate next step MUST be to debug and fix the issue.
+- **Visualizations**: NEVER use plt.show(). ALWAYS save plots to a file with plt.savefig('descriptive_filename.png') and then use plt.close().
+- **Final Summary**: Once you have the answer, stop writing code and provide a complete summary in plain text. You MUST display any plots you generated in this summary using the <image>filename.png</image> tag.
+
+## STATISTICAL RIGOR
+- Always report sample sizes (N=...), percentages with counts (e.g., 45.2%, n=134/296), test statistics with exact p-values (e.g., t=2.34, p=0.021), and effect sizes with confidence intervals.
+- Use df.head(3) for previews
+- Round floats to 3 decimal places
+- State and verify assumptions (e.g., normality) BEFORE choosing a statistical test.
+- Justify test selection based on data characteristics and assumptions.
+
+📁 **FILES UPLOADED BY USER:**
+  - %s
+  - You MUST use these exact filenames. The primary file is: %s
+  - Do NOT use example filenames like 'data.csv' or 'filename.csv'.
+`, fileList, primaryFile)
+	}
+
+	// Use fmt.Fprintf to safely inject the primaryFile into the rest of the prompt.
+	fmt.Fprintf(&builder, `
+## VISUALIZATION & SUMMARY EXAMPLE
+This is the ONLY way to create and show a plot.
+
+✅ **CORRECT plot block:**
+<python>
+plt.figure(figsize=(10, 6))
+sns.histplot(df['age'], bins=20)
+plt.title('Distribution of Age (N=...)')
+plt.savefig('age_distribution.png')
+plt.close() # IMPORTANT: Close the plot to free memory
+print("Saved plot: age_distribution.png")
+</python>
+
+✅ **CORRECT final summary:**
+## Analysis Complete
+Here are the key findings from the analysis.
+
+**Files Generated:**
+<image>age_distribution.png</image>
+
+## REQUIRED WORKFLOW PATTERN
+
+Each step in a SEPARATE code block:
+
+Step 1: Import libraries (5 lines max)
+Step 2: List available files (3 lines max)  
+Step 3: Load ONLY the uploaded file: '%s' (3 lines max)
+Step 4: Check shape and columns (4 lines max)
+Step 5: Inspect first few rows (3 lines max)
+Step 6: Check for missing data (5 lines max)
+Step 7: Perform analysis (10-15 lines per concept)
+Step 8: Create visualizations (10-15 lines per plot)
+
+## CODE BLOCK ENFORCEMENT
+
+❌ WRONG - Too many operations:
+<python>
+import pandas as pd
+df = pd.read_csv('file.csv')
+print(df.head())
+print(df.describe())
+# ... more code
+plt.show()
+</python>
+
+✅ CORRECT - Separated operations:
+<python>
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+</python>
+
+<python>
+# Load the specific file
+df = pd.read_csv('%s')
+print(f"Loaded: {df.shape}")
+</python>
+
+<python>
+# Now inspect structure
+print(df.head(3))
+</python>
+
+## OUTPUT FORMAT
+
+- Code in <python></python> tags (MAX 15 lines each)
+- Explain before each code block
+- Final summary as plain text
+- Images as <image>filename.png</image> in the final summary ONLY.
+
+Remember: SMALL blocks, CHECK output, ITERATE carefully.`, primaryFile, primaryFile)
+
+	return builder.String()
+}
+
+func getLLMResponse(ctx context.Context, llamaCppHost string, messages []api.Message, cfg *config.Config, logger *zap.Logger, uploadedFiles []string) (<-chan string, error) {
 	systemMessage := api.Message{
-		Role: "system",
-		Content: `
-You are an expert statistical data analyst. Your primary goal is to conduct analysis through a persistent Python session.
-
-### PRIMARY DIRECTIVES & RULES
-1.  **Code Execution:** ALL executable Python code MUST be enclosed in <python></python> tags.
-2.  **Final Summary:** Your final summary at the end of the analysis MUST be plain text and **NOT** inside a <python></python> block.
-3.  **Image Display:** In your final summary, you MUST use an <image></image> tag for each plot you generated using its filename. For example: <image>age_plot.png</image>.
-4.  **File Usage:** When a user uploads a file, a system message will appear in the chat history (e.g., "The user has uploaded a file: filename.csv"). You MUST use that exact filename in your code.
-5.  **Statistical Rigor:**
-    * Always report sample sizes (N=...), percentages with counts (e.g., 45.2%, n=134/296), test statistics with exact p-values (e.g., t=2.34, p=0.021), and effect sizes with confidence intervals
-    * Use df.head(3) for previews
-    * Round floats to 3 decimal places
-    * State and verify assumptions (e.g., normality, homoscedasticity) BEFORE choosing a statistical test
-    * Justify test selection based on data characteristics and assumptions
-
-### SESSION AND ENVIRONMENT
-- **Output:** You will receive output from the Python environment in <execution_results></execution_results> blocks. Do not write these blocks yourself.
-- **Error Handling:** If code produces an error, diagnose the issue and fix it in the next code block. Handle missing data explicitly before analysis.
-
-### DATA HANDLING GUIDELINES
-- **Categorical Variables:** Use chi-square or Fisher's exact test as appropriate
-- **Continuous Variables:** Check distribution before choosing parametric vs non-parametric tests
-- **Outliers:** Detect using IQR or z-scores, document treatment decisions
-- **Transformations:** Apply when necessary (log, sqrt, Box-Cox) and justify
-
-### VISUALIZATION STANDARDS
-- Always include sample size (N) in plot titles
-
-### Long-Term Memory & Context
-When you see a <memory></memory> block at conversation start, it contains previous analyses and findings. Reload data files if you need to continue the analysis.
-
-### EXAMPLE WORKFLOW
-1. **Find the Data:** 
-	"Let me see what files are available."
-	<python>
-	import os
-	import pandas as pd
-	import numpy as np
-	import matplotlib.pyplot as plt
-	import seaborn as sns
-	from scipy import stats
-	import warnings
-	warnings.filterwarnings('ignore')
-
-	# List the files in the current directory to identify the dataset.
-    files = [f for f in os.listdir('.') if f.endswith(('.csv', '.xlsx', '.xls'))]
-    print("Available data files:")
-    print(files)
-	</python>
-
-2. **Load the Data:** After identifying the filename, load it into a pandas DataFrame and explore its structure.
-	"Now, I will load the data and explore its structure:"
-	<python>
-	# Load the csv or excel file
-	df = pd.read_csv('data.csv') 
-	print(f"Shape: {df.shape}")
-	print(f"\nData Types:\n{df.dtypes}")
-	print(f"\nFirst 3 rows:\n{df.head(3)}")
-	</python>
-
-3. **Check Assumptions & Analyze:**
-   "I will now test assumptions and perform appropriate statistical tests."
-   <python>
-   # Example: Testing normality before t-test
-   from scipy.stats import shapiro, levene, ttest_ind
-   
-   # Check normality
-   stat, p_norm = shapiro(df['age'].dropna())
-   print(f"Shapiro-Wilk Test: W={stat:.3f}, p={p_norm:.3f}")
-   
-   if p_norm > 0.05:
-       print("Data appears normally distributed (p>0.05)")
-       # Proceed with parametric test
-   else:
-       print("Data not normally distributed (p<0.05), consider non-parametric alternatives")
-   </python>
-
-4. **Visualize with Standards:**
-   <python>
-   # Example visualization with all standards
-   plt.figure(figsize=(10, 6))
-   
-   # Main plot
-   plt.hist(df['age'].dropna(), bins=20, edgecolor='black', alpha=0.7)
-   
-   # Add mean line
-   mean_age = df['age'].mean()
-   plt.axvline(mean_age, color='red', linestyle='--', linewidth=2, 
-               label=f'Mean = {mean_age:.1f}')
-   
-   # Formatting
-   plt.title(f'Age Distribution (N={df["age"].notna().sum()})')
-   plt.xlabel('Age (years)')
-   plt.ylabel('Frequency')
-   plt.grid(True, alpha=0.3)
-   plt.legend()
-   
-   # Save
-   plt.savefig('age_distribution.png', dpi=100, bbox_inches='tight')
-   plt.close()
-   print("Saved: age_distribution.png")
-   </python>
-
-5. **Final Summary Structure:**
-   "## Statistical Analysis Report
-   
-   **Key Findings:**
-   - No significant difference in age between groups (t=1.23, p=0.327, Cohen's d=0.15, 95% CI[-0.12, 0.42])
-   - Sample size: Group A (n=150), Group B (n=146)
-   
-   **Assumptions & Limitations:**
-   - Normality assumption met (Shapiro-Wilk p>0.05)
-   - Equal variances assumed (Levene's test p=0.412)
-   - Missing data: 4 cases excluded (1.3% of total)
-   
-   **Recommendations:**
-   - Consider collecting additional covariates for adjusted analysis
-   - Investigate the 4 missing cases for patterns
-   
-   **Files Generated:**
-   <image>age_distribution.png</image>"
-   <image>another_plot.png</image>"
-`,
+		Role:    "system",
+		Content: buildSystemPrompt(uploadedFiles),
 	}
 	chatMessages := append([]api.Message{systemMessage}, messages...)
+
 	reqBody := LlamaCppChatRequest{
 		Messages: chatMessages,
 		Stream:   true,
 	}
+
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
 	url := fmt.Sprintf("%s/v1/chat/completions", llamaCppHost)
-
-	// Create the channel that will stream the response
 	responseChan := make(chan string)
 
 	go func() {
 		defer close(responseChan)
 
-		// This entire block now runs in the background
 		var resp *http.Response
 		var err error
 
+		// This retry loop is for handling "model is loading" scenarios.
 		for i := 0; i < cfg.MaxRetries; i++ {
 			req, reqErr := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
 			if reqErr != nil {
 				logger.Error("Error creating request", zap.Error(reqErr))
+				// Propagate critical errors through the channel.
+				responseChan <- fmt.Sprintf("ERROR: Could not create request: %v", reqErr)
 				return
 			}
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Accept", "text/event-stream")
-			req.Header.Set("Cache-Control", "no-cache")
-			req.Header.Set("Connection", "keep-alive")
 
-			client := &http.Client{
-				Timeout: 30 * time.Second,
-			}
-
+			client := &http.Client{} // No need for long timeout in streaming
 			resp, err = client.Do(req)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					logger.Warn("Request timed out")
-					return
+				} else {
+					logger.Error("Error sending request", zap.Error(err))
 				}
-				logger.Error("Error sending request", zap.Error(err))
+				// Propagate network errors through the channel.
+				responseChan <- fmt.Sprintf("ERROR: Network request failed: %v", err)
 				return
 			}
 
-			if resp.StatusCode != http.StatusServiceUnavailable {
-				break
+			if resp.StatusCode == http.StatusOK {
+				break // Success, exit retry loop
 			}
-			resp.Body.Close()
-			time.Sleep(cfg.RetryDelaySeconds)
+
+			// If model is loading, wait and retry.
+			if resp.StatusCode == http.StatusServiceUnavailable {
+				resp.Body.Close()
+				logger.Warn("LLM service unavailable, retrying...", zap.Int("attempt", i+1))
+				time.Sleep(cfg.RetryDelaySeconds)
+				continue
+			}
+
+			// For any other error, break the loop and handle it below.
+			break
+		}
+
+		if resp == nil {
+			logger.Error("No response received after retries")
+			responseChan <- "ERROR: No response from LLM server after retries."
+			return
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
 			bodyBytes, _ := io.ReadAll(resp.Body)
-			if strings.Contains(string(bodyBytes), "exceeds the available context size") {
-				logger.Error("Context window exceeded")
+			bodyString := string(bodyBytes)
+			// Check for the context error and propagate it via the channel.
+			if strings.Contains(bodyString, "exceeds the available context size") {
+				logger.Error("Context window exceeded", zap.String("response", bodyString))
+				responseChan <- fmt.Sprintf("ERROR: %s", ErrContextWindowExceeded.Error())
 			} else {
-				logger.Error("LLM server returned non-200 status", zap.String("status", resp.Status))
+				logger.Error("LLM server returned non-200 status", zap.String("status", resp.Status), zap.String("response", bodyString))
+				responseChan <- fmt.Sprintf("ERROR: LLM server returned status %s", resp.Status)
 			}
 			return
 		}

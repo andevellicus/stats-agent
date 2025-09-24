@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"stats-agent/config"
 	"stats-agent/rag"
 	"stats-agent/tools"
@@ -19,11 +20,12 @@ import (
 )
 
 type Agent struct {
-	cfg        *config.Config
-	pythonTool *tools.StatefulPythonTool
-	rag        *rag.RAG
-	history    []api.Message
-	logger     *zap.Logger
+	cfg          *config.Config
+	pythonTool   *tools.StatefulPythonTool
+	rag          *rag.RAG
+	history      []api.Message
+	logger       *zap.Logger
+	sessionFiles map[string][]string
 }
 
 type TokenizeRequest struct {
@@ -37,10 +39,122 @@ type TokenizeResponse struct {
 func NewAgent(cfg *config.Config, pythonTool *tools.StatefulPythonTool, rag *rag.RAG, logger *zap.Logger) *Agent {
 	logger.Info("Agent initialized", zap.Int("context_window_size", cfg.ContextLength))
 	return &Agent{
-		cfg:        cfg,
-		pythonTool: pythonTool,
-		rag:        rag,
-		logger:     logger,
+		cfg:          cfg,
+		pythonTool:   pythonTool,
+		rag:          rag,
+		logger:       logger,
+		sessionFiles: make(map[string][]string),
+	}
+}
+
+// Run starts the agent's interaction loop for a given user input
+func (a *Agent) Run(ctx context.Context, input string, sessionID string) {
+	// Get uploaded files for this session
+	uploadedFiles := a.getSessionFiles(sessionID)
+	a.sessionFiles[sessionID] = uploadedFiles
+
+	// If files were just uploaded, initialize the Python session with awareness
+	if len(uploadedFiles) > 0 && len(a.history) == 0 {
+		initResult, err := a.pythonTool.InitializeSession(ctx, sessionID, uploadedFiles)
+		if err != nil {
+			a.logger.Error("Failed to initialize session with files", zap.Error(err))
+		} else if initResult != "" {
+			fmt.Printf("<execution_result>%s</execution_result>", initResult)
+		}
+	}
+
+	a.history = append(a.history, api.Message{Role: "user", Content: input})
+
+	longTermContext, err := a.rag.Query(ctx, input, a.cfg.RAGResults)
+	if err != nil {
+		a.logger.Error("Error querying RAG for long-term context", zap.Error(err))
+	}
+
+	if longTermContext != "" {
+		contextTokens, err := a.countTokens(ctx, longTermContext)
+		if err == nil && contextTokens > int(float64(a.cfg.ContextLength)*0.75) {
+			a.logger.Info("Proactive check: RAG context is too large, summarizing", zap.Int("context_tokens", contextTokens))
+			fmt.Printf("<agent_status>Compressing memory....</agent_status>")
+			summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(ctx, longTermContext)
+			if summaryErr == nil {
+				longTermContext = summarizedContext
+			}
+		}
+	}
+
+	var messagesForLLM []api.Message
+	consecutiveErrors := 0 // Initialize error counter
+
+	for turn := 0; turn < a.cfg.MaxTurns; turn++ {
+		// Memory is now managed at the start of every single turn.
+		a.manageMemory(ctx)
+		// Check for consecutive errors to break out of a death loop
+		if consecutiveErrors >= a.cfg.ConsecutiveErrors {
+			a.logger.Warn("Agent produced consecutive errors, breaking loop to request user feedback", zap.Int("consecutive_errors", a.cfg.ConsecutiveErrors))
+			fmt.Printf("<agent_status>Consecutive errors, user feedback needed.</agent_status>")
+			break
+		}
+
+		messagesForLLM = []api.Message{}
+		if longTermContext != "" {
+			messagesForLLM = append(messagesForLLM, api.Message{Role: "system", Content: longTermContext})
+		}
+		messagesForLLM = append(messagesForLLM, a.history...)
+
+		var llmResponseBuilder strings.Builder
+		isFirstChunk := true
+
+		responseChan, err := getLLMResponse(ctx, a.cfg.MainLLMHost, messagesForLLM, a.cfg, a.logger, uploadedFiles)
+		if err != nil {
+			a.logger.Error("Error getting LLM response channel", zap.Error(err))
+			break
+		}
+
+		for chunk := range responseChan {
+			if isFirstChunk && !strings.Contains(chunk, "<python>") {
+				fmt.Print("Agent: ")
+			}
+			isFirstChunk = false
+			fmt.Print(chunk)
+			llmResponseBuilder.WriteString(chunk)
+		}
+
+		llmResponse := llmResponseBuilder.String()
+		if !strings.HasSuffix(llmResponse, "\n") {
+			fmt.Println()
+		}
+
+		if llmResponse == "" {
+			a.logger.Warn("LLM response was empty, likely due to a context window error. Attempting to summarize context")
+			fmt.Printf("<agent_status>Compressing memory due to a context window error...</agent_status>")
+			summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(ctx, longTermContext)
+			if summaryErr != nil {
+				a.logger.Error("Recovery failed: Could not summarize RAG context. Aborting turn", zap.Error(summaryErr))
+				break
+			}
+			longTermContext = summarizedContext
+			continue
+		}
+
+		a.history = append(a.history, api.Message{Role: "assistant", Content: llmResponse})
+
+		_, execResult, wasCodeExecuted := a.pythonTool.ExecutePythonCode(ctx, llmResponse, sessionID)
+
+		if !wasCodeExecuted {
+			return
+		}
+
+		executionMessage := fmt.Sprintf("<execution_results>\n%s\n</execution_results>", execResult)
+		toolMessage := api.Message{Role: "tool", Content: executionMessage}
+		a.history = append(a.history, toolMessage)
+
+		if strings.Contains(execResult, "Error:") {
+			fmt.Printf("<agent_status>Error - attempting to self-correct</agent_status>")
+			consecutiveErrors++ // Increment error counter
+			continue
+		} else {
+			consecutiveErrors = 0 // Reset error counter on success
+		}
 	}
 }
 
@@ -104,7 +218,7 @@ func (a *Agent) manageMemory(ctx context.Context) {
 		}
 	}
 
-	contextWindowThreshold := int(float64(a.cfg.ContextLength) * 0.50)
+	contextWindowThreshold := int(float64(a.cfg.ContextLength) * 0.75)
 
 	if totalTokens > contextWindowThreshold {
 		fmt.Printf("<agent_status>Archiving older messages....</agent_status>")
@@ -136,99 +250,26 @@ func (a *Agent) manageMemory(ctx context.Context) {
 	}
 }
 
-// Run starts the agent's interaction loop for a given user input
-func (a *Agent) Run(ctx context.Context, input string, sessionID string) {
-	a.history = append(a.history, api.Message{Role: "user", Content: input})
+func (a *Agent) getSessionFiles(sessionID string) []string {
+	workspaceDir := filepath.Join("workspaces", sessionID)
+	var files []string
 
-	longTermContext, err := a.rag.Query(ctx, input, a.cfg.RAGResults)
-	if err != nil {
-		a.logger.Error("Error querying RAG for long-term context", zap.Error(err))
+	// Check for CSV files
+	csvFiles, _ := filepath.Glob(filepath.Join(workspaceDir, "*.csv"))
+	files = append(files, csvFiles...)
+
+	// Check for Excel files
+	xlsxFiles, _ := filepath.Glob(filepath.Join(workspaceDir, "*.xlsx"))
+	files = append(files, xlsxFiles...)
+
+	xlsFiles, _ := filepath.Glob(filepath.Join(workspaceDir, "*.xls"))
+	files = append(files, xlsFiles...)
+
+	// Convert to just filenames
+	var filenames []string
+	for _, f := range files {
+		filenames = append(filenames, filepath.Base(f))
 	}
 
-	if longTermContext != "" {
-		contextTokens, err := a.countTokens(ctx, longTermContext)
-		if err == nil && contextTokens > int(float64(a.cfg.ContextLength)*0.75) {
-			a.logger.Info("Proactive check: RAG context is too large, summarizing", zap.Int("context_tokens", contextTokens))
-			fmt.Printf("<agent_status>Compressing memory....</agent_status>")
-			summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(ctx, longTermContext)
-			if summaryErr == nil {
-				longTermContext = summarizedContext
-			}
-		}
-	}
-
-	var messagesForLLM []api.Message
-	consecutiveErrors := 0 // Initialize error counter
-
-	for turn := 0; turn < a.cfg.MaxTurns; turn++ {
-		// Memory is now managed at the start of every single turn.
-		a.manageMemory(ctx)
-		// Check for consecutive errors to break out of a death loop
-		if consecutiveErrors >= a.cfg.ConsecutiveErrors {
-			a.logger.Warn("Agent produced consecutive errors, breaking loop to request user feedback", zap.Int("consecutive_errors", a.cfg.ConsecutiveErrors))
-			fmt.Printf("<agent_status>Consecutive errors, user feedback needed.</agent_status>")
-			break
-		}
-
-		messagesForLLM = []api.Message{}
-		if longTermContext != "" {
-			messagesForLLM = append(messagesForLLM, api.Message{Role: "system", Content: longTermContext})
-		}
-		messagesForLLM = append(messagesForLLM, a.history...)
-
-		var llmResponseBuilder strings.Builder
-		isFirstChunk := true
-
-		responseChan, err := getLLMResponse(ctx, a.cfg.MainLLMHost, messagesForLLM, a.cfg, a.logger)
-		if err != nil {
-			a.logger.Error("Error getting LLM response channel", zap.Error(err))
-			break
-		}
-
-		for chunk := range responseChan {
-			if isFirstChunk && !strings.Contains(chunk, "<python>") {
-				fmt.Print("Agent: ")
-			}
-			isFirstChunk = false
-			fmt.Print(chunk)
-			llmResponseBuilder.WriteString(chunk)
-		}
-
-		llmResponse := llmResponseBuilder.String()
-		if !strings.HasSuffix(llmResponse, "\n") {
-			fmt.Println()
-		}
-
-		if llmResponse == "" {
-			a.logger.Warn("LLM response was empty, likely due to a context window error. Attempting to summarize context")
-			fmt.Printf("<agent_status>Compressing memory due to a context window error...</agent_status>")
-			summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(ctx, longTermContext)
-			if summaryErr != nil {
-				a.logger.Error("Recovery failed: Could not summarize RAG context. Aborting turn", zap.Error(summaryErr))
-				break
-			}
-			longTermContext = summarizedContext
-			continue
-		}
-
-		a.history = append(a.history, api.Message{Role: "assistant", Content: llmResponse})
-
-		_, execResult, wasCodeExecuted := a.pythonTool.ExecutePythonCode(ctx, llmResponse, sessionID)
-
-		if !wasCodeExecuted {
-			return
-		}
-
-		executionMessage := fmt.Sprintf("<execution_results>\n%s\n</execution_results>", execResult)
-		toolMessage := api.Message{Role: "tool", Content: executionMessage}
-		a.history = append(a.history, toolMessage)
-
-		if strings.Contains(execResult, "Error:") {
-			fmt.Printf("<agent_status>Error - attempting to self-correct</agent_status>")
-			consecutiveErrors++ // Increment error counter
-			continue
-		} else {
-			consecutiveErrors = 0 // Reset error counter on success
-		}
-	}
+	return filenames
 }

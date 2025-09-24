@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"stats-agent/agent"
 	"stats-agent/web/templates/components"
 	"stats-agent/web/templates/pages"
@@ -106,9 +107,16 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 	session.LastAccess = time.Now()
 	h.mu.Unlock()
 
-	// **Handle potential file upload**
+	// Handle potential file upload
 	file, err := c.FormFile("file")
 	if err == nil {
+		// **1. Sanitize the original filename**
+		sanitizedFilename := sanitizeFilename(file.Filename)
+		if sanitizedFilename == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid or unsafe filename."})
+			return
+		}
+
 		// A file was included, process it
 		ext := strings.ToLower(filepath.Ext(file.Filename))
 		if ext != ".csv" && ext != ".xlsx" && ext != ".xls" {
@@ -123,19 +131,23 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 			return
 		}
 
-		// Add a system message to inform the agent of the new file.
-		systemMessage := types.ChatMessage{
-			Role:      "system",
-			Content:   fmt.Sprintf("The user has uploaded the file: %s. Use this file for your analysis.", file.Filename),
-			ID:        generateMessageID(),
-			SessionID: req.SessionID,
+		// **2. Verify that the sanitized file now exists on disk**
+		if !verifyFileExists(workspaceDir, sanitizedFilename) {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "File verification failed after upload."})
+			return
 		}
-		session.mu.Lock()
-		session.Messages = append(session.Messages, systemMessage)
-		session.mu.Unlock()
+
+		// Modify the user's message to include file info prominently
+		if strings.TrimSpace(req.Message) == "" {
+			req.Message = fmt.Sprintf("I've uploaded %s. Please analyze this dataset and provide statistical insights.", file.Filename)
+		} else {
+			req.Message = fmt.Sprintf("[📎 File uploaded: %s]\n\n%s", file.Filename, req.Message)
+		}
+
+		h.logger.Info("File uploaded", zap.String("filename", file.Filename), zap.String("session_id", req.SessionID))
 	}
 
-	// Add user's text message to session
+	// Add user's message to session (now includes file info if uploaded)
 	userMessage := types.ChatMessage{
 		Role:      "user",
 		Content:   req.Message,
@@ -154,7 +166,6 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 	c.Header("Content-Type", "text/html")
 	component.Render(c.Request.Context(), c.Writer)
 }
-
 func (h *ChatHandler) UploadFile(c *gin.Context) {
 	sessionID := c.PostForm("session_id")
 	if sessionID == "" {
@@ -468,6 +479,43 @@ func (h *ChatHandler) CleanupWorkspaces(maxAge time.Duration, logger *zap.Logger
 			delete(h.sessions, sessionID)
 		}
 	}
+}
+
+// Sanitize the filename to prevent security issues like directory traversal.
+func sanitizeFilename(filename string) string {
+	// Trim whitespace and periods from the ends
+	sanitized := strings.Trim(filename, " .")
+
+	// Replace known dangerous sequences.
+	sanitized = strings.ReplaceAll(sanitized, "..", "")
+
+	// Define a regex for allowed characters: letters, numbers, underscore, hyphen, period, space.
+	// This is a whitelist approach, which is more secure.
+	reg := regexp.MustCompile(`[^a-zA-Z0-9._\s-]`)
+	sanitized = reg.ReplaceAllString(sanitized, "")
+
+	// Limit the length of the filename to a reasonable size.
+	if len(sanitized) > 255 {
+		sanitized = sanitized[:255]
+	}
+
+	return sanitized
+}
+
+// Verify that the file exists in the session's workspace.
+func verifyFileExists(workspaceDir, filename string) bool {
+	// Create the full, safe path to the file.
+	safePath := filepath.Join(workspaceDir, filename)
+
+	// Check if the file exists and is not a directory.
+	info, err := os.Stat(safePath)
+	if os.IsNotExist(err) {
+		return false // File does not exist
+	}
+	if info.IsDir() {
+		return false // It's a directory, not a file
+	}
+	return true
 }
 
 func generateSessionID() string {

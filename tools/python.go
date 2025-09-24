@@ -30,6 +30,44 @@ func NewStatefulPythonTool(ctx context.Context, address string, logger *zap.Logg
 	return &StatefulPythonTool{conn: conn, logger: logger}, nil
 }
 
+func (t *StatefulPythonTool) InitializeSession(ctx context.Context, sessionID string, uploadedFiles []string) (string, error) {
+	if len(uploadedFiles) == 0 {
+		return "", nil
+	}
+
+	// Build initialization code that lists files
+	filesList := strings.Join(uploadedFiles, "', '")
+	initCode := fmt.Sprintf(`
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+import warnings
+warnings.filterwarnings('ignore')
+
+# Session initialized with uploaded files
+uploaded_files = ['%s']
+print("="*50)
+print("📊 STATS AGENT SESSION INITIALIZED")
+print("="*50)
+print(f"📁 Uploaded files detected: {len(uploaded_files)}")
+for f in uploaded_files:
+    if os.path.exists(f):
+        size = os.path.getsize(f) / 1024  # Size in KB
+        print(f"  ✓ {f} ({size:.1f} KB)")
+    else:
+        print(f"  ✗ {f} (not found)")
+print("="*50)
+print(f"Primary file for analysis: {uploaded_files[0]}")
+print("Ready for statistical analysis!")
+print("="*50)
+`, filesList)
+
+	return t.Call(ctx, initCode, sessionID)
+}
+
 func (t *StatefulPythonTool) Name() string {
 	return "Stateful Python Environment"
 }
