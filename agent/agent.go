@@ -107,7 +107,7 @@ func (a *Agent) manageMemory(ctx context.Context) {
 	contextWindowThreshold := int(float64(a.cfg.ContextLength) * 0.50)
 
 	if totalTokens > contextWindowThreshold {
-		fmt.Printf("<agent_status>Archiving older messages to the knowledge base</agent_status>")
+		fmt.Printf("<agent_status>Archiving older messages....</agent_status>")
 		cutoff := len(a.history) / 2
 
 		if cutoff > 0 && cutoff < len(a.history) {
@@ -149,7 +149,7 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string) {
 		contextTokens, err := a.countTokens(ctx, longTermContext)
 		if err == nil && contextTokens > int(float64(a.cfg.ContextLength)*0.75) {
 			a.logger.Info("Proactive check: RAG context is too large, summarizing", zap.Int("context_tokens", contextTokens))
-			fmt.Printf("<agent_status>Compressing memory to maintain context window...</agent_status>")
+			fmt.Printf("<agent_status>Compressing memory....</agent_status>")
 			summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(ctx, longTermContext)
 			if summaryErr == nil {
 				longTermContext = summarizedContext
@@ -166,6 +166,7 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string) {
 		// Check for consecutive errors to break out of a death loop
 		if consecutiveErrors >= a.cfg.ConsecutiveErrors {
 			a.logger.Warn("Agent produced consecutive errors, breaking loop to request user feedback", zap.Int("consecutive_errors", a.cfg.ConsecutiveErrors))
+			fmt.Printf("<agent_status>Consecutive errors, user feedback needed.</agent_status>")
 			break
 		}
 
