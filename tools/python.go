@@ -51,9 +51,9 @@ warnings.filterwarnings('ignore')
 # Session initialized with uploaded files
 uploaded_files = ['%s']
 print("="*50)
-print("📊 POCKET STATISTICIAN SESSION INITIALIZED")
+print("POCKET STATISTICIAN SESSION INITIALIZED")
 print("="*50)
-print(f"📁 Uploaded files detected: {len(uploaded_files)}")
+print(f"Uploaded files detected: {len(uploaded_files)}")
 for f in uploaded_files:
     if os.path.exists(f):
         size = os.path.getsize(f) / 1024  # Size in KB
@@ -153,7 +153,7 @@ func (t *StatefulPythonTool) ExecutePythonCode(ctx context.Context, text string,
 
 	// ONLY print the execution result, wrapped in tags.
 	// This is the only output from this function that goes to the web UI stream.
-	fmt.Printf("<execution_result>%s</execution_result>", execResult)
+	fmt.Printf("<execution_results>%s</execution_results>", execResult)
 
 	return pythonCode, execResult, true
 }

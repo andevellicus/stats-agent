@@ -327,13 +327,13 @@ func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writ
 			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
 			writeSSEData(StreamData{Type: "chunk", Content: "\n```\n"})
 			processToken(parts[1])
-		case strings.Contains(token, "<execution_result>"):
-			parts := strings.SplitN(token, "<execution_result>", 2)
+		case strings.Contains(token, "<execution_results>"):
+			parts := strings.SplitN(token, "<execution_results>", 2)
 			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
 			writeSSEData(StreamData{Type: "chunk", Content: "\n```\n"})
 			processToken(parts[1])
-		case strings.Contains(token, "</execution_result>"):
-			parts := strings.SplitN(token, "</execution_result>", 2)
+		case strings.Contains(token, "</execution_results>"):
+			parts := strings.SplitN(token, "</execution_results>", 2)
 			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
 			writeSSEData(StreamData{Type: "chunk", Content: "\n```\n"})
 			processToken(parts[1])

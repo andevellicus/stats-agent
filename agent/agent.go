@@ -59,7 +59,14 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string) {
 		if err != nil {
 			a.logger.Error("Failed to initialize session with files", zap.Error(err))
 		} else if initResult != "" {
-			fmt.Printf("<execution_result>%s</execution_result>", initResult)
+			// Instead of printing, add the initialization result directly to the history
+			// as if it were the output of a tool. This makes the agent aware of the
+			// context without displaying it to the user.
+			initializationMessage := api.Message{
+				Role:    "tool",
+				Content: fmt.Sprintf("<execution_results>\n%s\n</execution_results>", initResult),
+			}
+			a.history = append(a.history, initializationMessage)
 		}
 	}
 
@@ -104,7 +111,7 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string) {
 		var llmResponseBuilder strings.Builder
 		isFirstChunk := true
 
-		responseChan, err := getLLMResponse(ctx, a.cfg.MainLLMHost, messagesForLLM, a.cfg, a.logger, uploadedFiles)
+		responseChan, err := getLLMResponse(ctx, a.cfg.MainLLMHost, messagesForLLM, a.cfg, a.logger)
 		if err != nil {
 			a.logger.Error("Error getting LLM response channel", zap.Error(err))
 			break

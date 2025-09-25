@@ -29,7 +29,7 @@ templ AgentMessage(msg types.ChatMessage) {
 		<div class="bg-white rounded-2xl px-5 py-3 w-full shadow-md border border-gray-100 hover:shadow-lg transition-shadow duration-200">
 			<div class="font-semibold text-sm text-primary mb-2 font-display">Pocket Statistician</div>
 			<div class="leading-relaxed text-gray-700 font-sans">
-				!templates.MarkdownToHTML(msg.Content)
+			    { msg.Content }
 			</div>
 		</div>
 	</div>
