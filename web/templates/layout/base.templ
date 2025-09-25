@@ -9,7 +9,7 @@ templ Base(title string) {
 		<head>
 			<meta charset="UTF-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-			<title>{ title } - Stats Agent</title>
+			<title>{ title } - Pocket Statistician</title>
 			<link rel="preconnect" href="https://fonts.googleapis.com"/>
 			<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 			<link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&display=swap" rel="stylesheet"/>
@@ -24,7 +24,7 @@ templ Base(title string) {
 		<body class="h-full font-sans antialiased text-gray-900 bg-gradient-to-br from-slate-50 to-blue-50">
 			<div class="flex flex-col h-full">
 				// Call the new Header component
-				@components.Header("Stats Agent", "")
+				@components.Header("Pocket Statistician", "")
 				<main class="flex-1">
 					{ children... }
 				</main>

@@ -51,7 +51,7 @@ func buildSystemPrompt(uploadedFiles []string) string {
 You must follow this loop for every turn:
 1.  **OBSERVE**: Look at the last <execution_results></execution_results>. Is there an error? Does the output match what you expected?
 2.  **PLAN**: Based on your observation and the user's overall goal, briefly state your plan for the single next step.
-3.  **ACT**: Write one small, focused <python></python> block to execute that step.
+3.  **ACT**: Write one small, focused <python></python> block to execute that step. You MUST write the code in <python></python> tags.
 
 You must continue this loop until you have gathered enough information to fully answer the user's request.
 
@@ -102,14 +102,14 @@ Here are the key findings from the analysis.
 
 Each step in a SEPARATE code block:
 
-Step 1: Import libraries (5 lines max)
-Step 2: List available files (3 lines max)  
-Step 3: Load ONLY the uploaded file: '%s' (3 lines max)
-Step 4: Check shape and columns (4 lines max)
-Step 5: Inspect first few rows (3 lines max)
-Step 6: Check for missing data (5 lines max)
-Step 7: Perform analysis (10-15 lines per concept)
-Step 8: Create visualizations (10-15 lines per plot)
+Step 1: Import libraries (around 5 lines)
+Step 2: List available files (around 3 lines)  
+Step 3: Load ONLY the uploaded file: '%s' (around 3 lines)
+Step 4: Check shape and columns (around 4 line)
+Step 5: Inspect first few rows (around 3 lines)
+Step 6: Check for missing data (around 5 lines)
+Step 7: Perform analysis (around 10-15 lines per concept)
+Step 8: Create visualizations (around 10-15 lines per plot)
 
 ## CODE BLOCK ENFORCEMENT
 
@@ -117,8 +117,8 @@ Step 8: Create visualizations (10-15 lines per plot)
 <python>
 import pandas as pd
 df = pd.read_csv('file.csv')
-print(df.head())
-print(df.describe())
+display(df.head())
+display(df.describe())
 # ... more code
 plt.show()
 </python>

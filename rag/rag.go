@@ -129,7 +129,7 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, messages []api.Message) er
 			}
 			// If the message is long, create an additional summary document for embedding.
 			if len(msg.Content) > 500 { // Threshold for what's considered "long"
-				summary, err := r.createSearchableSummary(ctx, msg.Content)
+				summary, err := r.generateSearchableSummary(ctx, msg.Content)
 				if err != nil {
 					r.logger.Warn("Failed to create searchable summary for long message", zap.Error(err))
 				} else {
@@ -319,15 +319,38 @@ func (r *RAG) generateFactSummary(ctx context.Context, code, result string) (str
 		finalResult = compressMiddle(result, 800, 200, 200)
 	}
 
-	systemPrompt := `You are an expert at creating concise, searchable facts.
-	Your task is to generate a single, descriptive sentence that captures the key finding, action, 
-	or error from the provided code and output.
-	CRITICAL RULE: The summary MUST be a single sentence and less than 100 words.
-	Include: operation performed, data involved, key finding, and outcome.
-	Format: "Fact: [operation] on [data] revealed [finding/outcome]"
-	Example: "Fact: Correlation analysis on age and income columns revealed strong positive correlation (r=0.72, p<0.001)"
-	Output only the single sentence summary and nothing else.`
-	userPrompt := fmt.Sprintf("Code:\n%s\nOutput:\n%s", code, finalResult)
+	// System prompt defines the expert persona and the core task.
+	systemPrompt := `You are an expert at creating concise, searchable facts from code and its output. Your task is to generate a single, descriptive sentence that captures the key finding, action, or error.`
+
+	// User prompt provides the specific rules, an example, and the data to process.
+	userPrompt := fmt.Sprintf(`Generate a summary for the following code and output, following these rules:
+1. The summary MUST be a single sentence.
+2. The summary MUST start with "Fact:".
+3. The summary MUST be less than 100 words.
+
+Here is an example:
+---
+**Input:**
+Code:
+df.head(3)
+
+Output:
+   age gender  side
+0   55      M  left
+1   60      F  right
+2   65      M  left
+---
+**Your Output:**
+Fact: The dataframe contains columns for age, gender, and side.
+---
+
+**Input:**
+Code:
+%s
+
+Output:
+%s
+`, code, finalResult)
 
 	messages := []api.Message{
 		{Role: "system", Content: systemPrompt},
@@ -344,25 +367,23 @@ func (r *RAG) generateFactSummary(ctx context.Context, code, result string) (str
 	return strings.TrimSpace(summary), nil
 }
 
-// createSearchableSummary distills a long message into a concise, searchable sentence.
-func (r *RAG) createSearchableSummary(ctx context.Context, content string) (string, error) {
+// generateSearchableSummary distills a long message into a concise, searchable sentence.
+func (r *RAG) generateSearchableSummary(ctx context.Context, content string) (string, error) {
 	// This prompt is specifically designed to create summaries that are good for retrieval.
 	// It focuses on intent, entities, and actions rather than just summarizing the text.
-	systemPrompt := `You are an expert at creating concise, searchable summaries. 
-Your task is to distill the user's message into a single sentence that captures the core question, action, or intent.
-The summary MUST be a single sentence.
-Focus on key entities, variable names, and statistical concepts mentioned.
-The goal is to create a summary that would be highly relevant if a user later searched for the main topic of the original message.
+	systemPrompt := `You are an expert at creating concise, searchable summaries of user messages. Your task is to distill the user's message into a single sentence that captures the core question, action, or intent.`
 
-Example Input:
-"Ok, I see the data has an 'age' and 'income' column. Can you first check for missing values in both, then tell me the mean for each, and finally create a scatter plot to see if there's a relationship between them?"
+	userPrompt := fmt.Sprintf(`Create a single-sentence summary of the following user message. Focus on key entities, variable names, and statistical concepts.
 
-Example Output:
-"User wants to check for missing values and calculate the mean for 'age' and 'income', then visualize the relationship with a scatter plot."`
+**User Message:**
+"%s"
+
+**Summary:**
+`, content)
 
 	messages := []api.Message{
 		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: content},
+		{Role: "user", Content: userPrompt},
 	}
 
 	summary, err := getLLMResponse(ctx, r.cfg.SummarizationLLMHost, messages, r.cfg, r.logger)

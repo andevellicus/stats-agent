@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 
@@ -50,7 +51,7 @@ warnings.filterwarnings('ignore')
 # Session initialized with uploaded files
 uploaded_files = ['%s']
 print("="*50)
-print("📊 STATS AGENT SESSION INITIALIZED")
+print("📊 POCKET STATISTICIAN SESSION INITIALIZED")
 print("="*50)
 print(f"📁 Uploaded files detected: {len(uploaded_files)}")
 for f in uploaded_files:
@@ -87,23 +88,28 @@ func (t *StatefulPythonTool) Call(ctx context.Context, input string, sessionID s
 
 	// Use a buffered reader to read until the EOM token is found.
 	reader := bufio.NewReader(t.conn)
-	fullResponse, err := reader.ReadString('>')
-	if err != nil {
-		return "", fmt.Errorf("failed to read result from Python server: %w", err)
-	}
+	var fullResponse strings.Builder
+	buffer := make([]byte, 1024) // Read in chunks
 
-	// Check if the response ends with the EOM token.
-	// This handles cases where the token itself might be split across reads.
-	for !strings.HasSuffix(fullResponse, EOM_TOKEN) {
-		nextChunk, err := reader.ReadString('>')
+	for {
+		n, err := reader.Read(buffer)
 		if err != nil {
-			return "", fmt.Errorf("failed to read full response from Python server: %w", err)
+			if err == io.EOF {
+				break
+			}
+			return "", fmt.Errorf("failed to read result from Python server: %w", err)
 		}
-		fullResponse += nextChunk
+
+		fullResponse.Write(buffer[:n])
+
+		// Check if the complete EOM token is now in our collected response
+		if strings.HasSuffix(fullResponse.String(), EOM_TOKEN) {
+			break
+		}
 	}
 
 	// Trim the EOM token from the final response.
-	return strings.TrimSuffix(fullResponse, EOM_TOKEN), nil
+	return strings.TrimSuffix(fullResponse.String(), EOM_TOKEN), nil
 }
 
 func (t *StatefulPythonTool) Close() {

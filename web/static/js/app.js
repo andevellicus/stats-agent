@@ -264,7 +264,7 @@ function initiateSSE() {
                     agentMessageContainer.id = agentMessageId;
                     agentMessageContainer.innerHTML = `
 						<div class="agent-output bg-white rounded-2xl px-5 py-3 w-full shadow-md border border-gray-100">
-							<div class="font-semibold text-sm text-primary mb-2 font-display">Stats Agent</div>
+							<div class="font-semibold text-sm text-primary mb-2 font-display">Pocket Statistician</div>
 							<div id="content-${agentMessageId}" class="prose max-w-none leading-relaxed text-gray-700 font-sans"></div>
 						</div>
                     `;

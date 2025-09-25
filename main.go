@@ -53,7 +53,7 @@ func main() {
 
 	if *webMode {
 		// Run web server
-		logger.Info("Starting Stats Agent in web mode", zap.String("port", *port))
+		logger.Info("Starting Pocket Statistician in web mode", zap.String("port", *port))
 
 		// Start the workspace cleanup go routine
 		go web.StartWorkspaceCleanup(24*time.Hour, 24*time.Hour, logger)
@@ -71,7 +71,7 @@ func main() {
 		}
 	} else {
 		// Run CLI mode
-		logger.Info("Starting Stats Agent in CLI mode")
+		logger.Info("Starting Pocket Statistician in CLI mode")
 		scanner := bufio.NewScanner(os.Stdin)
 
 		// Create a temporary session for CLI mode
@@ -80,7 +80,7 @@ func main() {
 		os.MkdirAll(cliWorkspace, 0755)
 		defer os.RemoveAll(cliWorkspace)
 
-		fmt.Printf("Welcome to the Stats Agent. Using temporary workspace: %s\n", cliWorkspace)
+		fmt.Printf("Welcome to your Pocket Statistician. Using temporary workspace: %s\n", cliWorkspace)
 		fmt.Print("> ")
 		for scanner.Scan() {
 			input := scanner.Text()

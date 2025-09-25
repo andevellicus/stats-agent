@@ -136,24 +136,24 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string) {
 			continue
 		}
 
-		a.history = append(a.history, api.Message{Role: "assistant", Content: llmResponse})
-
 		_, execResult, wasCodeExecuted := a.pythonTool.ExecutePythonCode(ctx, llmResponse, sessionID)
 
-		if !wasCodeExecuted {
-			return
-		}
+		if wasCodeExecuted {
+			a.history = append(a.history, api.Message{Role: "assistant", Content: llmResponse})
+			executionMessage := fmt.Sprintf("<execution_results>\n%s\n</execution_results>", execResult)
+			toolMessage := api.Message{Role: "tool", Content: executionMessage}
+			a.history = append(a.history, toolMessage)
 
-		executionMessage := fmt.Sprintf("<execution_results>\n%s\n</execution_results>", execResult)
-		toolMessage := api.Message{Role: "tool", Content: executionMessage}
-		a.history = append(a.history, toolMessage)
-
-		if strings.Contains(execResult, "Error:") {
-			fmt.Printf("<agent_status>Error - attempting to self-correct</agent_status>")
-			consecutiveErrors++ // Increment error counter
-			continue
+			if strings.Contains(execResult, "Error:") {
+				fmt.Printf("<agent_status>Error - attempting to self-correct</agent_status>")
+				consecutiveErrors++ // Increment error counter
+				continue
+			} else {
+				consecutiveErrors = 0 // Reset error counter on success
+			}
 		} else {
-			consecutiveErrors = 0 // Reset error counter on success
+			a.history = append(a.history, api.Message{Role: "assistant", Content: llmResponse})
+			return
 		}
 	}
 }
