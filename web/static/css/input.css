@@ -20,7 +20,6 @@
     @apply text-[#0088d6];
   }
 
-  /* Add these new scrollbar styles */
   .scrollbar-thin {
     scrollbar-width: thin;
     scrollbar-color: theme('colors.gray.300') transparent;
@@ -40,6 +39,10 @@
 }
 
 @layer components {
+  .prose h2 { /* You can add custom styles for prose elements here */
+    @apply mb-2 text-xl font-bold;
+  }
+
   .prose ul,
   .prose ol {
     @apply list-inside pl-5 space-y-2;
@@ -53,7 +56,6 @@
     @apply list-decimal;
   }
 
-  /* Reset margins for paragraphs inside list items to prevent extra spacing */
   .prose li > p {
     @apply inline;
   }
