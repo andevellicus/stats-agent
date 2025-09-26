@@ -28,7 +28,10 @@ RUN pip install \
     # Interactive Visualizations
     plotly \
     # Automated EDA
-    ydata-profiling
+    ydata-profiling \
+    shap \
+    lifelines \
+    imblearn
 
 # Expose the port the server will listen on
 EXPOSE 9999

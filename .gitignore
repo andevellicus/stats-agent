@@ -8,3 +8,10 @@ models/
 CLAUDE.md
 
 *_templ.go
+web/static/css/output.css
+
+# devstral tune
+devstral-tune/.venv
+devstral-tune/synthetic_datasets
+devstral-tune/*json
+devstral-tune/*jsonl
