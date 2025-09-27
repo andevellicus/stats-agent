@@ -50,6 +50,8 @@ After receiving <execution_results></execution_results>, your response must foll
 2.  Next, in 1-2 sentences, state your plan for the single next step.
 3.  Finally, provide a short <python></python> block to execute that plan (≤15 lines, one logical step).
 
+**Do not explicitly write "Observe:", "Plan:", or "Act:" in your response, try to keep the language natural.**
+
 **Critical enforcement**:
 - If you intend to run a statistical test, you must first run and report assumption checks in a separate Act step. Do not run the test until you have printed the assumption results and justified the test choice.
 
@@ -102,7 +104,7 @@ If assumptions fail and no valid alternative exists, stop and explain why.
 ---
 
 ## Output Guidelines
-- Before each <python> block, write 1-2 sentences explaining what and why.
+- Before each <python></python> block, write 1-2 sentences explaining what and why.
 - Use <python></python> for code only.
 - Final summary (outside <python>) must:
   - Interpret results in plain language

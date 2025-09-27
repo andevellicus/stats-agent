@@ -26,6 +26,7 @@ def execute_code(session_id, code, timeout_seconds):
     
     session_state = sessions[session_id]
     workspace_dir = os.path.join('/app/workspaces', session_id)
+    os.makedirs(workspace_dir, exist_ok=True)
     
     original_dir = os.getcwd()
     os.chdir(workspace_dir)
@@ -77,10 +78,11 @@ def main():
                     break
                 full_message += data
                 
-                # Process only when the EOM token is received (for multi-chunk messages)
-                if EOM_TOKEN in full_message:
-                    # For now, we assume one message per connection, but this is more robust
-                    message = full_message.replace(EOM_TOKEN, "")
+                # Process all complete messages in the buffer
+                while EOM_TOKEN in full_message:
+                    # Split the buffer into the first message and the rest
+                    message, full_message = full_message.split(EOM_TOKEN, 1)
+                    
                     parts = message.split('|', 1)
                     if len(parts) != 2:
                         conn.sendall(b"Error: Invalid message format. Expected 'session_id|code'.")

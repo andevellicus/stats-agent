@@ -1,7 +1,7 @@
 __debug_bin*
 stats-agent
 
-workspaces/
+workspaces*/
 models/
 
 .claude

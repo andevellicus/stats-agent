@@ -30,6 +30,45 @@ except ImportError:
 
 # ---------- Constants ----------
 EOM_TOKEN = "<|EOM|>"
+DEFAULT_EXECUTOR_ADDRESS = "localhost:9999"
+DEFAULT_EXECUTOR_PORT = 9999
+EXECUTOR_HOST = "localhost"
+EXECUTOR_PORT = DEFAULT_EXECUTOR_PORT
+
+
+def configure_executor_target(cli_address: Optional[str] = None) -> Tuple[str, int]:
+    """Resolve the Python executor host/port using CLI args or env vars."""
+
+    global EXECUTOR_HOST, EXECUTOR_PORT
+
+    address = (cli_address or os.environ.get("PYTHON_EXECUTOR_ADDRESS") or "").strip()
+
+    if not address:
+        env_host = os.environ.get("PYTHON_EXECUTOR_HOST", "").strip()
+        env_port = os.environ.get("PYTHON_EXECUTOR_PORT", "").strip()
+        if env_host:
+            fallback_port = env_port or str(DEFAULT_EXECUTOR_PORT)
+            address = f"{env_host}:{fallback_port}"
+
+    if not address:
+        address = DEFAULT_EXECUTOR_ADDRESS
+
+    if ":" not in address:
+        port_candidate = os.environ.get("PYTHON_EXECUTOR_PORT", str(DEFAULT_EXECUTOR_PORT))
+        address = f"{address}:{port_candidate}"
+
+    host_part, port_part = address.rsplit(":", 1)
+    host_part = host_part.strip() or "localhost"
+
+    try:
+        port_val = int(port_part)
+    except ValueError as exc:
+        raise ValueError(f"Invalid executor port '{port_part}' in address '{address}'") from exc
+
+    EXECUTOR_HOST = host_part
+    EXECUTOR_PORT = port_val
+    print(f"Using Python executor at {EXECUTOR_HOST}:{EXECUTOR_PORT}", file=sys.stderr)
+    return EXECUTOR_HOST, EXECUTOR_PORT
 
 DEVSTRAL_SYSTEM = """You are an expert statistical data analyst using Python. Rigor is mandatory; do not speculate or hallucinate.
 
@@ -109,9 +148,10 @@ If assumptions fail and no valid alternative exists, stop and explain why.
   - Include generated plots as <image>plot_name.png</image>
 - Do not emit <image></image> tags before the final summary.
 - Stop when sufficient evidence answers the question.
+- **CRITICAL**: Your response must not contain <thought></thought> or <action></action> tags.
 """
 
-# (All helper functions like extract_tag, execute_code_via_socket, run_python_in_executor, etc. are unchanged)
+# ---------- Helper functions ----------
 def extract_tag(s: str, tag: str) -> Optional[str]:
     m = re.search(f"<{tag}>(.*?)</{tag}>", s or "", re.DOTALL | re.IGNORECASE)
     return m.group(1).strip() if m else None
@@ -122,11 +162,11 @@ def sanitize_for_display(s: str, limit: int = 4000) -> str:
         return s[:limit] + "\n...[truncated]..."
     return s
 
-def execute_code_via_socket(code: str, session_id: str, host: str = 'localhost', port: int = 9999) -> Tuple[bool, str]:
+def execute_code_via_socket(code: str, session_id: str) -> Tuple[bool, str]:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(60)
-            sock.connect((host, port))
+            sock.connect((EXECUTOR_HOST, EXECUTOR_PORT))
             message = f"{session_id}|{code}{EOM_TOKEN}"
             sock.sendall(message.encode('utf-8'))
             response_chunks = []
@@ -177,6 +217,7 @@ def generate_rag_memory(model_name: str, focus_area: str, data_context: str) -> 
         prompt = (
             f"Based on the following keywords, create a concise, one-sentence summary of a past analysis. "
             f"The summary MUST start with 'Fact:'.\n\n"
+            f"**CRITICAL**: DO NOT include <thought> or <action> tags. "
             f"Keywords:\n- Focus Area: {focus_area}\n- Data Context: {data_context}\n\n"
             f"Example Output: Fact: A previous analysis on customer behavior showed that checking for data outliers was a critical step."
         )
@@ -186,6 +227,7 @@ def generate_rag_memory(model_name: str, focus_area: str, data_context: str) -> 
         prompt = (
             f"Based on the following keywords, create a short, 2-3 sentence summary of a past analysis. "
             f"The summary MUST start with 'Summary:'.\n\n"
+            f"**CRITICAL**: DO NOT include <thought> or <action> tags. "
             f"Keywords:\n- Focus Area: {focus_area}\n- Data Context: {data_context}\n\n"
             f"Example Output: Summary: A previous analysis on customer behavior explored churn prediction. The key finding was that tenure and support ticket volume were the most significant predictors."
         )
@@ -196,6 +238,7 @@ def generate_rag_memory(model_name: str, focus_area: str, data_context: str) -> 
             f"Based on the following keywords, create a realistic, multi-turn conversational snippet from a past analysis. "
             f"The snippet should include one 'assistant' turn with a thought and a python block, and one 'tool' turn with a plausible execution result. "
             f"It MUST be formatted with a leading dash and role, like '- assistant:' and '- tool:'.\n\n"
+            f"**CRITICAL**: DO NOT include <thought> or <action> tags. "
             f"Keywords:\n- Focus Area: {focus_area}\n- Data Context: {data_context}\n\n"
             f"Example Output:\n"
             f"- assistant: The data for {data_context} has been loaded. I will now check for missing values. <python>df.isnull().sum()</python>\n"
@@ -210,12 +253,18 @@ def generate_rag_memory(model_name: str, focus_area: str, data_context: str) -> 
         model = genai.GenerativeModel(model_name=model_name)
         config = genai.GenerationConfig(temperature=0.9)
         resp = model.generate_content(prompt, generation_config=config)
-        memory = resp.text.strip()
-        # Ensure the output starts with the correct prefix
-        if memory.startswith("Fact:") or memory.startswith("Summary:") or memory.startswith("- assistant:"):
-             # Add the leading dash for facts and summaries
-            return f"- {memory}" if not memory.startswith("-") else memory
-        return fallback
+        # Check for content before accessing .text
+        if resp.parts:
+            memory = resp.text.strip()
+            # Ensure the output starts with the correct prefix
+            if memory.startswith("Fact:") or memory.startswith("Summary:") or memory.startswith("- assistant:"):
+                 # Add the leading dash for facts and summaries
+                return f"- {memory}" if not memory.startswith("-") else memory
+            return fallback
+        else:
+            print(f"  Could not generate RAG memory, no content in response. Finish Reason: {resp.candidates[0].finish_reason}", file=sys.stderr)
+            return fallback
+
     except Exception as e:
         print(f"  Could not generate RAG memory: {e}", file=sys.stderr)
         return fallback
@@ -285,6 +334,10 @@ def generate_trace_for_prompt(model_name: str,
             print("    Cleaned invalid <execution_results> tag from model output.", file=sys.stderr)
             assistant_response = cleaned_response
 
+        if "<python>" in assistant_response and "<image>" in assistant_response:
+            print("    Warning: Stripping premature <image> tags from model output.", file=sys.stderr)
+            assistant_response = re.sub(r"<image>.*?</image>\n?", "", assistant_response, flags=re.DOTALL).strip()
+
         messages.append({"role": "assistant", "content": assistant_response})
         trace.append({"role": "assistant", "content": assistant_response})
 
@@ -319,7 +372,10 @@ def test_executor_connection(workspaces_root: str = "../workspaces") -> bool:
         test_session = f"test-{uuid.uuid4().hex[:8]}"
         test_workspace = os.path.join(workspaces_root, test_session)
         
-        print(f"Testing executor connection with session: {test_session}", file=sys.stderr)
+        print(
+            f"Testing executor connection to {EXECUTOR_HOST}:{EXECUTOR_PORT} with session: {test_session}",
+            file=sys.stderr,
+        )
         
         # CRITICAL: Create the workspace directory first (the executor expects it to exist)
         os.makedirs(test_workspace, exist_ok=True)
@@ -371,8 +427,11 @@ def main():
     ap.add_argument("--max-steps", type=int, default=15, help="Max iterations per prompt.")
     ap.add_argument("--limit", type=int, default=0, help="Max number of prompts to process.")
     ap.add_argument("--workdir", default="../workspaces", help="Directory for artifacts.")
+    ap.add_argument("--executor-address", default=None, help="Override PYTHON_EXECUTOR_ADDRESS (host:port).")
     ap.add_argument("--test-only", action="store_true", help="Only test executor connection.")
     args = ap.parse_args()
+
+    configure_executor_target(args.executor_address)
 
     # Test executor connection first
     if not test_executor_connection(args.workdir):

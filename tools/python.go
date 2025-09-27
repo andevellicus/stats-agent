@@ -3,32 +3,42 @@ package tools
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 )
 
 const EOM_TOKEN = "<|EOM|>"
 
-// StatefulPythonTool no longer holds a sessionID
 type StatefulPythonTool struct {
-	conn   net.Conn
-	logger *zap.Logger
+	addr        string
+	logger      *zap.Logger
+	dialTimeout time.Duration
+	ioTimeout   time.Duration
 }
 
 // NewStatefulPythonTool no longer creates a session ID.
 func NewStatefulPythonTool(ctx context.Context, address string, logger *zap.Logger) (*StatefulPythonTool, error) {
-	conn, err := net.Dial("tcp", address)
+	d := &net.Dialer{Timeout: 3 * time.Second}
+	conn, err := d.DialContext(ctx, "tcp", address)
 	if err != nil {
 		return nil, fmt.Errorf("could not connect to Python executor: %w", err)
 	}
+	_ = conn.Close()
 
 	logger.Info("Python tool initialized", zap.String("address", address))
 
-	return &StatefulPythonTool{conn: conn, logger: logger}, nil
+	return &StatefulPythonTool{
+		addr:        address,
+		logger:      logger,
+		dialTimeout: 3 * time.Second,
+		ioTimeout:   60 * time.Second,
+	}, nil
 }
 
 func (t *StatefulPythonTool) InitializeSession(ctx context.Context, sessionID string, uploadedFiles []string) (string, error) {
@@ -77,45 +87,57 @@ func (t *StatefulPythonTool) Description() string {
 	return "Executes Python code in a persistent, sandboxed session."
 }
 
-// Call now accepts the sessionID for each execution.
 func (t *StatefulPythonTool) Call(ctx context.Context, input string, sessionID string) (string, error) {
-	message := fmt.Sprintf("%s|%s%s", sessionID, input, EOM_TOKEN)
-
-	_, err := t.conn.Write([]byte(message))
+	// 1) Open a new connection for this call (server closes after one message)
+	d := &net.Dialer{Timeout: t.dialTimeout}
+	conn, err := d.DialContext(ctx, "tcp", t.addr) // e.g., "executor:9999"
 	if err != nil {
-		return "", fmt.Errorf("failed to send code to Python server: %w", err)
+		return "", fmt.Errorf("dial python server: %w", err)
+	}
+	defer conn.Close()
+
+	// Optional: avoid hangs
+	deadline := time.Now().Add(t.ioTimeout)
+	_ = conn.SetDeadline(deadline)
+
+	// 2) Frame: sessionID|code<EOM>
+	// Use bytes write (not Fprintf) so '%' inside code is not treated as a format verb
+	payload := sessionID + "|" + input + EOM_TOKEN
+	if _, err := conn.Write([]byte(payload)); err != nil {
+		return "", fmt.Errorf("send code: %w", err)
 	}
 
-	// Use a buffered reader to read until the EOM token is found.
-	reader := bufio.NewReader(t.conn)
-	var fullResponse strings.Builder
-	buffer := make([]byte, 1024) // Read in chunks
+	// 3) Read until we see EOM anywhere in the accumulated buffer
+	reader := bufio.NewReader(conn)
+	var b strings.Builder
+	buf := make([]byte, 4096)
 
 	for {
-		n, err := reader.Read(buffer)
-		if err != nil {
-			if err == io.EOF {
-				break
+		n, err := reader.Read(buf)
+		if n > 0 {
+			b.Write(buf[:n])
+			s := b.String()
+			if strings.Contains(s, EOM_TOKEN) {
+				out := strings.ReplaceAll(s, EOM_TOKEN, "")
+				return strings.TrimSpace(out), nil
 			}
-			return "", fmt.Errorf("failed to read result from Python server: %w", err)
 		}
-
-		fullResponse.Write(buffer[:n])
-
-		// Check if the complete EOM token is now in our collected response
-		if strings.HasSuffix(fullResponse.String(), EOM_TOKEN) {
-			break
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				// If server closed immediately after sending, we may still have EOM
+				s := b.String()
+				if strings.Contains(s, EOM_TOKEN) {
+					out := strings.ReplaceAll(s, EOM_TOKEN, "")
+					return strings.TrimSpace(out), nil
+				}
+			}
+			return "", fmt.Errorf("read result: %w", err)
 		}
 	}
-
-	// Trim the EOM token from the final response.
-	return strings.TrimSuffix(fullResponse.String(), EOM_TOKEN), nil
 }
 
 func (t *StatefulPythonTool) Close() {
-	if t.conn != nil {
-		t.conn.Close()
-	}
+	// Connections are opened per-call, so there is nothing persistent to close.
 }
 
 // ExecutePythonCode now requires a sessionID to be passed.
