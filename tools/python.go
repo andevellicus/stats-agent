@@ -8,37 +8,200 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
 )
 
-const EOM_TOKEN = "<|EOM|>"
+const (
+	EOM_TOKEN               = "<|EOM|>"
+	defaultExecutorCooldown = 5 * time.Second
+)
+
+type executorNode struct {
+	address    string
+	retryAfter time.Time
+}
+
+type executorPool struct {
+	nodes    []*executorNode
+	mu       sync.Mutex
+	next     int
+	cooldown time.Duration
+}
+
+func newExecutorPool(addresses []string, cooldown time.Duration) (*executorPool, error) {
+	unique := make(map[string]struct{}, len(addresses))
+	nodes := make([]*executorNode, 0, len(addresses))
+	for _, addr := range addresses {
+		addr = strings.TrimSpace(addr)
+		if addr == "" {
+			continue
+		}
+		if _, exists := unique[addr]; exists {
+			continue
+		}
+		unique[addr] = struct{}{}
+		nodes = append(nodes, &executorNode{address: addr})
+	}
+	if len(nodes) == 0 {
+		return nil, errors.New("no valid python executor addresses provided")
+	}
+	return &executorPool{
+		nodes:    nodes,
+		cooldown: cooldown,
+	}, nil
+}
+
+func (p *executorPool) Next() (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.nodes) == 0 {
+		return "", errors.New("no python executors configured")
+	}
+	now := time.Now()
+	checked := 0
+	for checked < len(p.nodes) {
+		idx := p.next
+		p.next = (p.next + 1) % len(p.nodes)
+		node := p.nodes[idx]
+		checked++
+		if now.After(node.retryAfter) {
+			return node.address, nil
+		}
+	}
+	return "", errors.New("no healthy python executors available")
+}
+
+func (p *executorPool) MarkFailure(address string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now().Add(p.cooldown)
+	for _, node := range p.nodes {
+		if node.address == address {
+			node.retryAfter = now
+			return
+		}
+	}
+}
+
+func (p *executorPool) MarkSuccess(address string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, node := range p.nodes {
+		if node.address == address {
+			node.retryAfter = time.Time{}
+			return
+		}
+	}
+}
+
+func (p *executorPool) Size() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.nodes)
+}
+
+func (p *executorPool) Addresses() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	addrs := make([]string, 0, len(p.nodes))
+	for _, node := range p.nodes {
+		addrs = append(addrs, node.address)
+	}
+	return addrs
+}
 
 type StatefulPythonTool struct {
-	addr        string
+	pool        *executorPool
 	logger      *zap.Logger
 	dialTimeout time.Duration
 	ioTimeout   time.Duration
 }
 
 // NewStatefulPythonTool no longer creates a session ID.
-func NewStatefulPythonTool(ctx context.Context, address string, logger *zap.Logger) (*StatefulPythonTool, error) {
-	d := &net.Dialer{Timeout: 3 * time.Second}
-	conn, err := d.DialContext(ctx, "tcp", address)
+func NewStatefulPythonTool(ctx context.Context, addresses []string, logger *zap.Logger) (*StatefulPythonTool, error) {
+	pool, err := newExecutorPool(addresses, defaultExecutorCooldown)
 	if err != nil {
-		return nil, fmt.Errorf("could not connect to Python executor: %w", err)
+		return nil, err
 	}
-	_ = conn.Close()
-
-	logger.Info("Python tool initialized", zap.String("address", address))
-
-	return &StatefulPythonTool{
-		addr:        address,
+	tool := &StatefulPythonTool{
+		pool:        pool,
 		logger:      logger,
 		dialTimeout: 3 * time.Second,
 		ioTimeout:   60 * time.Second,
-	}, nil
+	}
+	if err := tool.ensureInitialConnectivity(ctx); err != nil {
+		return nil, err
+	}
+	if tool.logger != nil {
+		tool.logger.Info("Python tool initialized", zap.Strings("addresses", tool.pool.Addresses()))
+	}
+	return tool, nil
+}
+
+func (t *StatefulPythonTool) ensureInitialConnectivity(ctx context.Context) error {
+	addresses := t.pool.Addresses()
+	var lastErr error
+	for _, addr := range addresses {
+		conn, err := t.dial(ctx, addr)
+		if err != nil {
+			t.pool.MarkFailure(addr)
+			lastErr = err
+			if t.logger != nil {
+				t.logger.Warn("Initial executor health check failed", zap.String("address", addr), zap.Error(err))
+			}
+			continue
+		}
+		_ = conn.Close()
+		t.pool.MarkSuccess(addr)
+		return nil
+	}
+	if lastErr != nil {
+		return fmt.Errorf("unable to reach any python executor: %w", lastErr)
+	}
+	return errors.New("no python executors available")
+}
+
+func (t *StatefulPythonTool) dial(ctx context.Context, address string) (net.Conn, error) {
+	d := &net.Dialer{Timeout: t.dialTimeout}
+	return d.DialContext(ctx, "tcp", address)
+}
+
+func (t *StatefulPythonTool) execute(conn net.Conn, input string, sessionID string) (string, error) {
+	deadline := time.Now().Add(t.ioTimeout)
+	_ = conn.SetDeadline(deadline)
+	payload := sessionID + "|" + input + EOM_TOKEN
+	if _, err := conn.Write([]byte(payload)); err != nil {
+		return "", fmt.Errorf("send code: %w", err)
+	}
+
+	reader := bufio.NewReader(conn)
+	var b strings.Builder
+	buf := make([]byte, 4096)
+
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			b.Write(buf[:n])
+			s := b.String()
+			if strings.Contains(s, EOM_TOKEN) {
+				out := strings.ReplaceAll(s, EOM_TOKEN, "")
+				return strings.TrimSpace(out), nil
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				s := b.String()
+				if strings.Contains(s, EOM_TOKEN) {
+					out := strings.ReplaceAll(s, EOM_TOKEN, "")
+					return strings.TrimSpace(out), nil
+				}
+			}
+			return "", fmt.Errorf("read result: %w", err)
+		}
+	}
 }
 
 func (t *StatefulPythonTool) InitializeSession(ctx context.Context, sessionID string, uploadedFiles []string) (string, error) {
@@ -88,52 +251,53 @@ func (t *StatefulPythonTool) Description() string {
 }
 
 func (t *StatefulPythonTool) Call(ctx context.Context, input string, sessionID string) (string, error) {
-	// 1) Open a new connection for this call (server closes after one message)
-	d := &net.Dialer{Timeout: t.dialTimeout}
-	conn, err := d.DialContext(ctx, "tcp", t.addr) // e.g., "executor:9999"
-	if err != nil {
-		return "", fmt.Errorf("dial python server: %w", err)
-	}
-	defer conn.Close()
-
-	// Optional: avoid hangs
-	deadline := time.Now().Add(t.ioTimeout)
-	_ = conn.SetDeadline(deadline)
-
-	// 2) Frame: sessionID|code<EOM>
-	// Use bytes write (not Fprintf) so '%' inside code is not treated as a format verb
-	payload := sessionID + "|" + input + EOM_TOKEN
-	if _, err := conn.Write([]byte(payload)); err != nil {
-		return "", fmt.Errorf("send code: %w", err)
+	total := t.pool.Size()
+	if total == 0 {
+		return "", errors.New("no python executors configured")
 	}
 
-	// 3) Read until we see EOM anywhere in the accumulated buffer
-	reader := bufio.NewReader(conn)
-	var b strings.Builder
-	buf := make([]byte, 4096)
-
-	for {
-		n, err := reader.Read(buf)
-		if n > 0 {
-			b.Write(buf[:n])
-			s := b.String()
-			if strings.Contains(s, EOM_TOKEN) {
-				out := strings.ReplaceAll(s, EOM_TOKEN, "")
-				return strings.TrimSpace(out), nil
-			}
-		}
+	var lastErr error
+	for attempts := 0; attempts < total; attempts++ {
+		addr, err := t.pool.Next()
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				// If server closed immediately after sending, we may still have EOM
-				s := b.String()
-				if strings.Contains(s, EOM_TOKEN) {
-					out := strings.ReplaceAll(s, EOM_TOKEN, "")
-					return strings.TrimSpace(out), nil
-				}
+			if lastErr != nil {
+				return "", fmt.Errorf("no healthy python executors available: %w", lastErr)
 			}
-			return "", fmt.Errorf("read result: %w", err)
+			return "", err
 		}
+
+		conn, err := t.dial(ctx, addr)
+		if err != nil {
+			t.pool.MarkFailure(addr)
+			lastErr = fmt.Errorf("dial python server %s: %w", addr, err)
+			if t.logger != nil {
+				t.logger.Warn("Failed to connect to python executor", zap.String("address", addr), zap.Error(err))
+			}
+			continue
+		}
+
+		result, execErr := t.execute(conn, input, sessionID)
+		_ = conn.Close()
+		if execErr != nil {
+			t.pool.MarkFailure(addr)
+			lastErr = fmt.Errorf("executor %s: %w", addr, execErr)
+			if t.logger != nil {
+				t.logger.Warn("Python executor call failed", zap.String("address", addr), zap.Error(execErr))
+			}
+			continue
+		}
+
+		t.pool.MarkSuccess(addr)
+		if t.logger != nil {
+			t.logger.Debug("Python code executed", zap.String("address", addr), zap.String("session_id", sessionID))
+		}
+		return result, nil
 	}
+
+	if lastErr != nil {
+		return "", fmt.Errorf("all python executors failed: %w", lastErr)
+	}
+	return "", errors.New("no healthy python executors available")
 }
 
 func (t *StatefulPythonTool) Close() {

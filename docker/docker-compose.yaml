@@ -1,3 +1,12 @@
+x-python-executor: &python-executor
+  build:
+    context: .
+    dockerfile: python.Dockerfile
+  env_file: .env
+  user: "${UID}:${GID}"
+  volumes:
+    - ../workspaces:/app/workspaces
+
 services:
   main-llm:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
@@ -67,14 +76,32 @@ services:
       --top-p 0.9
       --top-k 40
 
-  python-executor:
-    build:
-      context: .
-      dockerfile: python.Dockerfile
-    container_name: python-executor-container
-    env_file: .env
-    user: "${UID}:${GID}"
+  python-executor-1:
+    <<: *python-executor
+    container_name: python-executor-1
     ports:
       - "9999:9999"
-    volumes:
-      - ../workspaces:/app/workspaces
+
+  python-executor-2:
+    <<: *python-executor
+    container_name: python-executor-2
+    ports:
+      - "9998:9999"
+
+  python-executor-3:
+    <<: *python-executor
+    container_name: python-executor-3
+    ports:
+      - "9997:9999"
+
+  python-executor-4:
+    <<: *python-executor
+    container_name: python-executor-4
+    ports:
+      - "9996:9999"
+
+  python-executor-5:
+    <<: *python-executor
+    container_name: python-executor-5
+    ports:
+      - "9995:9999"

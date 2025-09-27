@@ -36,7 +36,7 @@ func main() {
 	defer config.Cleanup()
 	cfg := config.Load(logger)
 
-	pythonTool, err := tools.NewStatefulPythonTool(ctx, cfg.PythonExecutorAddress, logger)
+	pythonTool, err := tools.NewStatefulPythonTool(ctx, cfg.PythonExecutorAddresses, logger)
 	if err != nil {
 		logger.Fatal("Failed to initialize Python tool", zap.Error(err))
 	}

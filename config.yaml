@@ -1,4 +1,7 @@
-PYTHON_EXECUTOR_ADDRESS: "localhost:9999"
+PYTHON_EXECUTOR_ADDRESSES:
+  - "localhost:9999"
+  - "localhost:9998"
+  - "localhost:9997"
 MAIN_LLM_HOST: "http://localhost:8080"
 EMBEDDING_LLM_HOST: "http://localhost:8081"
 SUMMARIZATION_LLM_HOST: "http://localhost:8082"
