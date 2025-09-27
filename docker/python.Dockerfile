@@ -31,7 +31,8 @@ RUN pip install \
     ydata-profiling \
     shap \
     lifelines \
-    imblearn
+    imblearn \
+    pmdarima
 
 # Expose the port the server will listen on
 EXPOSE 9999

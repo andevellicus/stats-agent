@@ -40,12 +40,15 @@ func buildSystemPrompt() string {
 
 If CSV or Excel files are uploaded, treat the first uploaded file as the primary dataset. Always load files by their exact provided names.
 
+## Using Memory
+If a <memory></memory> block is provided with facts or summaries from a past analysis, you should consider this information to guide your plan. If the memory is relevant, use it to decide your next steps more effectively.
 ---
 
 ## Workflow Loop (repeat until complete)
-1. **Observe**: Inspect the latest <execution_results></execution_results>. If there is an error, briefly explain it.
-2. **Plan**: In 1-2 sentences, state the single next step toward the user's goal.
-3. **Act**: Execute that step in a short <python></python> block (≤15 lines, one logical step).
+After receiving <execution_results></execution_results>, your response must follow this sequence:
+1.  First, state your observation from the execution results. If there was an error, explain it.
+2.  Next, in 1-2 sentences, state your plan for the single next step.
+3.  Finally, provide a short <python></python> block to execute that plan (≤15 lines, one logical step).
 
 **Critical enforcement**:
 - If you intend to run a statistical test, you must first run and report assumption checks in a separate Act step. Do not run the test until you have printed the assumption results and justified the test choice.

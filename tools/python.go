@@ -79,7 +79,7 @@ func (t *StatefulPythonTool) Description() string {
 
 // Call now accepts the sessionID for each execution.
 func (t *StatefulPythonTool) Call(ctx context.Context, input string, sessionID string) (string, error) {
-	message := fmt.Sprintf("%s|%s", sessionID, input)
+	message := fmt.Sprintf("%s|%s%s", sessionID, input, EOM_TOKEN)
 
 	_, err := t.conn.Write([]byte(message))
 	if err != nil {

@@ -4,9 +4,9 @@ generate_traces.py
 ------------------
 
 Given a JSON file of prompts and associated datasets, produce multi-turn
-traces that match the specific format of the Go-based Devstral agent.
-This version is designed to force a multi-step, agentic workflow and
-uses a remote Python executor.
+traces for fine-tuning a statistical agent. This version includes a
+probabilistic simulation of RAG, generating both "Fact" and "Summary"
+memory types, and instructs the model on how to use this memory.
 """
 
 import argparse
@@ -19,6 +19,7 @@ import textwrap
 import time
 import uuid
 import shutil
+import random
 from typing import List, Dict, Optional, Tuple
 
 # ---------- Google Gemini client ----------
@@ -30,17 +31,22 @@ except ImportError:
 # ---------- Constants ----------
 EOM_TOKEN = "<|EOM|>"
 
-# ---------- Devstral-style system prompt (aligned with Go app) ----------
 DEVSTRAL_SYSTEM = """You are an expert statistical data analyst using Python. Rigor is mandatory; do not speculate or hallucinate.
 
 If CSV or Excel files are uploaded, treat the first uploaded file as the primary dataset. Always load files by their exact provided names.
 
 ---
 
+## Using Memory
+If a <memory></memory> block is provided with facts or summaries from a past analysis, use this information to inform your plan.
+
+---
+
 ## Workflow Loop (repeat until complete)
-1. **Observe**: Inspect the latest <execution_results></execution_results>. If there is an error, briefly explain it.
-2. **Plan**: In 1-2 sentences, state the single next step toward the user's goal.
-3. **Act**: Execute that step in a short <python></python> block (≤15 lines, one logical step).
+After receiving <execution_results></execution_results>, your response must follow this sequence:
+1.  First, state your observation from the execution results. If there was an error, explain it.
+2.  Next, in 1-2 sentences, state your plan for the single next step.
+3.  Finally, provide a short <python></python> block to execute that plan (≤15 lines, one logical step).
 
 **Do not explicitly write "Observe:", "Plan:", or "Act:" in your response.**
 
@@ -48,7 +54,6 @@ If CSV or Excel files are uploaded, treat the first uploaded file as the primary
 - If you intend to run a statistical test, you must first run and report assumption checks in a separate Act step. Do not run the test until you have printed the assumption results and justified the test choice.
 
 ---
-
 ## Best Practices
 
 ### Data Handling
@@ -96,7 +101,7 @@ If assumptions fail and no valid alternative exists, stop and explain why.
 ---
 
 ## Output Guidelines
-- Before each <python> block, write 1-2 sentences explaining what and why.
+- Before each <python></python> block, write 1-2 sentences explaining what and why.
 - Use <python></python> for code only.
 - Final summary (outside <python>) must:
   - Interpret results in plain language
@@ -122,9 +127,8 @@ def execute_code_via_socket(code: str, session_id: str, host: str = 'localhost',
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(60)
             sock.connect((host, port))
-            message = f"{session_id}|{code}"
+            message = f"{session_id}|{code}{EOM_TOKEN}"
             sock.sendall(message.encode('utf-8'))
-            
             response_chunks = []
             while True:
                 chunk = sock.recv(4096)
@@ -132,12 +136,9 @@ def execute_code_via_socket(code: str, session_id: str, host: str = 'localhost',
                 decoded_chunk = chunk.decode('utf-8', errors='replace')
                 response_chunks.append(decoded_chunk)
                 if EOM_TOKEN in decoded_chunk: break
-            
             full_response = ''.join(response_chunks).replace(EOM_TOKEN, '').strip()
-            
             if full_response.startswith("Error:"):
                 return False, full_response
-            
             return True, full_response or "Success: Code executed with no output."
     except (socket.error, Exception) as e:
         return False, f"Executor connection failed: {e}"
@@ -145,48 +146,80 @@ def execute_code_via_socket(code: str, session_id: str, host: str = 'localhost',
 def run_python_in_executor(code: str, session_id: str, workdir: str) -> Dict:
     os.makedirs(workdir, exist_ok=True)
     success, output = execute_code_via_socket(code, session_id)
-    
     stderr = output if output.startswith("Error:") else ""
     stdout = "" if stderr else output
-    
     artifacts = [os.path.join(workdir, f) for f in os.listdir(workdir) if f.endswith(('.png', '.csv'))]
-    
     return {"exit_code": 0 if success else 1, "stdout": stdout, "stderr": stderr, "artifacts": artifacts}
 
-# ---------- Gemini API call ----------
-def chat_step(model_name: str,
-              messages: List[Dict[str, str]]) -> str:
-    """Make a single chat completion call using the Gemini API."""
-    system_prompt = ""
-    if messages and messages[0]['role'] == 'system':
-        system_prompt = messages[0]['content']
-        history = messages[1:]
-    else:
-        history = messages
-
+def chat_step(model_name: str, messages: List[Dict[str, str]], system_prompt: str) -> str:
     gemini_history = []
-    for msg in history:
+    for msg in messages:
+        if msg["role"] == "system": continue
         role = "model" if msg["role"] == "assistant" else msg["role"]
         gemini_history.append({"role": role, "parts": [msg["content"]]})
 
-    print(f"  Calling {model_name} with temperature=1.0...", file=sys.stderr)
-
     try:
-        model = genai.GenerativeModel(
-            model_name=model_name,
-            system_instruction=system_prompt
-        )
-        # --- CHANGE: Removed max_output_tokens ---
-        config = genai.GenerationConfig(
-            temperature=1.0
-        )
+        model = genai.GenerativeModel(model_name=model_name, system_instruction=system_prompt)
+        config = genai.GenerationConfig(temperature=1.0)
         resp = model.generate_content(gemini_history, generation_config=config)
         return resp.text or ""
     except Exception as e:
         print(f"  Gemini API error: {e}", file=sys.stderr)
         raise
 
-# (Main generation loop and helpers are unchanged)
+def generate_rag_memory(model_name: str, focus_area: str, data_context: str) -> str:
+    """Uses the Gemini API to generate a plausible RAG snippet, summary, or fact."""
+    
+    rand_val = random.random()
+    
+    if rand_val < 0.33:
+        # Generate a concise, one-sentence Fact
+        prompt = (
+            f"Based on the following keywords, create a concise, one-sentence summary of a past analysis. "
+            f"The summary MUST start with 'Fact:'.\n\n"
+            f"Keywords:\n- Focus Area: {focus_area}\n- Data Context: {data_context}\n\n"
+            f"Example Output: Fact: A previous analysis on customer behavior showed that checking for data outliers was a critical step."
+        )
+        fallback = f"- fact: A prior analysis focused on {focus_area}."
+    elif rand_val < 0.66:
+        # Generate a slightly more narrative, multi-sentence Summary
+        prompt = (
+            f"Based on the following keywords, create a short, 2-3 sentence summary of a past analysis. "
+            f"The summary MUST start with 'Summary:'.\n\n"
+            f"Keywords:\n- Focus Area: {focus_area}\n- Data Context: {data_context}\n\n"
+            f"Example Output: Summary: A previous analysis on customer behavior explored churn prediction. The key finding was that tenure and support ticket volume were the most significant predictors."
+        )
+        fallback = f"- summary: A prior analysis on {data_context} focused on {focus_area}."
+    else:
+        # Generate a realistic, multi-turn snippet
+        prompt = (
+            f"Based on the following keywords, create a realistic, multi-turn conversational snippet from a past analysis. "
+            f"The snippet should include one 'assistant' turn with a thought and a python block, and one 'tool' turn with a plausible execution result. "
+            f"It MUST be formatted with a leading dash and role, like '- assistant:' and '- tool:'.\n\n"
+            f"Keywords:\n- Focus Area: {focus_area}\n- Data Context: {data_context}\n\n"
+            f"Example Output:\n"
+            f"- assistant: The data for {data_context} has been loaded. I will now check for missing values. <python>df.isnull().sum()</python>\n"
+            f"- tool: <execution_results>\nSTDOUT:\n{data_context}_id      0\n{data_context}_value    12\ndtype: int64\n</execution_results>"
+        )
+        fallback = (
+            f"- assistant: A prior analysis on {data_context} involved {focus_area}. I will check for missing data first. <python>df.isnull().sum()</python>\n"
+            f"- tool: <execution_results>STDOUT:\ncolumn_a    0\ncolumn_b    5\ndtype: int64</execution_results>"
+        )
+
+    try:
+        model = genai.GenerativeModel(model_name=model_name)
+        config = genai.GenerationConfig(temperature=0.9)
+        resp = model.generate_content(prompt, generation_config=config)
+        memory = resp.text.strip()
+        # Ensure the output starts with the correct prefix
+        if memory.startswith("Fact:") or memory.startswith("Summary:") or memory.startswith("- assistant:"):
+             # Add the leading dash for facts and summaries
+            return f"- {memory}" if not memory.startswith("-") else memory
+        return fallback
+    except Exception as e:
+        print(f"  Could not generate RAG memory: {e}", file=sys.stderr)
+        return fallback
+
 def build_initialization_code(dataset_filename: str) -> str:
     return f"""
 import os, pandas as pd, numpy as np, matplotlib.pyplot as plt, seaborn as sns, scipy.stats as stats, warnings
@@ -202,7 +235,7 @@ def generate_trace_for_prompt(model_name: str,
     trace_id = prompt_data.get('id', uuid.uuid4().hex[:8])
     session_id = f"{trace_id}"
     workdir = os.path.join(work_root, session_id)
-    
+
     os.makedirs(workdir, exist_ok=True)
     dataset_src_path = prompt_data['dataset_filename']
     dataset_basename = os.path.basename(dataset_src_path)
@@ -212,22 +245,40 @@ def generate_trace_for_prompt(model_name: str,
     success, init_output = execute_code_via_socket(init_code, session_id)
     init_obs_text = f"Exit Code: {0 if success else 1}\nOUTPUT:\n{sanitize_for_display(init_output)}\n"
 
-    messages = [
-        {"role": "system", "content": DEVSTRAL_SYSTEM},
-        {"role": "user", "content": prompt_data['prompt']},
-        {"role": "user", "content": f"<execution_results>\n{init_obs_text.strip()}\n</execution_results>"}
-    ]
-    trace = [
-        {"role": "system", "content": DEVSTRAL_SYSTEM},
-        {"role": "user", "content": prompt_data['prompt']},
-        {"role": "tool", "content": f"<execution_results>\n{init_obs_text.strip()}\n</execution_results>"}
-    ]
+    trace = [{"role": "system", "content": DEVSTRAL_SYSTEM}, {"role": "user", "content": prompt_data['prompt']}]
+    messages = [{"role": "user", "content": prompt_data['prompt']}]
+    system_prompt = DEVSTRAL_SYSTEM
+
+    if random.random() < 0.25:
+        print("    Injecting simulated RAG memory for this trace.", file=sys.stderr)
+        focus = prompt_data.get("focus_area", "data analysis")
+        context = prompt_data.get("data_context", "a dataset")
+        rag_memory = generate_rag_memory(model_name, focus, context)
+        rag_memory_block = f"<memory>\n{rag_memory}\n</memory>"
+        
+        system_prompt += "\n\n" + rag_memory_block
+        trace.insert(1, {"role": "system", "content": rag_memory_block})
+
+    messages.append({"role": "user", "content": f"<execution_results>\n{init_obs_text.strip()}\n</execution_results>"})
+    trace.append({"role": "tool", "content": f"<execution_results>\n{init_obs_text.strip()}\n</execution_results>"})
+    
     all_artifacts = []
-    code_executions = 0
-    consecutive_errors = 0
 
     for step in range(max_steps):
-        assistant_response = chat_step(model_name, messages)
+        print(f"    Step {step+1}/{max_steps}...", file=sys.stderr)
+        assistant_response = chat_step(model_name, messages, system_prompt)
+        
+        # Before any other processing, replace markdown fences with XML tags.
+        markdown_match = re.search(r"```python\n(.*?)\n```", assistant_response, re.DOTALL)
+        if markdown_match:
+            code_content = markdown_match.group(1)
+            # Rebuild the response with the correct tags
+            assistant_response = (
+                assistant_response[:markdown_match.start()] +
+                f"<python>{code_content}</python>" +
+                assistant_response[markdown_match.end():]
+            )
+            print("    Replaced markdown code block with <python> tags.", file=sys.stderr)
 
         cleaned_response = re.sub(r"<execution_results>.*?</execution_results>\n?", "", assistant_response, flags=re.DOTALL).strip()
         if cleaned_response != assistant_response.strip():
@@ -246,9 +297,6 @@ def generate_trace_for_prompt(model_name: str,
         obs_text = f"Exit Code: {obs['exit_code']}\nOUTPUT:\n{sanitize_for_display(obs['stdout'])}\n"
         if obs['stderr']:
             obs_text += f"ERROR:\n{obs['stderr']}\n"
-        
-        # --- IMPROVEMENT 3: Removed explicit error intervention ---
-        # The script now relies on the model to see the error and self-correct.
 
         api_msg = {"role": "user", "content": f"<execution_results>\n{obs_text.strip()}\n</execution_results>"}
         tool_msg_for_trace = {"role": "tool", "content": f"<execution_results>\n{obs_text.strip()}\n</execution_results>"}
@@ -265,23 +313,77 @@ def generate_trace_for_prompt(model_name: str,
     
     return {"messages": trace, "artifacts": all_artifacts, "prompt_id": prompt_data.get("id")}
 
-# (CLI logic is unchanged, except for model name and API key)
+def test_executor_connection(workspaces_root: str = "../workspaces") -> bool:
+    """Test if we can connect to the Python executor."""
+    try:
+        test_session = f"test-{uuid.uuid4().hex[:8]}"
+        test_workspace = os.path.join(workspaces_root, test_session)
+        
+        print(f"Testing executor connection with session: {test_session}", file=sys.stderr)
+        
+        # CRITICAL: Create the workspace directory first (the executor expects it to exist)
+        os.makedirs(test_workspace, exist_ok=True)
+        print(f"Created test workspace: {test_workspace}", file=sys.stderr)
+        
+        # Try a simple test
+        success, output = execute_code_via_socket("print('Connection test successful')", test_session)
+        
+        print(f"Test response - Success: {success}, Output length: {len(output)}", file=sys.stderr)
+        print(f"Test output: '{output}'", file=sys.stderr)
+        
+        if success:
+            if "Connection test successful" in output or "Success:" in output:
+                print("✓ Executor connection test passed", file=sys.stderr)
+                
+                # Try a second test to verify session persistence
+                success2, output2 = execute_code_via_socket("x = 42; print(f'x = {x}')", test_session)
+                if success2 and "x = 42" in output2:
+                    print("✓ Session persistence verified", file=sys.stderr)
+                
+                # Clean up test workspace
+                try:
+                    shutil.rmtree(test_workspace)
+                    print(f"Cleaned up test workspace", file=sys.stderr)
+                except:
+                    pass
+                
+                return True
+            else:
+                print(f"✗ Unexpected output: {output}", file=sys.stderr)
+                return False
+        else:
+            print(f"✗ Executor test failed: {output}", file=sys.stderr)
+            return False
+    except Exception as e:
+        print(f"✗ Cannot connect to executor: {e}", file=sys.stderr)
+        return False
+
 def load_prompts(path: str) -> List[Dict]:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     return data.get("prompts", [])
 
 def main():
-    ap = argparse.ArgumentParser(description="Generate agentic traces for fine-tuning Devstral.")
+    ap = argparse.ArgumentParser(description="Generate agentic traces for fine-tuning.")
     ap.add_argument("--prompts", required=True, help="Path to prompts JSON file.")
     ap.add_argument("--output", default="traces.jsonl", help="Output JSONL file.")
     ap.add_argument("--model", default="models/gemini-2.5-pro", help="Gemini model to use.")
     ap.add_argument("--max-steps", type=int, default=15, help="Max iterations per prompt.")
     ap.add_argument("--limit", type=int, default=0, help="Max number of prompts to process.")
     ap.add_argument("--workdir", default="../workspaces", help="Directory for artifacts.")
+    ap.add_argument("--test-only", action="store_true", help="Only test executor connection.")
     args = ap.parse_args()
+
+    # Test executor connection first
+    if not test_executor_connection(args.workdir):
+        print("ERROR: Cannot connect to Python executor. Is Docker container running?", file=sys.stderr)
+        print("Run: cd docker && docker-compose up python-executor", file=sys.stderr)
+        sys.exit(1)
     
-    # Check for Gemini API key
+    if args.test_only:
+        print("Test completed successfully.", file=sys.stderr)
+        sys.exit(0)
+
     api_key = os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         raise SystemExit("Please set GOOGLE_API_KEY environment variable")
