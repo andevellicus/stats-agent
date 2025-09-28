@@ -8,6 +8,18 @@ x-python-executor: &python-executor
     - ../workspaces:/app/workspaces
 
 services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: stats-agent-postgres
+    environment:
+      POSTGRES_DB: stats_agent
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: changeme
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
   main-llm:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
     container_name: main-llm-server
@@ -47,7 +59,7 @@ services:
       --embedding
       -ngl ${N_GPU_LAYERS}
       -c 2048
-      -b 512 
+      -b 512
       --batch-size 2048
       --gpu-layers ${N_GPU_LAYERS}
 
@@ -105,3 +117,6 @@ services:
     container_name: python-executor-5
     ports:
       - "9995:9999"
+
+volumes:
+  postgres-data:

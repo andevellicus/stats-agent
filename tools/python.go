@@ -118,6 +118,8 @@ type StatefulPythonTool struct {
 	logger      *zap.Logger
 	dialTimeout time.Duration
 	ioTimeout   time.Duration
+	sessionMu   sync.RWMutex
+	sessionAddr map[string]string
 }
 
 // NewStatefulPythonTool no longer creates a session ID.
@@ -131,6 +133,7 @@ func NewStatefulPythonTool(ctx context.Context, addresses []string, logger *zap.
 		logger:      logger,
 		dialTimeout: 3 * time.Second,
 		ioTimeout:   60 * time.Second,
+		sessionAddr: make(map[string]string),
 	}
 	if err := tool.ensureInitialConnectivity(ctx); err != nil {
 		return nil, err
@@ -205,12 +208,13 @@ func (t *StatefulPythonTool) execute(conn net.Conn, input string, sessionID stri
 }
 
 func (t *StatefulPythonTool) InitializeSession(ctx context.Context, sessionID string, uploadedFiles []string) (string, error) {
-	if len(uploadedFiles) == 0 {
-		return "", nil
+	quoted := make([]string, len(uploadedFiles))
+	for i, f := range uploadedFiles {
+		sanitized := strings.ReplaceAll(f, "'", "\\'")
+		quoted[i] = fmt.Sprintf("'%s'", sanitized)
 	}
+	filesLiteral := strings.Join(quoted, ", ")
 
-	// Build initialization code that lists files
-	filesList := strings.Join(uploadedFiles, "', '")
 	initCode := fmt.Sprintf(`
 import os
 import pandas as pd
@@ -221,23 +225,31 @@ from scipy import stats
 import warnings
 warnings.filterwarnings('ignore')
 
-# Session initialized with uploaded files
-uploaded_files = ['%s']
-print("="*50)
+workspace_path = os.getcwd()
+uploaded_files = [%s]
+
+print("=" * 50)
 print("POCKET STATISTICIAN SESSION INITIALIZED")
-print("="*50)
-print(f"Uploaded files detected: {len(uploaded_files)}")
-for f in uploaded_files:
-    if os.path.exists(f):
-        size = os.path.getsize(f) / 1024  # Size in KB
-        print(f"  ✓ {f} ({size:.1f} KB)")
-    else:
-        print(f"  ✗ {f} (not found)")
-print("="*50)
-print(f"Primary file for analysis: {uploaded_files[0]}")
+print("=" * 50)
+
+if uploaded_files:
+    print(f"Uploaded files detected: {len(uploaded_files)}")
+    for f in uploaded_files:
+        file_path = os.path.join(workspace_path, f)
+        if os.path.exists(file_path):
+            size = os.path.getsize(file_path) / 1024  # Size in KB
+            print(f"  \u2713 {f} ({size:.1f} KB)")
+        else:
+            print(f"  \u2717 {f} (not found)")
+    print("=" * 50)
+    print(f"Primary file for analysis: {uploaded_files[0]}")
+else:
+    print("No uploaded files detected yet. You can upload CSV or Excel files at any time.")
+    print("=" * 50)
+
 print("Ready for statistical analysis!")
-print("="*50)
-`, filesList)
+print("=" * 50)
+`, filesLiteral)
 
 	return t.Call(ctx, initCode, sessionID)
 }
@@ -256,6 +268,24 @@ func (t *StatefulPythonTool) Call(ctx context.Context, input string, sessionID s
 		return "", errors.New("no python executors configured")
 	}
 
+	tried := make(map[string]struct{})
+
+	// Try the previously assigned executor first, if any.
+	if sessionID != "" {
+		t.sessionMu.RLock()
+		boundAddr, ok := t.sessionAddr[sessionID]
+		t.sessionMu.RUnlock()
+		if ok {
+			if result, err := t.callExecutor(ctx, boundAddr, input, sessionID); err == nil {
+				return result, nil
+			}
+			tried[boundAddr] = struct{}{}
+			t.sessionMu.Lock()
+			delete(t.sessionAddr, sessionID)
+			t.sessionMu.Unlock()
+		}
+	}
+
 	var lastErr error
 	for attempts := 0; attempts < total; attempts++ {
 		addr, err := t.pool.Next()
@@ -265,39 +295,52 @@ func (t *StatefulPythonTool) Call(ctx context.Context, input string, sessionID s
 			}
 			return "", err
 		}
-
-		conn, err := t.dial(ctx, addr)
-		if err != nil {
-			t.pool.MarkFailure(addr)
-			lastErr = fmt.Errorf("dial python server %s: %w", addr, err)
-			if t.logger != nil {
-				t.logger.Warn("Failed to connect to python executor", zap.String("address", addr), zap.Error(err))
-			}
+		if _, seen := tried[addr]; seen {
 			continue
 		}
+		tried[addr] = struct{}{}
 
-		result, execErr := t.execute(conn, input, sessionID)
-		_ = conn.Close()
-		if execErr != nil {
-			t.pool.MarkFailure(addr)
-			lastErr = fmt.Errorf("executor %s: %w", addr, execErr)
-			if t.logger != nil {
-				t.logger.Warn("Python executor call failed", zap.String("address", addr), zap.Error(execErr))
-			}
-			continue
+		result, execErr := t.callExecutor(ctx, addr, input, sessionID)
+		if execErr == nil {
+			t.sessionMu.Lock()
+			t.sessionAddr[sessionID] = addr
+			t.sessionMu.Unlock()
+			return result, nil
 		}
-
-		t.pool.MarkSuccess(addr)
-		if t.logger != nil {
-			t.logger.Debug("Python code executed", zap.String("address", addr), zap.String("session_id", sessionID))
-		}
-		return result, nil
+		lastErr = execErr
 	}
 
 	if lastErr != nil {
 		return "", fmt.Errorf("all python executors failed: %w", lastErr)
 	}
 	return "", errors.New("no healthy python executors available")
+}
+
+func (t *StatefulPythonTool) callExecutor(ctx context.Context, addr, input, sessionID string) (string, error) {
+	conn, err := t.dial(ctx, addr)
+	if err != nil {
+		t.pool.MarkFailure(addr)
+		if t.logger != nil {
+			t.logger.Warn("Failed to connect to python executor", zap.String("address", addr), zap.Error(err))
+		}
+		return "", fmt.Errorf("dial python server %s: %w", addr, err)
+	}
+
+	result, execErr := t.execute(conn, input, sessionID)
+	_ = conn.Close()
+	if execErr != nil {
+		t.pool.MarkFailure(addr)
+		if t.logger != nil {
+			t.logger.Warn("Python executor call failed", zap.String("address", addr), zap.Error(execErr))
+		}
+		return "", fmt.Errorf("executor %s: %w", addr, execErr)
+	}
+
+	t.pool.MarkSuccess(addr)
+	if t.logger != nil {
+		t.logger.Debug("Python code executed", zap.String("address", addr), zap.String("session_id", sessionID))
+	}
+	return result, nil
 }
 
 func (t *StatefulPythonTool) Close() {
