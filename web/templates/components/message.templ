@@ -9,6 +9,10 @@ templ UserMessage(msg types.ChatMessage) {
 			<div class="font-sans text-sm text-white/90">{ msg.Content }</div>
 		</div>
 	</div>
+}
+
+templ UserMessageWithLoader(msg types.ChatMessage) {
+	@UserMessage(msg)
 	<div id={ "loading-" + msg.ID } class="sse-loader" data-session-id={ msg.SessionID } data-message-id={ msg.ID }>
 		<div class="flex justify-start w-full">
 			<div class="bg-white rounded-2xl px-5 py-3 w-full shadow-md border border-gray-100 hover:shadow-lg transition-shadow duration-200">
@@ -29,7 +33,7 @@ templ AgentMessage(msg types.ChatMessage) {
 		<div class="bg-white rounded-2xl px-5 py-3 w-full shadow-md border border-gray-100 hover:shadow-lg transition-shadow duration-200">
 			<div class="font-semibold text-sm text-primary mb-2 font-display">Pocket Statistician</div>
 			<div class="leading-relaxed text-gray-700 font-sans">
-			    { msg.Content }
+				@templ.Raw(msg.Content)
 			</div>
 		</div>
 	</div>

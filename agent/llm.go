@@ -11,10 +11,10 @@ import (
 	"net"
 	"net/http"
 	"stats-agent/config"
+	"stats-agent/web/types"
 	"strings"
 	"time"
 
-	"github.com/ollama/ollama/api"
 	"go.uber.org/zap"
 )
 
@@ -31,8 +31,8 @@ type LlamaCppStreamResponse struct {
 	Choices []LlamaCppStreamChoice `json:"choices"`
 }
 type LlamaCppChatRequest struct {
-	Messages []api.Message `json:"messages"`
-	Stream   bool          `json:"stream"`
+	Messages []types.AgentMessage `json:"messages"` // Use local struct
+	Stream   bool                 `json:"stream"`
 }
 
 func buildSystemPrompt() string {
@@ -123,12 +123,12 @@ If assumptions fail and no valid alternative exists, stop and explain why.
 `
 }
 
-func getLLMResponse(ctx context.Context, llamaCppHost string, messages []api.Message, cfg *config.Config, logger *zap.Logger) (<-chan string, error) {
-	systemMessage := api.Message{
+func getLLMResponse(ctx context.Context, llamaCppHost string, messages []types.AgentMessage, cfg *config.Config, logger *zap.Logger) (<-chan string, error) {
+	systemMessage := types.AgentMessage{
 		Role:    "system",
 		Content: buildSystemPrompt(),
 	}
-	chatMessages := append([]api.Message{systemMessage}, messages...)
+	chatMessages := append([]types.AgentMessage{systemMessage}, messages...)
 
 	reqBody := LlamaCppChatRequest{
 		Messages: chatMessages,

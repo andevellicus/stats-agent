@@ -9,13 +9,13 @@ import (
 	"regexp"
 	"sort"
 	"stats-agent/config"
+	"stats-agent/web/types"
 	"strings"
 	"time"
 
 	"io"
 
 	"github.com/google/uuid"
-	"github.com/ollama/ollama/api"
 	"github.com/philippgille/chromem-go"
 	"go.uber.org/zap"
 )
@@ -42,12 +42,12 @@ type LlamaCppEmbeddingResponse []struct {
 	Embedding [][]float32 `json:"embedding"`
 }
 type LlamaCppChatRequest struct {
-	Messages []api.Message `json:"messages"`
-	Stream   bool          `json:"stream"`
+	Messages []types.AgentMessage `json:"messages"`
+	Stream   bool                 `json:"stream"`
 }
 type LlamaCppChatResponse struct {
 	Choices []struct {
-		Message api.Message `json:"message"`
+		Message types.AgentMessage `json:"message"` // Corrected to use local type
 	} `json:"choices"`
 }
 
@@ -68,7 +68,7 @@ func New(cfg *config.Config, logger *zap.Logger) (*RAG, error) {
 	return rag, nil
 }
 
-func (r *RAG) AddMessagesToStore(ctx context.Context, messages []api.Message) error {
+func (r *RAG) AddMessagesToStore(ctx context.Context, messages []types.AgentMessage) error {
 	collection := r.db.GetCollection("long-term-memory", r.embedder)
 	if collection == nil {
 		return fmt.Errorf("long-term memory collection not found")
@@ -111,24 +111,21 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, messages []api.Message) er
 				contentToEmbed = "Fact: An assistant action with a tool execution occurred."
 			}
 		} else {
-			// This is where we handle regular user/assistant messages
 			r.messageStore[documentID] = msg.Content
 			contentToEmbed = msg.Content
 			metadata["role"] = msg.Role
 			metadata["document_id"] = documentID
 
 			if collection.Count() > 0 {
-				// Query for the single most similar document
 				results, err := collection.Query(ctx, contentToEmbed, 1, nil, nil)
 				if err != nil {
 					r.logger.Warn("Deduplication query failed, proceeding to add document", zap.Error(err))
 				} else if len(results) > 0 && results[0].Similarity > 0.98 {
 					r.logger.Info("Skipping duplicate content", zap.Float32("similarity", results[0].Similarity))
-					continue // Skip to the next message
+					continue
 				}
 			}
-			// If the message is long, create an additional summary document for embedding.
-			if len(msg.Content) > 500 { // Threshold for what's considered "long"
+			if len(msg.Content) > 500 {
 				summary, err := r.generateSearchableSummary(ctx, msg.Content)
 				if err != nil {
 					r.logger.Warn("Failed to create searchable summary for long message", zap.Error(err))
@@ -295,7 +292,7 @@ func (r *RAG) SummarizeLongTermMemory(ctx context.Context, context string) (stri
 	---`
 	userPrompt := fmt.Sprintf("History to summarize:\n%s", context)
 
-	messages := []api.Message{
+	messages := []types.AgentMessage{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userPrompt},
 	}
@@ -352,7 +349,7 @@ Output:
 %s
 `, code, finalResult)
 
-	messages := []api.Message{
+	messages := []types.AgentMessage{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userPrompt},
 	}
@@ -381,7 +378,7 @@ func (r *RAG) generateSearchableSummary(ctx context.Context, content string) (st
 **Summary:**
 `, content)
 
-	messages := []api.Message{
+	messages := []types.AgentMessage{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userPrompt},
 	}
@@ -467,7 +464,7 @@ func createLlamaCppEmbedding(cfg *config.Config, logger *zap.Logger) chromem.Emb
 	}
 }
 
-func getLLMResponse(ctx context.Context, llamaCppHost string, messages []api.Message, cfg *config.Config, logger *zap.Logger) (string, error) {
+func getLLMResponse(ctx context.Context, llamaCppHost string, messages []types.AgentMessage, cfg *config.Config, logger *zap.Logger) (string, error) {
 	reqBody := LlamaCppChatRequest{
 		Messages: messages,
 		Stream:   false,

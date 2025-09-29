@@ -99,7 +99,7 @@ func main() {
 			if input == "exit" {
 				break
 			}
-			statsAgent.Run(ctx, input, cliSessionID)
+			//statsAgent.Run(ctx, input, cliSessionID)
 			fmt.Print("> ")
 		}
 

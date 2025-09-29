@@ -25,8 +25,8 @@ templ ChatPage(activeSessionID uuid.UUID, sessions []types.Session, messages []t
 								for _, msg := range messages {
 									if msg.Role == "user" {
 										@components.UserMessage(msg)
-									} else {
-										// This will handle agent and tool messages
+									} else if msg.Role == "assistant" {
+										@components.AgentMessage(msg)
 									}
 								}
 							}

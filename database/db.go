@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid" // Import the pgtype package
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/lib/pq"
 )
 
 type PostgresStore struct {
@@ -107,6 +108,29 @@ func (s *PostgresStore) CreateSession(ctx context.Context, userID *uuid.UUID) (u
 	return sessionID, nil
 }
 
+func (s *PostgresStore) GetSessionByID(ctx context.Context, sessionID uuid.UUID) (types.Session, error) {
+	query := `
+		SELECT id, user_id, created_at, last_active, workspace_path, title, is_active
+		FROM sessions
+		WHERE id = $1
+	`
+	row := s.DB.QueryRowContext(ctx, query, sessionID)
+
+	var sess types.Session
+	var userID sql.NullString
+	if err := row.Scan(&sess.ID, &userID, &sess.CreatedAt, &sess.LastActive, &sess.WorkspacePath, &sess.Title, &sess.IsActive); err != nil {
+		return types.Session{}, err // Will return sql.ErrNoRows if not found
+	}
+
+	if userID.Valid {
+		parsedUUID, err := uuid.Parse(userID.String)
+		if err == nil {
+			sess.UserID = &parsedUUID
+		}
+	}
+	return sess, nil
+}
+
 func (s *PostgresStore) GetSessions(ctx context.Context, userID *uuid.UUID) ([]types.Session, error) {
 	query := `
 		SELECT id, user_id, created_at, last_active, workspace_path, title, is_active
@@ -196,9 +220,9 @@ func (s *PostgresStore) GetMessagesBySession(ctx context.Context, sessionID uuid
 }
 
 func (s *PostgresStore) GetRenderedFiles(ctx context.Context, sessionID uuid.UUID) (map[string]bool, error) {
-	var files []string
+	var files pq.StringArray // Use pq.StringArray instead of []string
 	query := `SELECT rendered_files FROM sessions WHERE id = $1`
-	// Use pgtype.TextArray to scan the TEXT[] column
+
 	err := s.DB.QueryRowContext(ctx, query, sessionID).Scan(&files)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -216,10 +240,10 @@ func (s *PostgresStore) GetRenderedFiles(ctx context.Context, sessionID uuid.UUI
 
 func (s *PostgresStore) AddRenderedFile(ctx context.Context, sessionID uuid.UUID, filename string) error {
 	query := `
-		UPDATE sessions
-		SET rendered_files = array_append(rendered_files, $1)
-		WHERE id = $2
-	`
+        UPDATE sessions
+        SET rendered_files = array_append(rendered_files, $1)
+        WHERE id = $2
+    `
 	_, err := s.DB.ExecContext(ctx, query, filename, sessionID)
 	return err
 }

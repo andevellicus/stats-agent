@@ -5,9 +5,10 @@ go 1.25.1
 require (
 	github.com/a-h/templ v0.3.943
 	github.com/gin-gonic/gin v1.11.0
+	github.com/gomarkdown/markdown v0.0.0-20250810172220-2e2c11897d1a
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.6
-	github.com/ollama/ollama v0.11.11
+	github.com/lib/pq v1.10.9
 	github.com/philippgille/chromem-go v0.7.0
 	github.com/spf13/viper v1.21.0
 	go.uber.org/zap v1.27.0

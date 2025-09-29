@@ -6,26 +6,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"path/filepath"
 	"stats-agent/config"
 	"stats-agent/rag"
 	"stats-agent/tools"
+	"stats-agent/web/types"
 	"strings"
 	"time"
 
 	"io"
 
-	"github.com/ollama/ollama/api"
 	"go.uber.org/zap"
 )
 
 type Agent struct {
-	cfg          *config.Config
-	pythonTool   *tools.StatefulPythonTool
-	rag          *rag.RAG
-	history      []api.Message
-	logger       *zap.Logger
-	sessionFiles map[string][]string
+	cfg        *config.Config
+	pythonTool *tools.StatefulPythonTool
+	rag        *rag.RAG
+	logger     *zap.Logger
 }
 
 type TokenizeRequest struct {
@@ -39,38 +36,17 @@ type TokenizeResponse struct {
 func NewAgent(cfg *config.Config, pythonTool *tools.StatefulPythonTool, rag *rag.RAG, logger *zap.Logger) *Agent {
 	logger.Info("Agent initialized", zap.Int("context_window_size", cfg.ContextLength))
 	return &Agent{
-		cfg:          cfg,
-		pythonTool:   pythonTool,
-		rag:          rag,
-		logger:       logger,
-		sessionFiles: make(map[string][]string),
+		cfg:        cfg,
+		pythonTool: pythonTool,
+		rag:        rag,
+		logger:     logger,
 	}
 }
 
-// Run starts the agent's interaction loop for a given user input
-func (a *Agent) Run(ctx context.Context, input string, sessionID string) {
-	// Get uploaded files for this session
-	uploadedFiles := a.getSessionFiles(sessionID)
-	a.sessionFiles[sessionID] = uploadedFiles
-
-	// If files were just uploaded, initialize the Python session with awareness
-	if len(uploadedFiles) > 0 && len(a.history) == 0 {
-		initResult, err := a.pythonTool.InitializeSession(ctx, sessionID, uploadedFiles)
-		if err != nil {
-			a.logger.Error("Failed to initialize session with files", zap.Error(err))
-		} else if initResult != "" {
-			// Instead of printing, add the initialization result directly to the history
-			// as if it were the output of a tool. This makes the agent aware of the
-			// context without displaying it to the user.
-			initializationMessage := api.Message{
-				Role:    "tool",
-				Content: fmt.Sprintf("<execution_results>\n%s\n</execution_results>", initResult),
-			}
-			a.history = append(a.history, initializationMessage)
-		}
-	}
-
-	a.history = append(a.history, api.Message{Role: "user", Content: input})
+// Run now accepts the current session's message history, making it stateless.
+func (a *Agent) Run(ctx context.Context, input string, sessionID string, history []types.AgentMessage) {
+	currentHistory := history
+	currentHistory = append(currentHistory, types.AgentMessage{Role: "user", Content: input})
 
 	longTermContext, err := a.rag.Query(ctx, input, a.cfg.RAGResults)
 	if err != nil {
@@ -89,24 +65,22 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string) {
 		}
 	}
 
-	var messagesForLLM []api.Message
-	consecutiveErrors := 0 // Initialize error counter
+	consecutiveErrors := 0
 
 	for turn := 0; turn < a.cfg.MaxTurns; turn++ {
-		// Memory is now managed at the start of every single turn.
-		a.manageMemory(ctx)
-		// Check for consecutive errors to break out of a death loop
+		a.manageMemory(ctx, &currentHistory)
+
 		if consecutiveErrors >= a.cfg.ConsecutiveErrors {
 			a.logger.Warn("Agent produced consecutive errors, breaking loop to request user feedback", zap.Int("consecutive_errors", a.cfg.ConsecutiveErrors))
 			fmt.Printf("<agent_status>Consecutive errors, user feedback needed.</agent_status>")
 			break
 		}
 
-		messagesForLLM = []api.Message{}
+		var messagesForLLM []types.AgentMessage
 		if longTermContext != "" {
-			messagesForLLM = append(messagesForLLM, api.Message{Role: "system", Content: longTermContext})
+			messagesForLLM = append(messagesForLLM, types.AgentMessage{Role: "system", Content: longTermContext})
 		}
-		messagesForLLM = append(messagesForLLM, a.history...)
+		messagesForLLM = append(messagesForLLM, currentHistory...)
 
 		var llmResponseBuilder strings.Builder
 		isFirstChunk := true
@@ -146,22 +120,20 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string) {
 		_, execResult, wasCodeExecuted := a.pythonTool.ExecutePythonCode(ctx, llmResponse, sessionID)
 
 		if wasCodeExecuted {
-			a.history = append(a.history, api.Message{Role: "assistant", Content: llmResponse})
+			currentHistory = append(currentHistory, types.AgentMessage{Role: "assistant", Content: llmResponse})
 			executionMessage := fmt.Sprintf("<execution_results>\n%s\n</execution_results>", execResult)
-			// TODO Test this thoroughly to ensure no other prints occur.
 			fmt.Print(executionMessage)
-			toolMessage := api.Message{Role: "tool", Content: executionMessage}
-			a.history = append(a.history, toolMessage)
+			toolMessage := types.AgentMessage{Role: "tool", Content: executionMessage}
+			currentHistory = append(currentHistory, toolMessage)
 
 			if strings.Contains(execResult, "Error:") {
 				fmt.Printf("<agent_status>Error - attempting to self-correct</agent_status>")
-				consecutiveErrors++ // Increment error counter
-				continue
+				consecutiveErrors++
 			} else {
-				consecutiveErrors = 0 // Reset error counter on success
+				consecutiveErrors = 0
 			}
 		} else {
-			a.history = append(a.history, api.Message{Role: "assistant", Content: llmResponse})
+			currentHistory = append(currentHistory, types.AgentMessage{Role: "assistant", Content: llmResponse})
 			return
 		}
 	}
@@ -215,13 +187,14 @@ func (a *Agent) countTokens(ctx context.Context, text string) (int, error) {
 	return len(tokenizeResponse.Tokens), nil
 }
 
-func (a *Agent) manageMemory(ctx context.Context) {
+// manageMemory now operates on a pointer to a history slice.
+func (a *Agent) manageMemory(ctx context.Context, history *[]types.AgentMessage) {
 	var totalTokens int
-	for _, msg := range a.history {
+	for _, msg := range *history {
 		tokens, err := a.countTokens(ctx, msg.Content)
 		if err != nil {
 			a.logger.Warn("Could not count tokens for a message, falling back to character count", zap.Error(err))
-			totalTokens += len(msg.Content) // Fallback
+			totalTokens += len(msg.Content)
 		} else {
 			totalTokens += tokens
 		}
@@ -231,11 +204,11 @@ func (a *Agent) manageMemory(ctx context.Context) {
 
 	if totalTokens > contextWindowThreshold {
 		fmt.Printf("<agent_status>Archiving older messages....</agent_status>")
-		cutoff := len(a.history) / 2
+		cutoff := len(*history) / 2
 
-		if cutoff > 0 && cutoff < len(a.history) {
-			lastMessageInBatch := a.history[cutoff-1]
-			firstMessageOutOfBatch := a.history[cutoff]
+		if cutoff > 0 && cutoff < len(*history) {
+			lastMessageInBatch := (*history)[cutoff-1]
+			firstMessageOutOfBatch := (*history)[cutoff]
 
 			if lastMessageInBatch.Role == "assistant" && strings.Contains(lastMessageInBatch.Content, "<python>") && firstMessageOutOfBatch.Role == "tool" {
 				cutoff++
@@ -247,38 +220,14 @@ func (a *Agent) manageMemory(ctx context.Context) {
 			return
 		}
 
-		messagesToStore := a.history[:cutoff]
+		messagesToStore := (*history)[:cutoff]
 
 		err := a.rag.AddMessagesToStore(ctx, messagesToStore)
 		if err != nil {
 			a.logger.Error("Error adding messages to long-term memory", zap.Error(err))
 		}
 
-		a.history = a.history[cutoff:]
+		*history = (*history)[cutoff:]
 		a.logger.Info("Memory threshold reached. Moved messages to long-term RAG store", zap.Int("messages_moved", len(messagesToStore)))
 	}
-}
-
-func (a *Agent) getSessionFiles(sessionID string) []string {
-	workspaceDir := filepath.Join("workspaces", sessionID)
-	var files []string
-
-	// Check for CSV files
-	csvFiles, _ := filepath.Glob(filepath.Join(workspaceDir, "*.csv"))
-	files = append(files, csvFiles...)
-
-	// Check for Excel files
-	xlsxFiles, _ := filepath.Glob(filepath.Join(workspaceDir, "*.xlsx"))
-	files = append(files, xlsxFiles...)
-
-	xlsFiles, _ := filepath.Glob(filepath.Join(workspaceDir, "*.xls"))
-	files = append(files, xlsFiles...)
-
-	// Convert to just filenames
-	var filenames []string
-	for _, f := range files {
-		filenames = append(filenames, filepath.Base(f))
-	}
-
-	return filenames
 }

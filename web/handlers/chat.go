@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gomarkdown/markdown"
+
 	"github.com/a-h/templ"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -59,20 +61,29 @@ func NewChatHandler(agent *agent.Agent, logger *zap.Logger, store *database.Post
 }
 
 func (h *ChatHandler) Index(c *gin.Context) {
-	sessionID := c.MustGet("sessionID").(uuid.UUID)
+	sessionID, exists := c.Get("sessionID")
+	if !exists {
+		return
+	}
+	sessionUUID := sessionID.(uuid.UUID)
 
-	// Create session workspace if it doesn't exist
-	workspaceDir := filepath.Join("workspaces", sessionID.String())
+	workspaceDir := filepath.Join("workspaces", sessionUUID.String())
 	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
 		h.logger.Error("Failed to create workspace directory", zap.Error(err))
 		c.String(http.StatusInternalServerError, "Could not create workspace.")
 		return
 	}
 
-	sessions, _ := h.store.GetSessions(c.Request.Context(), nil)
-	messages, _ := h.store.GetMessagesBySession(c.Request.Context(), sessionID)
+	sessions, err := h.store.GetSessions(c.Request.Context(), nil)
+	if err != nil {
+		h.logger.Error("Failed to get sessions", zap.Error(err))
+	}
+	messages, err := h.store.GetMessagesBySession(c.Request.Context(), sessionUUID)
+	if err != nil {
+		h.logger.Error("Failed to get messages for session", zap.Error(err))
+	}
 
-	component := pages.ChatPage(sessionID, sessions, messages)
+	component := pages.ChatPage(sessionUUID, sessions, messages)
 	component.Render(c.Request.Context(), c.Writer)
 }
 
@@ -83,10 +94,11 @@ func (h *ChatHandler) LoadSession(c *gin.Context) {
 		return
 	}
 
-	// In a real app, you'd also check if the user has permission to view this session
-	sessions, _ := h.store.GetSessions(c.Request.Context(), nil) // Assuming GetSessions exists
+	sessions, _ := h.store.GetSessions(c.Request.Context(), nil)
 	messages, _ := h.store.GetMessagesBySession(c.Request.Context(), sessionID)
 
+	// When loading a session, we render the entire chat history.
+	// The key change is that historical messages will not have the SSE loader.
 	pages.ChatPage(sessionID, sessions, messages).Render(c.Request.Context(), c.Writer)
 }
 
@@ -142,6 +154,10 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 			req.Message = fmt.Sprintf("[📎 File uploaded: %s]\n\n%s", file.Filename, req.Message)
 		}
 
+		if err := h.store.AddRenderedFile(c.Request.Context(), sessionID, sanitizedFilename); err != nil {
+			h.logger.Error("Failed to mark file as rendered", zap.Error(err))
+		}
+
 		h.logger.Info("File uploaded", zap.String("filename", file.Filename), zap.String("session_id", req.SessionID))
 	}
 
@@ -160,10 +176,13 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 
 	h.logger.Info("Processing chat message", zap.String("session_id", req.SessionID), zap.String("message", req.Message))
 
-	component := components.UserMessage(userMessage)
+	// This is the crucial change. When a new message is sent, we now render a component
+	// that includes the SSE loader. This ensures only new messages trigger the agent.
+	component := components.UserMessageWithLoader(userMessage)
 	c.Header("Content-Type", "text/html")
 	component.Render(c.Request.Context(), c.Writer)
 }
+
 func (h *ChatHandler) UploadFile(c *gin.Context) {
 	sessionIDStr := c.PostForm("session_id")
 	if sessionIDStr == "" {
@@ -261,9 +280,6 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 
 	h.streamAgentResponse(ctx, c.Writer, userMessage.Content, userMessageID, sessionID.String())
 }
-
-// processStreamByWord reads from the stream rune by rune, buffers them into words,
-// and processes each word for tags before sending it to the client. This version is stateful.
 func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writeSSEData func(StreamData) error) {
 	reader := bufio.NewReader(r)
 	var currentWord strings.Builder
@@ -349,6 +365,7 @@ func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWr
 		if err != nil {
 			return err
 		}
+		// Use the passed-in http.ResponseWriter 'w'
 		_, err = fmt.Fprintf(w, "data: %s\n\n", jsonData)
 		if err != nil {
 			return err
@@ -369,50 +386,76 @@ func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWr
 		return
 	}
 
-	r, pipeW, err := os.Pipe()
-	if err != nil {
-		h.logger.Error("Failed to create pipe", zap.Error(err))
-		writeSSEData(StreamData{Type: "error", Content: "Internal server error"})
-		return
-	}
-
+	// Redirect os.Stdout using os.Pipe
 	originalStdout := os.Stdout
-	os.Stdout = pipeW
-	log.SetOutput(pipeW)
+	r, pipeWriter, _ := os.Pipe()
+	os.Stdout = pipeWriter
+	log.SetOutput(pipeWriter)
 
-	agentDone := make(chan error, 1)
+	var agentResponseForDB bytes.Buffer
+	teeReader := io.TeeReader(r, &agentResponseForDB)
+
+	agentDone := make(chan struct{})
 	streamDone := make(chan struct{})
 
 	go func() {
 		defer close(streamDone)
-		h.processStreamByWord(ctx, r, func(data StreamData) error {
-			if err := writeSSEData(data); err != nil {
-				h.logger.Error("Error writing chunk data", zap.Error(err))
-				return err
-			}
-			return nil
-		})
+		h.processStreamByWord(ctx, teeReader, writeSSEData)
 	}()
+
+	sessionUUID, err := uuid.Parse(sessionID)
+	if err != nil {
+		h.logger.Error("Invalid session ID for streaming", zap.Error(err))
+		return
+	}
+	messages, err := h.store.GetMessagesBySession(ctx, sessionUUID)
+	if err != nil {
+		h.logger.Error("Failed to get message history for agent", zap.Error(err))
+		return
+	}
+	agentHistory := toAgentMessages(messages)
 
 	go func() {
 		defer func() {
+			// Restore everything and close the writer
 			os.Stdout = originalStdout
 			log.SetOutput(originalStdout)
-			pipeW.Close()
-			r.Close()
+			pipeWriter.Close()
+			close(agentDone)
 		}()
-		h.agent.Run(ctx, input, sessionID)
-		close(agentDone)
+		h.agent.Run(ctx, input, sessionID, agentHistory)
 	}()
 
 	select {
 	case <-ctx.Done():
 		h.logger.Info("Context cancelled, closing SSE connection")
 	case <-agentDone:
+		// Wait for the streaming to finish processing all data from the pipe
 		<-streamDone
 		h.streamNewFiles(ctx, writeSSEData, sessionID)
 		if err := writeSSEData(StreamData{Type: "end"}); err != nil {
 			h.logger.Error("Failed to send end message", zap.Error(err))
+		}
+	}
+
+	// Before saving, process the raw text into final HTML
+	rawAgentResponse := agentResponseForDB.String()
+	renderedHTML, err := processAgentContentForDB(context.Background(), rawAgentResponse)
+	if err != nil {
+		h.logger.Error("Failed to render agent content for DB", zap.Error(err))
+		// Fallback to saving the raw content if rendering fails
+		renderedHTML = rawAgentResponse
+	}
+
+	if renderedHTML != "" {
+		agentMessage := types.ChatMessage{
+			ID:        agentMessageID,
+			SessionID: sessionID,
+			Role:      "assistant",
+			Content:   renderedHTML,
+		}
+		if err := h.store.CreateMessage(context.Background(), agentMessage); err != nil {
+			h.logger.Error("Failed to save agent message to database", zap.Error(err))
 		}
 	}
 }
@@ -430,8 +473,6 @@ func (h *ChatHandler) streamNewFiles(ctx context.Context, writeSSEData func(Stre
 		h.logger.Error("Failed to read workspace directory", zap.Error(err), zap.String("session_id", sessionID))
 		return
 	}
-
-	// Fetch the set of already rendered files from the database
 	renderedFiles, err := h.store.GetRenderedFiles(ctx, sessionUUID)
 	if err != nil {
 		h.logger.Error("Failed to get rendered files from DB", zap.Error(err), zap.String("session_id", sessionID))
@@ -445,8 +486,6 @@ func (h *ChatHandler) streamNewFiles(ctx context.Context, writeSSEData func(Stre
 				webPath := filepath.ToSlash(filepath.Join("/workspaces", sessionID, fileName))
 				var buf bytes.Buffer
 				var component templ.Component
-
-				// Determine which component to use based on file type
 				switch strings.ToLower(filepath.Ext(fileName)) {
 				case ".png", ".jpg", ".jpeg", ".gif":
 					component = components.ImageBlock(webPath)
@@ -457,7 +496,6 @@ func (h *ChatHandler) streamNewFiles(ctx context.Context, writeSSEData func(Stre
 				if component != nil {
 					if err := component.Render(ctx, &buf); err == nil {
 						writeSSEData(StreamData{Type: "file", Content: buf.String()})
-						// Add the file to the database of rendered files
 						if err := h.store.AddRenderedFile(ctx, sessionUUID, fileName); err != nil {
 							h.logger.Error("Failed to mark file as rendered in DB", zap.Error(err), zap.String("filename", fileName))
 						}
@@ -468,7 +506,68 @@ func (h *ChatHandler) streamNewFiles(ctx context.Context, writeSSEData func(Stre
 	}
 }
 
-// Sanitize the filename to prevent security issues like directory traversal.
+// New helper function to process agent content before saving to DB
+func processAgentContentForDB(ctx context.Context, rawContent string) (string, error) {
+	// Combined regex to find all custom tags
+	re := regexp.MustCompile(`(?s)(<python>.*?</python>|<execution_results>.*?</execution_results>|<agent_status>.*?</agent_status>)`)
+
+	// Split the content by our custom tags. `parts` will contain the text *between* the tags.
+	parts := re.Split(rawContent, -1)
+	// `matches` will contain the tags themselves.
+	matches := re.FindAllString(rawContent, -1)
+
+	var finalHTML strings.Builder
+
+	for i, part := range parts {
+		// Process the plain text part with Markdown
+		cleanedPart := strings.TrimSpace(strings.ReplaceAll(part, "Agent: ", ""))
+		if cleanedPart != "" {
+			md := []byte(cleanedPart)
+			html := markdown.ToHTML(md, nil, nil)
+			// The markdown library wraps text in <p> tags, which we can trim for cleaner output
+			finalHTML.WriteString(strings.TrimSuffix(strings.TrimPrefix(string(html), "<p>"), "</p>\n"))
+		}
+
+		// If there is a matching component, render it and append it
+		if i < len(matches) {
+			match := matches[i]
+			var componentHTML string
+
+			if strings.HasPrefix(match, "<python>") {
+				code := strings.TrimSuffix(strings.TrimPrefix(match, "<python>"), "</python>")
+				var buf bytes.Buffer
+				components.PythonCodeBlock(code).Render(ctx, &buf)
+				componentHTML = buf.String()
+			} else if strings.HasPrefix(match, "<execution_results>") {
+				result := strings.TrimSuffix(strings.TrimPrefix(match, "<execution_results>"), "</execution_results>")
+				var buf bytes.Buffer
+				components.ExecutionResultBlock(result).Render(ctx, &buf)
+				componentHTML = buf.String()
+			} else if strings.HasPrefix(match, "<agent_status>") {
+				status := strings.TrimSuffix(strings.TrimPrefix(match, "<agent_status>"), "</agent_status>")
+				var buf bytes.Buffer
+				components.AgentStatus(status).Render(ctx, &buf)
+				componentHTML = buf.String()
+			}
+			finalHTML.WriteString(componentHTML)
+		}
+	}
+
+	return finalHTML.String(), nil
+}
+
+func toAgentMessages(messages []types.ChatMessage) []types.AgentMessage {
+	var agentMessages []types.AgentMessage
+	for _, msg := range messages {
+		if msg.Role == "user" || msg.Role == "assistant" {
+			agentMessages = append(agentMessages, types.AgentMessage{
+				Role:    msg.Role,
+				Content: msg.Content,
+			})
+		}
+	}
+	return agentMessages
+}
 func sanitizeFilename(filename string) string {
 	sanitized := strings.Trim(filename, " .")
 	sanitized = strings.ReplaceAll(sanitized, "..", "")
@@ -479,8 +578,6 @@ func sanitizeFilename(filename string) string {
 	}
 	return sanitized
 }
-
-// Verify that the file exists in the session's workspace.
 func verifyFileExists(workspaceDir, filename string) bool {
 	safePath := filepath.Join(workspaceDir, filename)
 	info, err := os.Stat(safePath)

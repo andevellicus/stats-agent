@@ -227,7 +227,7 @@ function initiateSSE() {
         activeEventSource = eventSource;
 
         let contentBuffer = '';
-        let agentMessageContainer = null;
+        let MessageContainer = null;
         let debounceTimer;
 
         const cleanup = () => {
@@ -259,16 +259,16 @@ function initiateSSE() {
                     }
                     break;
                 case 'create_container':
-                    const agentMessageId = 'agent-msg-' + data.content;
-                    agentMessageContainer = document.createElement('div');
-                    agentMessageContainer.id = agentMessageId;
-                    agentMessageContainer.innerHTML = `
+                    const MessageId = 'agent-msg-' + data.content;
+                    MessageContainer = document.createElement('div');
+                    MessageContainer.id = MessageId;
+                    MessageContainer.innerHTML = `
 						<div class="agent-output bg-white rounded-2xl px-5 py-3 w-full shadow-md border border-gray-100">
 							<div class="font-semibold text-sm text-primary mb-2 font-display">Pocket Statistician</div>
-							<div id="content-${agentMessageId}" class="prose max-w-none leading-relaxed text-gray-700 font-sans"></div>
+							<div id="content-${MessageId}" class="prose max-w-none leading-relaxed text-gray-700 font-sans"></div>
 						</div>
                     `;
-                    document.getElementById('messages').appendChild(agentMessageContainer);
+                    document.getElementById('messages').appendChild(MessageContainer);
                     break;
                 case 'file':
                     if (data.content) {
@@ -281,12 +281,12 @@ function initiateSSE() {
                     }
                     break;
                 case 'chunk':
-                    if (agentMessageContainer && typeof data.content === 'string') {
+                    if (MessageContainer && typeof data.content === 'string') {
                         contentBuffer += data.content;
 
                         clearTimeout(debounceTimer);
                         debounceTimer = setTimeout(() => {
-                            const contentDiv = document.getElementById('content-' + agentMessageContainer.id);
+                            const contentDiv = document.getElementById('content-' + MessageContainer.id);
                             if(contentDiv){
                                 renderAndProcessContent(contentDiv, contentBuffer);
                             }
@@ -295,8 +295,8 @@ function initiateSSE() {
                     break;
                 case 'end':
                     eventSource.close();
-                    if (agentMessageContainer) {
-                        const contentDiv = document.getElementById('content-' + agentMessageContainer.id);
+                    if (MessageContainer) {
+                        const contentDiv = document.getElementById('content-' + MessageContainer.id);
                         if (contentDiv) {
                            renderAndProcessContent(contentDiv, contentBuffer);
                         }
