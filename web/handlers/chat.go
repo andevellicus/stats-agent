@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"stats-agent/agent"
+	"stats-agent/database"
 	"stats-agent/web/templates/components"
 	"stats-agent/web/templates/pages"
 	"stats-agent/web/types"
@@ -27,17 +28,15 @@ import (
 )
 
 type ChatHandler struct {
-	agent    *agent.Agent
-	logger   *zap.Logger
-	sessions map[string]*ChatSession
-	mu       sync.RWMutex
+	agent  *agent.Agent
+	logger *zap.Logger
+	store  *database.PostgresStore
 }
 
 type ChatSession struct {
 	ID            string
 	Messages      []types.ChatMessage
 	LastAccess    time.Time
-	mu            sync.RWMutex
 	RenderedFiles map[string]bool
 }
 
@@ -51,37 +50,44 @@ type StreamData struct {
 	Content string `json:"content,omitempty"`
 }
 
-func NewChatHandler(agent *agent.Agent, logger *zap.Logger) *ChatHandler {
+func NewChatHandler(agent *agent.Agent, logger *zap.Logger, store *database.PostgresStore) *ChatHandler {
 	return &ChatHandler{
-		agent:    agent,
-		logger:   logger,
-		sessions: make(map[string]*ChatSession),
+		agent:  agent,
+		logger: logger,
+		store:  store,
 	}
 }
 
 func (h *ChatHandler) Index(c *gin.Context) {
-	sessionID := generateSessionID()
+	sessionID := c.MustGet("sessionID").(uuid.UUID)
 
-	// Create session workspace
-	workspaceDir := filepath.Join("workspaces", sessionID)
+	// Create session workspace if it doesn't exist
+	workspaceDir := filepath.Join("workspaces", sessionID.String())
 	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
 		h.logger.Error("Failed to create workspace directory", zap.Error(err))
 		c.String(http.StatusInternalServerError, "Could not create workspace.")
 		return
 	}
 
-	// Create new session
-	h.mu.Lock()
-	h.sessions[sessionID] = &ChatSession{
-		ID:            sessionID,
-		Messages:      []types.ChatMessage{},
-		LastAccess:    time.Now(),
-		RenderedFiles: make(map[string]bool),
-	}
-	h.mu.Unlock()
+	sessions, _ := h.store.GetSessions(c.Request.Context(), nil)
+	messages, _ := h.store.GetMessagesBySession(c.Request.Context(), sessionID)
 
-	component := pages.ChatPage(sessionID)
+	component := pages.ChatPage(sessionID, sessions, messages)
 	component.Render(c.Request.Context(), c.Writer)
+}
+
+func (h *ChatHandler) LoadSession(c *gin.Context) {
+	sessionID, err := uuid.Parse(c.Param("sessionID"))
+	if err != nil {
+		c.String(http.StatusBadRequest, "Invalid session ID")
+		return
+	}
+
+	// In a real app, you'd also check if the user has permission to view this session
+	sessions, _ := h.store.GetSessions(c.Request.Context(), nil) // Assuming GetSessions exists
+	messages, _ := h.store.GetMessagesBySession(c.Request.Context(), sessionID)
+
+	pages.ChatPage(sessionID, sessions, messages).Render(c.Request.Context(), c.Writer)
 }
 
 func (h *ChatHandler) SendMessage(c *gin.Context) {
@@ -97,31 +103,21 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 		return
 	}
 
-	// Get or create session
-	h.mu.Lock()
-	session, exists := h.sessions[req.SessionID]
-	if !exists {
-		session = &ChatSession{
-			ID:            req.SessionID,
-			Messages:      []types.ChatMessage{},
-			RenderedFiles: make(map[string]bool),
-		}
-		h.sessions[req.SessionID] = session
+	sessionID, err := uuid.Parse(req.SessionID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid session ID"})
+		return
 	}
-	session.LastAccess = time.Now()
-	h.mu.Unlock()
 
 	// Handle potential file upload
 	file, err := c.FormFile("file")
 	if err == nil {
-		// **1. Sanitize the original filename**
 		sanitizedFilename := sanitizeFilename(file.Filename)
 		if sanitizedFilename == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid or unsafe filename."})
 			return
 		}
 
-		// A file was included, process it
 		ext := strings.ToLower(filepath.Ext(file.Filename))
 		if ext != ".csv" && ext != ".xlsx" && ext != ".xls" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file type. Please upload a CSV or Excel file."})
@@ -129,19 +125,17 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 		}
 
 		workspaceDir := filepath.Join("workspaces", req.SessionID)
-		dst := filepath.Join(workspaceDir, file.Filename)
+		dst := filepath.Join(workspaceDir, sanitizedFilename)
 		if err := c.SaveUploadedFile(file, dst); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not save file"})
 			return
 		}
 
-		// **2. Verify that the sanitized file now exists on disk**
 		if !verifyFileExists(workspaceDir, sanitizedFilename) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "File verification failed after upload."})
 			return
 		}
 
-		// Modify the user's message to include file info prominently
 		if strings.TrimSpace(req.Message) == "" {
 			req.Message = fmt.Sprintf("I've uploaded %s. Please analyze this dataset and provide statistical insights.", file.Filename)
 		} else {
@@ -149,48 +143,39 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 		}
 
 		h.logger.Info("File uploaded", zap.String("filename", file.Filename), zap.String("session_id", req.SessionID))
-
-		// Mark the uploaded file as rendered
-		session.mu.Lock()
-		session.RenderedFiles[file.Filename] = true
-		session.mu.Unlock()
 	}
 
-	// Add user's message to session (now includes file info if uploaded)
 	userMessage := types.ChatMessage{
 		Role:      "user",
 		Content:   req.Message,
 		ID:        generateMessageID(),
-		SessionID: req.SessionID,
+		SessionID: sessionID.String(),
 	}
 
-	session.mu.Lock()
-	session.Messages = append(session.Messages, userMessage)
-	session.mu.Unlock()
+	if err := h.store.CreateMessage(c.Request.Context(), userMessage); err != nil {
+		h.logger.Error("Failed to save user message", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not save message"})
+		return
+	}
 
 	h.logger.Info("Processing chat message", zap.String("session_id", req.SessionID), zap.String("message", req.Message))
 
-	// Return the user message immediately for HTMX to display
 	component := components.UserMessage(userMessage)
 	c.Header("Content-Type", "text/html")
 	component.Render(c.Request.Context(), c.Writer)
 }
 func (h *ChatHandler) UploadFile(c *gin.Context) {
-	sessionID := c.PostForm("session_id")
-	if sessionID == "" {
+	sessionIDStr := c.PostForm("session_id")
+	if sessionIDStr == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Session ID is required"})
 		return
 	}
 
-	h.mu.RLock()
-	session, exists := h.sessions[sessionID]
-	h.mu.RUnlock()
-
-	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Session not found"})
+	sessionID, err := uuid.Parse(sessionIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid session ID"})
 		return
 	}
-	session.LastAccess = time.Now()
 
 	file, err := c.FormFile("file")
 	if err != nil {
@@ -198,80 +183,75 @@ func (h *ChatHandler) UploadFile(c *gin.Context) {
 		return
 	}
 
-	// **Server-side validation for file type**
 	ext := strings.ToLower(filepath.Ext(file.Filename))
 	if ext != ".csv" && ext != ".xlsx" && ext != ".xls" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file type. Please upload a CSV or Excel file."})
 		return
 	}
 
-	// Save the file to the session's workspace
-	workspaceDir := filepath.Join("workspaces", sessionID)
+	workspaceDir := filepath.Join("workspaces", sessionID.String())
 	dst := filepath.Join(workspaceDir, file.Filename)
 	if err := c.SaveUploadedFile(file, dst); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not save file"})
 		return
 	}
 
-	// Add a system message to inform the agent of the new file.
 	systemMessage := types.ChatMessage{
 		Role:      "system",
 		Content:   fmt.Sprintf("The user has uploaded a file: %s. Unless specified otherwise, use this file for your analysis.", file.Filename),
 		ID:        generateMessageID(),
-		SessionID: sessionID,
+		SessionID: sessionID.String(),
 	}
-	session.mu.Lock()
-	session.Messages = append(session.Messages, systemMessage)
-	session.mu.Unlock()
+
+	if err := h.store.CreateMessage(c.Request.Context(), systemMessage); err != nil {
+		h.logger.Error("Failed to save system message", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not save message"})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("File %s uploaded successfully.", file.Filename)})
 }
 
 func (h *ChatHandler) StreamResponse(c *gin.Context) {
-	sessionID := c.Query("session_id")
+	sessionIDStr := c.Query("session_id")
 	userMessageID := c.Query("user_message_id")
 
-	if sessionID == "" || userMessageID == "" {
+	if sessionIDStr == "" || userMessageID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Session ID and user message ID required"})
 		return
 	}
+	sessionID, err := uuid.Parse(sessionIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Session ID"})
+		return
+	}
 
-	// Set SSE headers
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
 	c.Header("Access-Control-Allow-Origin", "*")
 
-	// Test connection first - send as JSON
 	data := StreamData{Type: "connection_established"}
 	jsonData, _ := json.Marshal(data)
 	fmt.Fprintf(c.Writer, "data: %s\n\n", jsonData)
 	c.Writer.(http.Flusher).Flush()
 
-	h.mu.RLock()
-	session, exists := h.sessions[sessionID]
-	h.mu.RUnlock()
+	ctx := c.Request.Context()
 
-	if !exists {
-		fmt.Fprintf(c.Writer, "data: Session not found\n\n")
+	messages, err := h.store.GetMessagesBySession(ctx, sessionID)
+	if err != nil {
+		fmt.Fprintf(c.Writer, "data: Error fetching messages\n\n")
 		c.Writer.(http.Flusher).Flush()
 		return
 	}
-	session.LastAccess = time.Now()
 
-	// Create a context for this streaming session
-	ctx := c.Request.Context()
-
-	// Find the user message
-	session.mu.RLock()
 	var userMessage *types.ChatMessage
-	for _, msg := range session.Messages {
-		if msg.ID == userMessageID {
-			userMessage = &msg
+	for i := range messages {
+		if messages[i].ID == userMessageID {
+			userMessage = &messages[i]
 			break
 		}
 	}
-	session.mu.RUnlock()
 
 	if userMessage == nil {
 		fmt.Fprintf(c.Writer, "data: User message not found\n\n")
@@ -279,8 +259,7 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 		return
 	}
 
-	// Start streaming the agent response
-	h.streamAgentResponse(ctx, c.Writer, userMessage.Content, userMessageID, sessionID)
+	h.streamAgentResponse(ctx, c.Writer, userMessage.Content, userMessageID, sessionID.String())
 }
 
 // processStreamByWord reads from the stream rune by rune, buffers them into words,
@@ -289,14 +268,12 @@ func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writ
 	reader := bufio.NewReader(r)
 	var currentWord strings.Builder
 
-	// processToken is a recursive function that handles tags within a word/token.
 	var processToken func(string)
 	processToken = func(token string) {
 		if token == "" {
 			return
 		}
 
-		// Check for our special tags
 		switch {
 		case strings.Contains(token, "<python>"):
 			parts := strings.SplitN(token, "<python>", 2)
@@ -406,7 +383,6 @@ func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWr
 	agentDone := make(chan error, 1)
 	streamDone := make(chan struct{})
 
-	// Goroutine to stream the captured output using our new word-by-word processor
 	go func() {
 		defer close(streamDone)
 		h.processStreamByWord(ctx, r, func(data StreamData) error {
@@ -418,7 +394,6 @@ func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWr
 		})
 	}()
 
-	// Run the agent in a separate goroutine
 	go func() {
 		defer func() {
 			os.Stdout = originalStdout
@@ -434,68 +409,58 @@ func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWr
 	case <-ctx.Done():
 		h.logger.Info("Context cancelled, closing SSE connection")
 	case <-agentDone:
-		// Agent finished, wait for the stream processing to complete.
 		<-streamDone
-
-		// Scan for and stream any new files.
 		h.streamNewFiles(ctx, writeSSEData, sessionID)
-		// Send the final end-of-stream message.
 		if err := writeSSEData(StreamData{Type: "end"}); err != nil {
 			h.logger.Error("Failed to send end message", zap.Error(err))
 		}
 	}
 }
 
-func (h *ChatHandler) CleanupWorkspaces(maxAge time.Duration, logger *zap.Logger) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	for sessionID, session := range h.sessions {
-		if time.Since(session.LastAccess) > maxAge {
-			workspaceDir := filepath.Join("workspaces", sessionID)
-			logger.Info("Cleaning up stale workspace", zap.String("session_id", sessionID), zap.String("workspace", workspaceDir))
-			os.RemoveAll(workspaceDir)
-			delete(h.sessions, sessionID)
-		}
-	}
-}
-
 func (h *ChatHandler) streamNewFiles(ctx context.Context, writeSSEData func(StreamData) error, sessionID string) {
-	session, exists := h.sessions[sessionID]
-	if !exists {
-		h.logger.Error("Session not found when streaming new files", zap.String("session_id", sessionID))
+	sessionUUID, err := uuid.Parse(sessionID)
+	if err != nil {
+		h.logger.Error("Invalid session ID for streaming new files", zap.Error(err))
 		return
 	}
 
-	workspaceDir := filepath.Join("workspaces", session.ID)
+	workspaceDir := filepath.Join("workspaces", sessionID)
 	files, err := os.ReadDir(workspaceDir)
 	if err != nil {
-		h.logger.Error("Failed to read workspace directory", zap.Error(err))
+		h.logger.Error("Failed to read workspace directory", zap.Error(err), zap.String("session_id", sessionID))
 		return
 	}
 
-	session.mu.Lock()
-	defer session.mu.Unlock()
+	// Fetch the set of already rendered files from the database
+	renderedFiles, err := h.store.GetRenderedFiles(ctx, sessionUUID)
+	if err != nil {
+		h.logger.Error("Failed to get rendered files from DB", zap.Error(err), zap.String("session_id", sessionID))
+		return
+	}
 
 	for _, file := range files {
 		if !file.IsDir() {
 			fileName := file.Name()
-			if _, rendered := session.RenderedFiles[fileName]; !rendered {
-				webPath := filepath.ToSlash(filepath.Join("/workspaces", session.ID, fileName))
+			if _, rendered := renderedFiles[fileName]; !rendered {
+				webPath := filepath.ToSlash(filepath.Join("/workspaces", sessionID, fileName))
 				var buf bytes.Buffer
 				var component templ.Component
 
+				// Determine which component to use based on file type
 				switch strings.ToLower(filepath.Ext(fileName)) {
 				case ".png", ".jpg", ".jpeg", ".gif":
 					component = components.ImageBlock(webPath)
-				case ".csv", ".xlsx", ".xls":
+				default:
 					component = components.FileBlock(webPath)
 				}
 
 				if component != nil {
 					if err := component.Render(ctx, &buf); err == nil {
 						writeSSEData(StreamData{Type: "file", Content: buf.String()})
-						session.RenderedFiles[fileName] = true
+						// Add the file to the database of rendered files
+						if err := h.store.AddRenderedFile(ctx, sessionUUID, fileName); err != nil {
+							h.logger.Error("Failed to mark file as rendered in DB", zap.Error(err), zap.String("filename", fileName))
+						}
 					}
 				}
 			}
@@ -505,45 +470,29 @@ func (h *ChatHandler) streamNewFiles(ctx context.Context, writeSSEData func(Stre
 
 // Sanitize the filename to prevent security issues like directory traversal.
 func sanitizeFilename(filename string) string {
-	// Trim whitespace and periods from the ends
 	sanitized := strings.Trim(filename, " .")
-
-	// Replace known dangerous sequences.
 	sanitized = strings.ReplaceAll(sanitized, "..", "")
-
-	// Define a regex for allowed characters: letters, numbers, underscore, hyphen, period, space.
-	// This is a whitelist approach, which is more secure.
 	reg := regexp.MustCompile(`[^a-zA-Z0-9._\s-]`)
 	sanitized = reg.ReplaceAllString(sanitized, "")
-
-	// Limit the length of the filename to a reasonable size.
 	if len(sanitized) > 255 {
 		sanitized = sanitized[:255]
 	}
-
 	return sanitized
 }
 
 // Verify that the file exists in the session's workspace.
 func verifyFileExists(workspaceDir, filename string) bool {
-	// Create the full, safe path to the file.
 	safePath := filepath.Join(workspaceDir, filename)
-
-	// Check if the file exists and is not a directory.
 	info, err := os.Stat(safePath)
 	if os.IsNotExist(err) {
-		return false // File does not exist
+		return false
 	}
 	if info.IsDir() {
-		return false // It's a directory, not a file
+		return false
 	}
 	return true
 }
 
-func generateSessionID() string {
-	return "session_" + uuid.New().String()
-}
-
 func generateMessageID() string {
-	return "msg_" + uuid.New().String()
+	return uuid.New().String()
 }

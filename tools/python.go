@@ -224,7 +224,7 @@ import seaborn as sns
 from scipy import stats
 import warnings
 warnings.filterwarnings('ignore')
-
+pd.set_option('display.precision', 3)
 workspace_path = os.getcwd()
 uploaded_files = [%s]
 
@@ -382,7 +382,8 @@ func (t *StatefulPythonTool) ExecutePythonCode(ctx context.Context, text string,
 
 	// ONLY print the execution result, wrapped in tags.
 	// This is the only output from this function that goes to the web UI stream.
-	fmt.Printf("<execution_results>%s</execution_results>", execResult)
+	// TODO: Test this thoroughly to ensure no other prints occur.
+	//fmt.Printf("<execution_results>%s</execution_results>", execResult)
 
 	return pythonCode, execResult, true
 }

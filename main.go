@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"stats-agent/agent"
 	"stats-agent/config"
+	"stats-agent/database"
 	"stats-agent/rag"
 	"stats-agent/tools"
 	"stats-agent/web"
@@ -36,6 +37,17 @@ func main() {
 	defer config.Cleanup()
 	cfg := config.Load(logger)
 
+	connStr := "postgres://postgres:changeme@localhost:5432/stats_agent?sslmode=disable"
+	store, err := database.NewPostgresStore(connStr)
+	if err != nil {
+		logger.Fatal("Failed to connect to database", zap.Error(err))
+	}
+
+	// --- Ensure Schema Exists ---
+	if err := store.EnsureSchema(ctx); err != nil {
+		logger.Fatal("Failed to ensure database schema", zap.Error(err))
+	}
+
 	pythonTool, err := tools.NewStatefulPythonTool(ctx, cfg.PythonExecutorAddresses, logger)
 	if err != nil {
 		logger.Fatal("Failed to initialize Python tool", zap.Error(err))
@@ -58,7 +70,7 @@ func main() {
 		// Start the workspace cleanup go routine
 		go web.StartWorkspaceCleanup(24*time.Hour, 24*time.Hour, logger)
 
-		webServer := web.NewServer(statsAgent, logger, cfg)
+		webServer := web.NewServer(statsAgent, logger, cfg, store)
 
 		// Create context that listens for interrupt signals
 		ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)

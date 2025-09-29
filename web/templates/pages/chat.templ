@@ -2,17 +2,40 @@ package pages
 
 import "stats-agent/web/templates/layout"
 import "stats-agent/web/templates/components"
+import "stats-agent/web/types"
+import "github.com/google/uuid"
 
-templ ChatPage(sessionID string) {
+templ ChatPage(activeSessionID uuid.UUID, sessions []types.Session, messages []types.ChatMessage) {
 	@layout.Base("Chat") {
-		<div class="w-full h-full flex flex-col items-center justify-center p-4 space-y-6">
-			@components.WelcomeMessage()
+		<div class="flex h-full">
+			// Sidebar
+			<div class="w-72 flex-shrink-0">
+				@components.SessionList(sessions, activeSessionID)
+			</div>
 
-			<div class="flex flex-col-reverse w-full max-w-7xl md:max-h-[calc(100vh-22rem)] bg-white/60 backdrop-blur-xl rounded-2xl shadow-2xl border border-white/50">
-				<div class="p-6 border-t border-gray-200/50">
-					@components.ChatForm(sessionID)
-				</div>
-				<div id="messages" class="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin">
+			// Main Chat Area
+			<div class="flex-1 flex flex-col">
+				<div class="flex-1 flex flex-col items-center justify-center p-4 space-y-6">
+					<div class="w-full max-w-4xl h-full flex flex-col">
+						// Messages container
+						<div id="messages" class="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin">
+							if len(messages) == 0 {
+								@components.WelcomeMessage()
+							} else {
+								for _, msg := range messages {
+									if msg.Role == "user" {
+										@components.UserMessage(msg)
+									} else {
+										// This will handle agent and tool messages
+									}
+								}
+							}
+						</div>
+						// Form container
+						<div class="p-6 border-t border-gray-200/50">
+							@components.ChatForm(activeSessionID.String())
+						</div>
+					</div>
 				</div>
 			</div>
 		</div>

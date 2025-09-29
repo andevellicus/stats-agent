@@ -148,6 +148,8 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string) {
 		if wasCodeExecuted {
 			a.history = append(a.history, api.Message{Role: "assistant", Content: llmResponse})
 			executionMessage := fmt.Sprintf("<execution_results>\n%s\n</execution_results>", execResult)
+			// TODO Test this thoroughly to ensure no other prints occur.
+			fmt.Print(executionMessage)
 			toolMessage := api.Message{Role: "tool", Content: executionMessage}
 			a.history = append(a.history, toolMessage)
 
