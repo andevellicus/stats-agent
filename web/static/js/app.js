@@ -270,6 +270,16 @@ function initiateSSE() {
                     `;
                     document.getElementById('messages').appendChild(agentMessageContainer);
                     break;
+                case 'file':
+                    if (data.content) {
+                        const messagesContainer = document.getElementById('messages');
+                        // Create a temporary div to parse the incoming HTML
+                        const tempDiv = document.createElement('div');
+                        tempDiv.innerHTML = data.content;
+                        // Append the actual element to the messages container
+                        messagesContainer.appendChild(tempDiv.firstChild);
+                    }
+                    break;
                 case 'chunk':
                     if (agentMessageContainer && typeof data.content === 'string') {
                         contentBuffer += data.content;

@@ -30,9 +30,9 @@ RUN pip install \
     # Automated EDA
     ydata-profiling \
     shap \
-    lifelines \
-    imblearn \
-    pmdarima
+    lifelines arch \
+    imblearn umap \
+    pmdarima tbats prophet 
 
 # Expose the port the server will listen on
 EXPOSE 9999

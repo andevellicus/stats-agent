@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/a-h/templ"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -33,10 +34,11 @@ type ChatHandler struct {
 }
 
 type ChatSession struct {
-	ID         string
-	Messages   []types.ChatMessage
-	LastAccess time.Time
-	mu         sync.RWMutex
+	ID            string
+	Messages      []types.ChatMessage
+	LastAccess    time.Time
+	mu            sync.RWMutex
+	RenderedFiles map[string]bool
 }
 
 type ChatRequest struct {
@@ -71,9 +73,10 @@ func (h *ChatHandler) Index(c *gin.Context) {
 	// Create new session
 	h.mu.Lock()
 	h.sessions[sessionID] = &ChatSession{
-		ID:         sessionID,
-		Messages:   []types.ChatMessage{},
-		LastAccess: time.Now(),
+		ID:            sessionID,
+		Messages:      []types.ChatMessage{},
+		LastAccess:    time.Now(),
+		RenderedFiles: make(map[string]bool),
 	}
 	h.mu.Unlock()
 
@@ -99,8 +102,9 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 	session, exists := h.sessions[req.SessionID]
 	if !exists {
 		session = &ChatSession{
-			ID:       req.SessionID,
-			Messages: []types.ChatMessage{},
+			ID:            req.SessionID,
+			Messages:      []types.ChatMessage{},
+			RenderedFiles: make(map[string]bool),
 		}
 		h.sessions[req.SessionID] = session
 	}
@@ -145,6 +149,11 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 		}
 
 		h.logger.Info("File uploaded", zap.String("filename", file.Filename), zap.String("session_id", req.SessionID))
+
+		// Mark the uploaded file as rendered
+		session.mu.Lock()
+		session.RenderedFiles[file.Filename] = true
+		session.mu.Unlock()
 	}
 
 	// Add user's message to session (now includes file info if uploaded)
@@ -276,42 +285,14 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 
 // processStreamByWord reads from the stream rune by rune, buffers them into words,
 // and processes each word for tags before sending it to the client. This version is stateful.
-func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writeSSEData func(StreamData) error, sessionID string) {
+func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writeSSEData func(StreamData) error) {
 	reader := bufio.NewReader(r)
 	var currentWord strings.Builder
-	var isBufferingImage bool
-	var imagePathBuffer strings.Builder
 
 	// processToken is a recursive function that handles tags within a word/token.
 	var processToken func(string)
 	processToken = func(token string) {
 		if token == "" {
-			return
-		}
-
-		// Handle image buffering state
-		if isBufferingImage {
-			if strings.Contains(token, "</image>") {
-				parts := strings.SplitN(token, "</image>", 2)
-				imagePathBuffer.WriteString(parts[0])
-
-				imagePath := strings.TrimSpace(imagePathBuffer.String())
-				webPath := filepath.ToSlash(filepath.Join("/workspaces", sessionID, imagePath))
-
-				// Render the ImageBlock component to a buffer and send
-				var buf bytes.Buffer
-				component := components.ImageBlock(webPath)
-				if err := component.Render(ctx, &buf); err == nil {
-					writeSSEData(StreamData{Type: "chunk", Content: buf.String()})
-				}
-
-				// Reset state and process the rest of the token
-				isBufferingImage = false
-				imagePathBuffer.Reset()
-				processToken(parts[1])
-			} else {
-				imagePathBuffer.WriteString(token)
-			}
 			return
 		}
 
@@ -346,11 +327,6 @@ func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writ
 			parts := strings.SplitN(token, "</agent_status>", 2)
 			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
 			writeSSEData(StreamData{Type: "chunk", Content: `</div>`})
-			processToken(parts[1])
-		case strings.Contains(token, "<image>"):
-			parts := strings.SplitN(token, "<image>", 2)
-			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
-			isBufferingImage = true
 			processToken(parts[1])
 		default:
 			writeSSEData(StreamData{Type: "chunk", Content: token})
@@ -439,7 +415,7 @@ func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWr
 				return err
 			}
 			return nil
-		}, sessionID)
+		})
 	}()
 
 	// Run the agent in a separate goroutine
@@ -460,6 +436,9 @@ func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWr
 	case <-agentDone:
 		// Agent finished, wait for the stream processing to complete.
 		<-streamDone
+
+		// Scan for and stream any new files.
+		h.streamNewFiles(ctx, writeSSEData, sessionID)
 		// Send the final end-of-stream message.
 		if err := writeSSEData(StreamData{Type: "end"}); err != nil {
 			h.logger.Error("Failed to send end message", zap.Error(err))
@@ -477,6 +456,49 @@ func (h *ChatHandler) CleanupWorkspaces(maxAge time.Duration, logger *zap.Logger
 			logger.Info("Cleaning up stale workspace", zap.String("session_id", sessionID), zap.String("workspace", workspaceDir))
 			os.RemoveAll(workspaceDir)
 			delete(h.sessions, sessionID)
+		}
+	}
+}
+
+func (h *ChatHandler) streamNewFiles(ctx context.Context, writeSSEData func(StreamData) error, sessionID string) {
+	session, exists := h.sessions[sessionID]
+	if !exists {
+		h.logger.Error("Session not found when streaming new files", zap.String("session_id", sessionID))
+		return
+	}
+
+	workspaceDir := filepath.Join("workspaces", session.ID)
+	files, err := os.ReadDir(workspaceDir)
+	if err != nil {
+		h.logger.Error("Failed to read workspace directory", zap.Error(err))
+		return
+	}
+
+	session.mu.Lock()
+	defer session.mu.Unlock()
+
+	for _, file := range files {
+		if !file.IsDir() {
+			fileName := file.Name()
+			if _, rendered := session.RenderedFiles[fileName]; !rendered {
+				webPath := filepath.ToSlash(filepath.Join("/workspaces", session.ID, fileName))
+				var buf bytes.Buffer
+				var component templ.Component
+
+				switch strings.ToLower(filepath.Ext(fileName)) {
+				case ".png", ".jpg", ".jpeg", ".gif":
+					component = components.ImageBlock(webPath)
+				case ".csv", ".xlsx", ".xls":
+					component = components.FileBlock(webPath)
+				}
+
+				if component != nil {
+					if err := component.Render(ctx, &buf); err == nil {
+						writeSSEData(StreamData{Type: "file", Content: buf.String()})
+						session.RenderedFiles[fileName] = true
+					}
+				}
+			}
 		}
 	}
 }

@@ -109,8 +109,6 @@ If assumptions fail and no valid alternative exists, stop and explain why.
 - Final summary (outside <python>) must:
   - Interpret results in plain language
   - State assumption checks and limitations
-  - Include generated plots as <image>plot_name.png</image>
-- Do not emit <image></image> tags before the final summary.
 - Stop when sufficient evidence answers the question.
 
 ---
@@ -122,10 +120,7 @@ If assumptions fail and no valid alternative exists, stop and explain why.
 2. Test scores differed between groups (t=2.45, p=0.015, d=0.38, 95% CI [0.07, 0.69]).
 
 **Conclusions:** Age appears to influence test performance.
-
-**Files Generated:**
-<image>age_distribution.png</image>
-<image>test_scores_by_group.png</image>`
+`
 }
 
 func getLLMResponse(ctx context.Context, llamaCppHost string, messages []api.Message, cfg *config.Config, logger *zap.Logger) (<-chan string, error) {
