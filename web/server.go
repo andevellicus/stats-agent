@@ -61,6 +61,7 @@ func (s *Server) setupRoutes() {
 
 	s.router.GET("/", chatHandler.Index)
 	s.router.POST("/chat", chatHandler.SendMessage)
+	s.router.GET("/chat/new", chatHandler.NewChat)
 	s.router.GET("/chat/stream", chatHandler.StreamResponse)
 	s.router.GET("/chat/:sessionID", chatHandler.LoadSession)
 }
