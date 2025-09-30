@@ -43,6 +43,10 @@ func NewAgent(cfg *config.Config, pythonTool *tools.StatefulPythonTool, rag *rag
 	}
 }
 
+func (a *Agent) InitializeSession(ctx context.Context, sessionID string, uploadedFiles []string) (string, error) {
+	return a.pythonTool.InitializeSession(ctx, sessionID, uploadedFiles)
+}
+
 // Run now accepts the current session's message history, making it stateless.
 func (a *Agent) Run(ctx context.Context, input string, sessionID string, history []types.AgentMessage) {
 	currentHistory := history

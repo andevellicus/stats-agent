@@ -5,7 +5,8 @@ import "stats-agent/web/templates/components"
 import "stats-agent/web/types"
 import "github.com/google/uuid"
 
-templ ChatPage(activeSessionID uuid.UUID, sessions []types.Session, messages []types.ChatMessage) {
+// Update the signature to accept the new MessageGroup slice
+templ ChatPage(activeSessionID uuid.UUID, sessions []types.Session, messageGroups []types.MessageGroup) {
 	@layout.Base("Chat") {
 		<div class="flex h-full">
 			// Sidebar
@@ -19,14 +20,16 @@ templ ChatPage(activeSessionID uuid.UUID, sessions []types.Session, messages []t
 					<div class="w-full max-w-4xl h-full flex flex-col">
 						// Messages container
 						<div id="messages" class="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin">
-							if len(messages) == 0 {
+							if len(messageGroups) == 0 {
 								@components.WelcomeMessage()
 							} else {
-								for _, msg := range messages {
-									if msg.Role == "user" {
-										@components.UserMessage(msg)
-									} else if msg.Role == "assistant" {
-										@components.AgentMessage(msg)
+								// Use a simple, clean loop
+								for _, group := range messageGroups {
+									switch group.PrimaryRole {
+									case "user":
+										@components.UserMessage(group.Messages[0])
+									case "agent":
+										@components.AgentMessageGroup(group.Messages)
 									}
 								}
 							}

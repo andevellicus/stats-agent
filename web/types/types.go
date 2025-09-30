@@ -32,3 +32,9 @@ type Session struct {
 	Title         string
 	IsActive      bool
 }
+
+// MessageGroup is a struct for rendering grouped messages in the template.
+type MessageGroup struct {
+	PrimaryRole string // "user", "agent", or "system"
+	Messages    []ChatMessage
+}

@@ -92,7 +92,8 @@ func (h *ChatHandler) Index(c *gin.Context) {
 		h.logger.Error("Failed to get messages for session", zap.Error(err))
 	}
 
-	component := pages.ChatPage(sessionUUID, sessions, messages)
+	messageGroups := groupMessages(messages)
+	component := pages.ChatPage(sessionUUID, sessions, messageGroups)
 	component.Render(c.Request.Context(), c.Writer)
 }
 
@@ -103,12 +104,17 @@ func (h *ChatHandler) LoadSession(c *gin.Context) {
 		return
 	}
 
-	sessions, _ := h.store.GetSessions(c.Request.Context(), nil)
-	messages, _ := h.store.GetMessagesBySession(c.Request.Context(), sessionID)
+	sessions, err := h.store.GetSessions(c.Request.Context(), nil)
+	if err != nil {
+		h.logger.Error("Failed to get sessions", zap.Error(err))
+	}
+	messages, err := h.store.GetMessagesBySession(c.Request.Context(), sessionID)
+	if err != nil {
+		h.logger.Error("Failed to get messages for session", zap.Error(err))
+	}
 
-	// When loading a session, we render the entire chat history.
-	// The key change is that historical messages will not have the SSE loader.
-	pages.ChatPage(sessionID, sessions, messages).Render(c.Request.Context(), c.Writer)
+	messageGroups := groupMessages(messages)
+	pages.ChatPage(sessionID, sessions, messageGroups).Render(c.Request.Context(), c.Writer)
 }
 
 func (h *ChatHandler) SendMessage(c *gin.Context) {
@@ -273,6 +279,21 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 		return
 	}
 
+	// Check if this is the first message in the session to trigger initialization
+	if len(messages) == 1 {
+		if err := h.initializeSession(ctx, sessionID.String()); err != nil {
+			h.logger.Error("Failed to initialize session", zap.Error(err))
+			// Decide if you want to abort or continue
+		}
+		// Re-fetch messages to include the initialization message
+		messages, err = h.store.GetMessagesBySession(ctx, sessionID)
+		if err != nil {
+			fmt.Fprintf(c.Writer, "data: Error fetching messages after initialization\n\n")
+			c.Writer.(http.Flusher).Flush()
+			return
+		}
+	}
+
 	var userMessage *types.ChatMessage
 	for i := range messages {
 		if messages[i].ID == userMessageID {
@@ -289,6 +310,39 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 
 	h.streamAgentResponse(ctx, c.Writer, userMessage.Content, userMessageID, sessionID.String())
 }
+
+func (h *ChatHandler) initializeSession(ctx context.Context, sessionID string) error {
+	h.logger.Info("Initializing new session", zap.String("session_id", sessionID))
+
+	workspaceDir := filepath.Join("workspaces", sessionID)
+	files, err := os.ReadDir(workspaceDir)
+	if err != nil {
+		return fmt.Errorf("could not read workspace directory: %w", err)
+	}
+
+	var uploadedFiles []string
+	for _, file := range files {
+		if !file.IsDir() {
+			uploadedFiles = append(uploadedFiles, file.Name())
+		}
+	}
+
+	initResult, err := h.agent.InitializeSession(ctx, sessionID, uploadedFiles)
+	if err != nil {
+		return fmt.Errorf("failed to initialize python session: %w", err)
+	}
+
+	initMessage := types.ChatMessage{
+		ID:        generateMessageID(),
+		SessionID: sessionID,
+		Role:      "system",
+		Content:   initResult,
+		Rendered:  fmt.Sprintf("<pre><code>%s</code></pre>", initResult),
+	}
+
+	return h.store.CreateMessage(ctx, initMessage)
+}
+
 func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writeSSEData func(StreamData) error) {
 	reader := bufio.NewReader(r)
 	var currentWord strings.Builder
@@ -357,8 +411,6 @@ func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writ
 		}
 	}
 }
-
-// andevellicus/stats-agent/stats-agent-sessions/web/handlers/chat.go
 
 func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWriter, input string, userMessageID string, sessionID string) {
 	agentMessageID := generateMessageID()
@@ -440,7 +492,11 @@ func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWr
 	case <-agentDone:
 		<-streamDone
 
-		h.streamNewFiles(ctx, writeSSEData, sessionID)
+		// For post-stream tasks, create a new background context.
+		// This context will not be cancelled when the client disconnects.
+		backgroundCtx := context.Background()
+
+		h.streamNewFiles(backgroundCtx, writeSSEData, sessionID)
 
 		if err := writeSSEData(StreamData{Type: "end"}); err != nil {
 			h.logger.Error("Failed to send end message", zap.Error(err))
@@ -448,70 +504,50 @@ func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWr
 
 		rawAgentResponse := agentResponseForDB.String()
 
-		// Remove all agent status messages so they aren't processed or saved
 		statusRe := regexp.MustCompile(`(?s)<agent_status>.*?</agent_status>`)
 		rawAgentResponse = statusRe.ReplaceAllString(rawAgentResponse, "")
 
-		// Split the entire response into turns based on the execution results delimiter
-		turnDelimiter := "<execution_results>"
-		turns := strings.Split(rawAgentResponse, turnDelimiter)
+		re := regexp.MustCompile(`(?s)(<execution_results>.*?</execution_results>)`)
+		parts := re.Split(rawAgentResponse, -1)
+		matches := re.FindAllString(rawAgentResponse, -1)
 
-		for i, turn := range turns {
-			turn = strings.TrimSpace(turn)
-			if turn == "" {
-				continue
+		for i, part := range parts {
+			assistantContent := strings.TrimSpace(part)
+			if assistantContent != "" {
+				// Use the background context for rendering and saving.
+				assistantRendered, _ := processAgentContentForDB(backgroundCtx, assistantContent)
+				assistantMessage := types.ChatMessage{
+					ID:        generateMessageID(),
+					SessionID: sessionID,
+					Role:      "assistant",
+					Content:   assistantContent,
+					Rendered:  assistantRendered,
+				}
+				if err := h.store.CreateMessage(backgroundCtx, assistantMessage); err != nil {
+					h.logger.Error("Failed to save assistant message part", zap.Error(err))
+				}
 			}
 
-			// The first part of a split by execution_results is always the assistant's turn.
-			// Subsequent parts will start with the result content and end with the next assistant response.
-			if i == 0 {
-				// This is the first assistant message before any tool calls in this response
-				if turn != "" {
-					assistantRendered, _ := processAgentContentForDB(ctx, turn)
-					assistantMessage := types.ChatMessage{
-						ID:        generateMessageID(),
-						SessionID: sessionID,
-						Role:      "assistant",
-						Content:   turn,
-						Rendered:  assistantRendered,
-					}
-					if err := h.store.CreateMessage(context.Background(), assistantMessage); err != nil {
-						h.logger.Error("Failed to save initial assistant message", zap.Error(err))
-					}
-				}
-			} else {
-				// This block contains a tool result followed by the next assistant thought
-				parts := strings.SplitN(turn, "</execution_results>", 2)
-				toolContentRaw := strings.TrimSpace(parts[0])
+			if i < len(matches) {
+				toolContentRaw := strings.TrimSpace(matches[i])
+				result := strings.TrimSuffix(strings.TrimPrefix(toolContentRaw, "<execution_results>"), "</execution_results>")
 
-				// Save the tool message
-				toolContentForDB := turnDelimiter + toolContentRaw + "</execution_results>"
-				toolRendered, _ := processAgentContentForDB(ctx, toolContentForDB)
+				var buf bytes.Buffer
+				// Use the background context for rendering the component.
+				if err := components.ExecutionResultBlock(result).Render(backgroundCtx, &buf); err != nil {
+					h.logger.Error("Failed to render execution result block for DB", zap.Error(err))
+				}
+
 				toolMessage := types.ChatMessage{
 					ID:        generateMessageID(),
 					SessionID: sessionID,
 					Role:      "tool",
-					Content:   toolContentForDB,
-					Rendered:  toolRendered,
+					Content:   toolContentRaw,
+					Rendered:  buf.String(),
 				}
-				if err := h.store.CreateMessage(context.Background(), toolMessage); err != nil {
+				// Use the background context for saving to the database.
+				if err := h.store.CreateMessage(backgroundCtx, toolMessage); err != nil {
 					h.logger.Error("Failed to save tool message", zap.Error(err))
-				}
-
-				// If there's a following assistant message in this turn, save it
-				if len(parts) > 1 && strings.TrimSpace(parts[1]) != "" {
-					assistantContent := strings.TrimSpace(parts[1])
-					assistantRendered, _ := processAgentContentForDB(ctx, assistantContent)
-					assistantMessage := types.ChatMessage{
-						ID:        generateMessageID(),
-						SessionID: sessionID,
-						Role:      "assistant",
-						Content:   assistantContent,
-						Rendered:  assistantRendered,
-					}
-					if err := h.store.CreateMessage(context.Background(), assistantMessage); err != nil {
-						h.logger.Error("Failed to save subsequent assistant message", zap.Error(err))
-					}
 				}
 			}
 		}
@@ -564,6 +600,36 @@ func (h *ChatHandler) streamNewFiles(ctx context.Context, writeSSEData func(Stre
 	}
 }
 
+func groupMessages(messages []types.ChatMessage) []types.MessageGroup {
+	if len(messages) == 0 {
+		return nil
+	}
+	var groups []types.MessageGroup
+	i := 0
+	for i < len(messages) {
+		msg := messages[i]
+		switch msg.Role {
+		case "user":
+			groups = append(groups, types.MessageGroup{PrimaryRole: "user", Messages: []types.ChatMessage{msg}})
+			i++
+		case "system":
+			i++ // Skip system messages
+		case "assistant", "tool":
+			var agentMessages []types.ChatMessage
+			for i < len(messages) && (messages[i].Role == "assistant" || messages[i].Role == "tool") {
+				agentMessages = append(agentMessages, messages[i])
+				i++
+			}
+			if len(agentMessages) > 0 {
+				groups = append(groups, types.MessageGroup{PrimaryRole: "agent", Messages: agentMessages})
+			}
+		default:
+			i++
+		}
+	}
+	return groups
+}
+
 // New helper function to process agent content before saving to DB
 func processAgentContentForDB(ctx context.Context, rawContent string) (string, error) {
 	// Combined regex to find all custom tags
@@ -578,12 +644,14 @@ func processAgentContentForDB(ctx context.Context, rawContent string) (string, e
 
 	for i, part := range parts {
 		// Process the plain text part with Markdown
+
 		cleanedPart := strings.TrimSpace(strings.ReplaceAll(part, "Agent: ", ""))
 		if cleanedPart != "" {
 			md := []byte(cleanedPart)
 			html := markdown.ToHTML(md, nil, nil)
 			// The markdown library wraps text in <p> tags, which we can trim for cleaner output
-			finalHTML.WriteString(strings.TrimSuffix(strings.TrimPrefix(string(html), "<p>"), "</p>\n"))
+			//finalHTML.WriteString(strings.TrimSuffix(strings.TrimPrefix(string(html), "<p>"), "</p>\n"))
+			finalHTML.WriteString(string(html))
 		}
 
 		// If there is a matching component, render it and append it
@@ -591,18 +659,18 @@ func processAgentContentForDB(ctx context.Context, rawContent string) (string, e
 			match := matches[i]
 			var componentHTML string
 
-			if strings.HasPrefix(match, "<python>") {
-				code := strings.TrimSuffix(strings.TrimPrefix(match, "<python>"), "</python>")
+			if after, ok := strings.CutPrefix(match, "<python>"); ok {
+				code := strings.TrimSuffix(after, "</python>")
 				var buf bytes.Buffer
 				components.PythonCodeBlock(code).Render(ctx, &buf)
 				componentHTML = buf.String()
-			} else if strings.HasPrefix(match, "<execution_results>") {
-				result := strings.TrimSuffix(strings.TrimPrefix(match, "<execution_results>"), "</execution_results>")
+			} else if after0, ok0 := strings.CutPrefix(match, "<execution_results>"); ok0 {
+				result := strings.TrimSuffix(after0, "</execution_results>")
 				var buf bytes.Buffer
 				components.ExecutionResultBlock(result).Render(ctx, &buf)
 				componentHTML = buf.String()
-			} else if strings.HasPrefix(match, "<agent_status>") {
-				status := strings.TrimSuffix(strings.TrimPrefix(match, "<agent_status>"), "</agent_status>")
+			} else if after1, ok1 := strings.CutPrefix(match, "<agent_status>"); ok1 {
+				status := strings.TrimSuffix(after1, "</agent_status>")
 				var buf bytes.Buffer
 				components.AgentStatus(status).Render(ctx, &buf)
 				componentHTML = buf.String()

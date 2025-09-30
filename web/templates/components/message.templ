@@ -30,10 +30,25 @@ templ UserMessageWithLoader(msg types.ChatMessage) {
 
 templ AgentMessage(msg types.ChatMessage) {
 	<div class="w-full">
-		<div class="bg-white rounded-2xl px-5 py-3 w-full shadow-md border border-gray-100 hover:shadow-lg transition-shadow duration-200">
+		<div class="bg-white rounded-2xl px-5 py-3 w-full shadow-md border border-gray-100 hover:shadow-lg 
+ duration-200">
 			<div class="font-semibold text-sm text-primary mb-2 font-display">Pocket Statistician</div>
 			<div class="prose max-w-none leading-relaxed text-gray-700 font-sans">
 				@templ.Raw(msg.Rendered)
+			</div>
+		</div>
+	</div>
+}
+
+// AgentMessageGroup renders a collection of agent/tool messages in a single block.
+templ AgentMessageGroup(messages []types.ChatMessage) {
+	<div class="w-full">
+		<div class="bg-white rounded-2xl px-5 py-3 w-full shadow-md border border-gray-100 hover:shadow-lg transition-shadow duration-200">
+			<div class="font-semibold text-sm text-primary mb-2 font-display">Pocket Statistician</div>
+			<div class="prose max-w-none leading-relaxed text-gray-700 font-sans">
+				for _, msg := range messages {
+					@templ.Raw(msg.Rendered)
+				}
 			</div>
 		</div>
 	</div>

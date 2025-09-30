@@ -62,7 +62,7 @@ After receiving <execution_results></execution_results>, your response must foll
 ## Best Practices
 
 ### Data Handling
-- Import once per session: pandas, numpy, matplotlib, seaborn, scipy. The initialization code has already imported these.
+- The initialization code has already imported os, pandas as pd, numpy as np, matplotlib.pyplot as plt, seaborn as sns, scipy - no need to re-import unless there is an error. 
 - List available files and load datasets explicitly.
 - On first load, report: shape, column names, and df.head(3); round to 3 decimals.
 - Check and address missing data before analysis.

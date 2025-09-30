@@ -38,6 +38,10 @@
   }
 }
 
+  .dock-top {
+    @apply -mt-4 rounded-t-none;
+  }
+
 @layer components {
   .prose h2 { /* You can add custom styles for prose elements here */
     @apply mb-2 text-xl font-bold;
