@@ -14,10 +14,12 @@ type AgentMessage struct {
 
 // ChatMessage represents a single message in the chat, stored in the DB.
 type ChatMessage struct {
-	Role      string `json:"role"`
-	Content   string `json:"content"`
-	ID        string `json:"id"`
-	SessionID string `json:"session_id"`
+	ID        string    `json:"id"`
+	SessionID string    `json:"session_id"`
+	Role      string    `json:"role"`
+	Content   string    `json:"content"`  // Raw content for the agent
+	Rendered  string    `json:"rendered"` // Rendered HTML for the UI
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Session represents a chat session.

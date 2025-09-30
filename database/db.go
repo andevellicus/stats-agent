@@ -57,6 +57,7 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
             session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
+            rendered TEXT NOT NULL, 
             created_at TIMESTAMPTZ DEFAULT NOW(),
             metadata JSONB DEFAULT '{}'::jsonb
         )`,
@@ -164,8 +165,8 @@ func (s *PostgresStore) GetSessions(ctx context.Context, userID *uuid.UUID) ([]t
 
 func (s *PostgresStore) CreateMessage(ctx context.Context, msg types.ChatMessage) error {
 	query := `
-		INSERT INTO messages (id, session_id, role, content, created_at)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO messages (id, session_id, role, content, rendered, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
 	`
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -182,7 +183,7 @@ func (s *PostgresStore) CreateMessage(ctx context.Context, msg types.ChatMessage
 		return fmt.Errorf("invalid session ID in message: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx, query, messageUUID, sessionUUID, msg.Role, msg.Content, time.Now())
+	_, err = tx.ExecContext(ctx, query, messageUUID, sessionUUID, msg.Role, msg.Content, msg.Rendered, time.Now())
 	if err != nil {
 		return err
 	}
@@ -197,7 +198,7 @@ func (s *PostgresStore) CreateMessage(ctx context.Context, msg types.ChatMessage
 
 func (s *PostgresStore) GetMessagesBySession(ctx context.Context, sessionID uuid.UUID) ([]types.ChatMessage, error) {
 	query := `
-		SELECT id, session_id, role, content FROM messages
+		SELECT id, session_id, role, content, rendered FROM messages
 		WHERE session_id = $1 ORDER BY created_at ASC
 	`
 	rows, err := s.DB.QueryContext(ctx, query, sessionID)
@@ -210,7 +211,7 @@ func (s *PostgresStore) GetMessagesBySession(ctx context.Context, sessionID uuid
 	for rows.Next() {
 		var msg types.ChatMessage
 		var sessionUUID uuid.UUID
-		if err := rows.Scan(&msg.ID, &sessionUUID, &msg.Role, &msg.Content); err != nil {
+		if err := rows.Scan(&msg.ID, &sessionUUID, &msg.Role, &msg.Content, &msg.Rendered); err != nil {
 			return nil, err
 		}
 		msg.SessionID = sessionUUID.String()
