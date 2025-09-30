@@ -31,6 +31,7 @@ templ UserMessageWithLoader(msg types.ChatMessage) {
 templ AgentMessage(msg types.ChatMessage) {
 	<div class="w-full">
 		<div class="bg-white rounded-2xl px-5 py-3 w-full shadow-md border border-gray-100 hover:shadow-lg 
+ 
  duration-200">
 			<div class="font-semibold text-sm text-primary mb-2 font-display">Pocket Statistician</div>
 			<div class="prose max-w-none leading-relaxed text-gray-700 font-sans">
@@ -42,14 +43,20 @@ templ AgentMessage(msg types.ChatMessage) {
 
 // AgentMessageGroup renders a collection of agent/tool messages in a single block.
 templ AgentMessageGroup(messages []types.ChatMessage) {
-	<div class="w-full">
-		<div class="bg-white rounded-2xl px-5 py-3 w-full shadow-md border border-gray-100 hover:shadow-lg transition-shadow duration-200">
-			<div class="font-semibold text-sm text-primary mb-2 font-display">Pocket Statistician</div>
-			<div class="prose max-w-none leading-relaxed text-gray-700 font-sans">
-				for _, msg := range messages {
-					@templ.Raw(msg.Rendered)
-				}
+	if len(messages) > 0 {
+		<div class="w-full">
+			<div class="bg-white rounded-2xl px-5 py-3 w-full shadow-md border border-gray-100 hover:shadow-lg transition-shadow duration-200">
+				<div class="font-semibold text-sm text-primary mb-2 font-display">Pocket Statistician</div>
+				<div class="prose max-w-none leading-relaxed text-gray-700 font-sans">
+					for _, msg := range messages {
+						@templ.Raw(msg.Rendered)
+					}
+				</div>
+				// On session reload, the rendered file blocks are part of the last message's HTML.
+				// For live streaming, the JS will populate a target div.
+				// This empty div ensures structure is consistent but won't be used on reload.
+				<div id={ "file-container-agent-msg-" + messages[0].ID }></div>
 			</div>
 		</div>
-	</div>
+	}
 }

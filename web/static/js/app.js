@@ -249,7 +249,7 @@ function initiateSSE() {
         activeEventSource = eventSource;
 
         let contentBuffer = '';
-        let MessageContainer = null;
+        let messageContainer = null;
         let debounceTimer;
 
         const cleanup = () => {
@@ -281,34 +281,40 @@ function initiateSSE() {
                     }
                     break;
                 case 'create_container':
-                    const MessageId = 'agent-msg-' + data.content;
-                    MessageContainer = document.createElement('div');
-                    MessageContainer.id = MessageId;
-                    MessageContainer.innerHTML = `
-						<div class="agent-output bg-white rounded-2xl px-5 py-3 w-full shadow-md border border-gray-100">
-							<div class="font-semibold text-sm text-primary mb-2 font-display">Pocket Statistician</div>
-							<div id="content-${MessageId}" class="prose max-w-none leading-relaxed text-gray-700 font-sans"></div>
-						</div>
+                    const agentMessageId = 'agent-msg-' + data.content;
+                    messageContainer = document.createElement('div');
+                    messageContainer.id = agentMessageId;
+                    messageContainer.className = "w-full";
+                    messageContainer.innerHTML = `
+                        <div class="bg-white rounded-2xl px-5 py-3 w-full shadow-md border border-gray-100 hover:shadow-lg transition-shadow duration-200">
+                            <div class="font-semibold text-sm text-primary mb-2 font-display">Pocket Statistician</div>
+                            <div id="content-${agentMessageId}" class="prose max-w-none leading-relaxed text-gray-700 font-sans"></div>
+                            <div id="file-container-${agentMessageId}"></div>
+                        </div>
                     `;
-                    document.getElementById('messages').appendChild(MessageContainer);
+                    document.getElementById('messages').appendChild(messageContainer);
                     break;
-                case 'file':
+                 case 'file_append_html':
                     if (data.content) {
-                        const messagesContainer = document.getElementById('messages');
-                        // Create a temporary div to parse the incoming HTML
-                        const tempDiv = document.createElement('div');
-                        tempDiv.innerHTML = data.content;
-                        // Append the actual element to the messages container
-                        messagesContainer.appendChild(tempDiv.firstChild);
+                        const parser = new DOMParser();
+                        const doc = parser.parseFromString(data.content, 'text/html');
+                        const fileContainer = doc.body.firstChild;
+                        if (fileContainer) {
+                            const targetId = fileContainer.id;
+                            const targetDiv = document.getElementById(targetId);
+                            if (targetDiv) {
+                                targetDiv.innerHTML = fileContainer.innerHTML;
+                            }
+                        }
                     }
                     break;
                 case 'chunk':
-                    if (MessageContainer && typeof data.content === 'string') {
+                    if (messageContainer && typeof data.content === 'string') {
                         contentBuffer += data.content;
 
                         clearTimeout(debounceTimer);
                         debounceTimer = setTimeout(() => {
-                            const contentDiv = document.getElementById('content-' + MessageContainer.id);
+                            const contentDiv = document.getElementById('content-' + messageContainer.id);
                             if(contentDiv){
                                 renderAndProcessContent(contentDiv, contentBuffer);
                             }
@@ -317,8 +323,8 @@ function initiateSSE() {
                     break;
                 case 'end':
                     eventSource.close();
-                    if (MessageContainer) {
-                        const contentDiv = document.getElementById('content-' + MessageContainer.id);
+                    if (messageContainer) {
+                        const contentDiv = document.getElementById('content-' + messageContainer.id);
                         if (contentDiv) {
                            renderAndProcessContent(contentDiv, contentBuffer);
                         }

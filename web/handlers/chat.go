@@ -22,10 +22,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gomarkdown/markdown"
-
 	"github.com/a-h/templ"
 	"github.com/gin-gonic/gin"
+	"github.com/gomarkdown/markdown"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
@@ -574,18 +573,37 @@ func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWr
 	case <-agentDone:
 		<-streamDone
 
-		// For post-stream tasks, create a new background context.
-		// This context will not be cancelled when the client disconnects.
-		backgroundCtx := context.Background()
+		backgroundCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 
-		h.streamNewFiles(backgroundCtx, writeSSEData, sessionID)
+		newFilePaths, err := h.getAndMarkNewFilePaths(backgroundCtx, sessionID)
+		if err != nil {
+			h.logger.Error("Failed to get and mark new file paths", zap.Error(err), zap.String("session_id", sessionID))
+		}
+
+		if len(newFilePaths) > 0 {
+			// This ID must match the one created dynamically in app.js
+			fileContainerID := fmt.Sprintf("file-container-agent-msg-%s", agentMessageID)
+			var oobBuf bytes.Buffer
+			if err := components.FileOOBWrapper(fileContainerID, newFilePaths).Render(backgroundCtx, &oobBuf); err != nil {
+				h.logger.Error("Failed to render file OOB wrapper", zap.Error(err))
+			} else {
+				if err := writeSSEData(StreamData{Type: "file_append_html", Content: oobBuf.String()}); err != nil {
+					h.logger.Error("Failed to stream file HTML", zap.Error(err))
+				}
+			}
+		}
 
 		if err := writeSSEData(StreamData{Type: "end"}); err != nil {
 			h.logger.Error("Failed to send end message", zap.Error(err))
 		}
 
-		rawAgentResponse := agentResponseForDB.String()
+		dbFilesHTML, err := h.renderFileBlocksForDB(backgroundCtx, newFilePaths)
+		if err != nil {
+			h.logger.Error("Failed to render file blocks for DB", zap.Error(err))
+		}
 
+		rawAgentResponse := agentResponseForDB.String()
 		statusRe := regexp.MustCompile(`(?s)<agent_status>.*?</agent_status>`)
 		rawAgentResponse = statusRe.ReplaceAllString(rawAgentResponse, "")
 
@@ -593,11 +611,16 @@ func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWr
 		parts := re.Split(rawAgentResponse, -1)
 		matches := re.FindAllString(rawAgentResponse, -1)
 
+		// This loop saves the agent's text and tool outputs as separate messages.
 		for i, part := range parts {
 			assistantContent := strings.TrimSpace(part)
 			if assistantContent != "" {
-				// Use the background context for rendering and saving.
 				assistantRendered, _ := processAgentContentForDB(backgroundCtx, assistantContent)
+				isLastPart := (i == len(parts)-1)
+				if isLastPart && dbFilesHTML != "" {
+					assistantRendered += dbFilesHTML
+				}
+
 				assistantMessage := types.ChatMessage{
 					ID:        generateMessageID(),
 					SessionID: sessionID,
@@ -613,21 +636,17 @@ func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWr
 			if i < len(matches) {
 				toolContentRaw := strings.TrimSpace(matches[i])
 				result := strings.TrimSuffix(strings.TrimPrefix(toolContentRaw, "<execution_results>"), "</execution_results>")
-
 				var buf bytes.Buffer
-				// Use the background context for rendering the component.
 				if err := components.ExecutionResultBlock(result).Render(backgroundCtx, &buf); err != nil {
 					h.logger.Error("Failed to render execution result block for DB", zap.Error(err))
 				}
-
 				toolMessage := types.ChatMessage{
 					ID:        generateMessageID(),
 					SessionID: sessionID,
 					Role:      "tool",
-					Content:   toolContentRaw,
+					Content:   result, // Save raw result
 					Rendered:  buf.String(),
 				}
-				// Use the background context for saving to the database.
 				if err := h.store.CreateMessage(backgroundCtx, toolMessage); err != nil {
 					h.logger.Error("Failed to save tool message", zap.Error(err))
 				}
@@ -636,50 +655,71 @@ func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWr
 	}
 }
 
-func (h *ChatHandler) streamNewFiles(ctx context.Context, writeSSEData func(StreamData) error, sessionID string) {
+// getAndMarkNewFilePaths finds new files in the workspace, marks them as rendered in the DB, and returns their web paths.
+func (h *ChatHandler) getAndMarkNewFilePaths(ctx context.Context, sessionID string) ([]string, error) {
 	sessionUUID, err := uuid.Parse(sessionID)
 	if err != nil {
-		h.logger.Error("Invalid session ID for streaming new files", zap.Error(err))
-		return
+		return nil, fmt.Errorf("invalid session ID: %w", err)
 	}
 
 	workspaceDir := filepath.Join("workspaces", sessionID)
 	files, err := os.ReadDir(workspaceDir)
 	if err != nil {
-		h.logger.Error("Failed to read workspace directory", zap.Error(err), zap.String("session_id", sessionID))
-		return
-	}
-	renderedFiles, err := h.store.GetRenderedFiles(ctx, sessionUUID)
-	if err != nil {
-		h.logger.Error("Failed to get rendered files from DB", zap.Error(err), zap.String("session_id", sessionID))
-		return
+		if os.IsNotExist(err) {
+			return nil, nil // No workspace is not an error
+		}
+		return nil, fmt.Errorf("could not read workspace directory: %w", err)
 	}
 
+	renderedFiles, err := h.store.GetRenderedFiles(ctx, sessionUUID)
+	if err != nil {
+		return nil, fmt.Errorf("could not get rendered files: %w", err)
+	}
+
+	var newFilePaths []string
 	for _, file := range files {
 		if !file.IsDir() {
 			fileName := file.Name()
 			if _, rendered := renderedFiles[fileName]; !rendered {
 				webPath := filepath.ToSlash(filepath.Join("/workspaces", sessionID, fileName))
-				var buf bytes.Buffer
-				var component templ.Component
-				switch strings.ToLower(filepath.Ext(fileName)) {
-				case ".png", ".jpg", ".jpeg", ".gif":
-					component = components.ImageBlock(webPath)
-				default:
-					component = components.FileBlock(webPath)
-				}
-
-				if component != nil {
-					if err := component.Render(ctx, &buf); err == nil {
-						writeSSEData(StreamData{Type: "file", Content: buf.String()})
-						if err := h.store.AddRenderedFile(ctx, sessionUUID, fileName); err != nil {
-							h.logger.Error("Failed to mark file as rendered in DB", zap.Error(err), zap.String("filename", fileName))
-						}
-					}
+				newFilePaths = append(newFilePaths, webPath)
+				if err := h.store.AddRenderedFile(ctx, sessionUUID, fileName); err != nil {
+					h.logger.Warn("Failed to mark file as rendered in DB", zap.Error(err), zap.String("filename", fileName))
 				}
 			}
 		}
 	}
+	return newFilePaths, nil
+}
+
+// renderFileBlocksForDB renders file blocks to a raw HTML string for database persistence.
+func (h *ChatHandler) renderFileBlocksForDB(ctx context.Context, filePaths []string) (string, error) {
+	if len(filePaths) == 0 {
+		return "", nil
+	}
+
+	var htmlBuilder strings.Builder
+	for _, path := range filePaths {
+		var buf bytes.Buffer
+		var component templ.Component
+		ext := strings.ToLower(filepath.Ext(path))
+		switch ext {
+		case ".png", ".jpg", ".jpeg", ".gif":
+			component = components.ImageBlock(path)
+		case ".csv", ".xls", ".xlsx":
+			component = components.FileBlock(path)
+		default:
+			component = nil // Ignore other file types
+		}
+
+		if component != nil {
+			if err := component.Render(ctx, &buf); err != nil {
+				return "", fmt.Errorf("failed to render component for db: %w", err)
+			}
+			htmlBuilder.Write(buf.Bytes())
+		}
+	}
+	return htmlBuilder.String(), nil
 }
 
 func groupMessages(messages []types.ChatMessage) []types.MessageGroup {
@@ -727,12 +767,10 @@ func processAgentContentForDB(ctx context.Context, rawContent string) (string, e
 	for i, part := range parts {
 		// Process the plain text part with Markdown
 
-		cleanedPart := strings.TrimSpace(strings.ReplaceAll(part, "Agent: ", ""))
+		cleanedPart := strings.TrimSpace(part)
 		if cleanedPart != "" {
 			md := []byte(cleanedPart)
 			html := markdown.ToHTML(md, nil, nil)
-			// The markdown library wraps text in <p> tags, which we can trim for cleaner output
-			//finalHTML.WriteString(strings.TrimSuffix(strings.TrimPrefix(string(html), "<p>"), "</p>\n"))
 			finalHTML.WriteString(string(html))
 		}
 
