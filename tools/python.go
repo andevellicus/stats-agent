@@ -221,7 +221,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from scipy
+import scipy
 import warnings
 warnings.filterwarnings('ignore')
 pd.set_option('display.precision', 3)
@@ -345,6 +345,16 @@ func (t *StatefulPythonTool) callExecutor(ctx context.Context, addr, input, sess
 
 func (t *StatefulPythonTool) Close() {
 	// Connections are opened per-call, so there is nothing persistent to close.
+}
+
+// CleanupSession removes the session binding from the executor pool
+func (t *StatefulPythonTool) CleanupSession(sessionID string) {
+	t.sessionMu.Lock()
+	defer t.sessionMu.Unlock()
+	delete(t.sessionAddr, sessionID)
+	if t.logger != nil {
+		t.logger.Info("Python session cleaned up", zap.String("session_id", sessionID))
+	}
 }
 
 // ExecutePythonCode now requires a sessionID to be passed.

@@ -8,18 +8,18 @@ import "github.com/google/uuid"
 // Update the signature to accept the new MessageGroup slice
 templ ChatPage(activeSessionID uuid.UUID, sessions []types.Session, messageGroups []types.MessageGroup) {
 	@layout.Base("Chat") {
-		<div class="flex h-full">
-			// Sidebar
-			<div class="w-72 flex-shrink-0">
+		<div class="flex h-full overflow-hidden">
+			// Sidebar - fixed width with internal scrolling
+			<div class="w-72 flex-shrink-0 overflow-hidden">
 				@components.SessionList(sessions, activeSessionID)
 			</div>
 
-			// Main Chat Area
-			<div class="flex-1 flex flex-col">
-				<div class="flex-1 flex flex-col items-center justify-center p-4 space-y-6">
-					<div class="w-full max-w-4xl h-full flex flex-col">
-						// Messages container
-						<div id="messages" class="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin">
+			// Main Chat Area - scrollable
+			<div class="flex-1 flex flex-col overflow-hidden">
+				<div class="flex-1 flex flex-col items-center p-4 overflow-hidden">
+					<div class="w-full max-w-4xl h-full flex flex-col overflow-hidden">
+						// Messages container - scrollable with autoscroll
+						<div id="messages" class="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin" hx-on::after-swap="this.scrollTop = this.scrollHeight">
 							if len(messageGroups) == 0 {
 								@components.WelcomeMessage()
 							} else {
@@ -34,8 +34,8 @@ templ ChatPage(activeSessionID uuid.UUID, sessions []types.Session, messageGroup
 								}
 							}
 						</div>
-						// Form container
-						<div class="p-6 border-t border-gray-200/50">
+						// Form container - sticky at bottom
+						<div class="flex-shrink-0 p-6 border-t border-gray-200/50 bg-gradient-to-br from-slate-50 to-blue-50">
 							@components.ChatForm(activeSessionID.String())
 						</div>
 					</div>

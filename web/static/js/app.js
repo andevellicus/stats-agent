@@ -69,6 +69,10 @@ function setupFormListener() {
 
     if (!form) return;
 
+    // Check if already initialized to prevent duplicate listeners
+    if (form.hasAttribute('data-listeners-initialized')) return;
+    form.setAttribute('data-listeners-initialized', 'true');
+
     uploadButton.addEventListener('click', () => fileInput.click());
 
     fileInput.addEventListener('change', (event) => {
@@ -220,7 +224,15 @@ document.addEventListener('DOMContentLoaded', () => {
 document.body.addEventListener('htmx:afterSwap', function(event) {
     focusInput();
     initiateSSE();
+    setupFormListener(); // Re-attach form event listeners after htmx loads new content
+    setupAutoScroll(); // Re-setup autoscroll for the messages container
     applySyntaxHighlighting(); // Re-apply after htmx loads new content
+
+    // Re-attach textarea auto-expand listener
+    const messageInput = document.getElementById('message-input');
+    if (messageInput) {
+        messageInput.addEventListener('input', () => autoExpand(messageInput));
+    }
 });
 
 function initiateSSE() {

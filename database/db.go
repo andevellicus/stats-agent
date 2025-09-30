@@ -248,3 +248,22 @@ func (s *PostgresStore) AddRenderedFile(ctx context.Context, sessionID uuid.UUID
 	_, err := s.DB.ExecContext(ctx, query, filename, sessionID)
 	return err
 }
+
+func (s *PostgresStore) DeleteSession(ctx context.Context, sessionID uuid.UUID) error {
+	query := `DELETE FROM sessions WHERE id = $1`
+	result, err := s.DB.ExecContext(ctx, query, sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to delete session: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return errors.New("session not found")
+	}
+
+	return nil
+}

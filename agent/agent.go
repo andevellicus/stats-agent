@@ -47,6 +47,10 @@ func (a *Agent) InitializeSession(ctx context.Context, sessionID string, uploade
 	return a.pythonTool.InitializeSession(ctx, sessionID, uploadedFiles)
 }
 
+func (a *Agent) CleanupSession(sessionID string) {
+	a.pythonTool.CleanupSession(sessionID)
+}
+
 // Run now accepts the current session's message history, making it stateless.
 func (a *Agent) Run(ctx context.Context, input string, sessionID string, history []types.AgentMessage) {
 	currentHistory := history
@@ -108,6 +112,9 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 		if !strings.HasSuffix(llmResponse, "\n") {
 			fmt.Println()
 		}
+
+		// Convert markdown code blocks to XML tags for Python execution
+		llmResponse = convertMarkdownToXMLTags(llmResponse)
 
 		if llmResponse == "" {
 			a.logger.Warn("LLM response was empty, likely due to a context window error. Attempting to summarize context")
@@ -234,4 +241,40 @@ func (a *Agent) manageMemory(ctx context.Context, history *[]types.AgentMessage)
 		*history = (*history)[cutoff:]
 		a.logger.Info("Memory threshold reached. Moved messages to long-term RAG store", zap.Int("messages_moved", len(messagesToStore)))
 	}
+}
+
+// convertMarkdownToXMLTags converts markdown code blocks (```python) to XML tags (<python>)
+func convertMarkdownToXMLTags(text string) string {
+	// Replace ```python with <python>
+	text = strings.ReplaceAll(text, "```python", "<python>")
+
+	// Replace closing ``` with </python>
+	// We need to be careful here - only replace ``` that comes after a <python> tag
+	// Use a simple state machine approach
+	var result strings.Builder
+	inCodeBlock := false
+
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Check if we're entering a code block
+		if strings.Contains(line, "<python>") {
+			inCodeBlock = true
+			result.WriteString(line)
+		} else if inCodeBlock && trimmed == "```" {
+			// We're in a code block and found closing ```
+			result.WriteString("</python>")
+			inCodeBlock = false
+		} else {
+			result.WriteString(line)
+		}
+
+		// Add newline except for last line
+		if i < len(lines)-1 {
+			result.WriteString("\n")
+		}
+	}
+
+	return result.String()
 }

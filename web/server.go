@@ -64,6 +64,7 @@ func (s *Server) setupRoutes() {
 	s.router.GET("/chat/new", chatHandler.NewChat)
 	s.router.GET("/chat/stream", chatHandler.StreamResponse)
 	s.router.GET("/chat/:sessionID", chatHandler.LoadSession)
+	s.router.DELETE("/chat/:sessionID", chatHandler.DeleteSession)
 }
 
 func (s *Server) Start(ctx context.Context, addr string) error {

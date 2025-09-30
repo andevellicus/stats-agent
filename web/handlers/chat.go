@@ -69,6 +69,57 @@ func (h *ChatHandler) NewChat(c *gin.Context) {
 	c.Redirect(http.StatusFound, "/")
 }
 
+func (h *ChatHandler) DeleteSession(c *gin.Context) {
+	sessionIDStr := c.Param("sessionID")
+	sessionID, err := uuid.Parse(sessionIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid session ID"})
+		return
+	}
+
+	// Get session info before deleting (to get workspace path)
+	session, err := h.store.GetSessionByID(c.Request.Context(), sessionID)
+	if err != nil {
+		h.logger.Error("Failed to get session for deletion", zap.Error(err), zap.String("session_id", sessionIDStr))
+		c.JSON(http.StatusNotFound, gin.H{"error": "Session not found"})
+		return
+	}
+
+	// Delete from database (this cascades to messages)
+	if err := h.store.DeleteSession(c.Request.Context(), sessionID); err != nil {
+		h.logger.Error("Failed to delete session from database", zap.Error(err), zap.String("session_id", sessionIDStr))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete session"})
+		return
+	}
+
+	// Cleanup Python executor session binding
+	h.agent.CleanupSession(sessionIDStr)
+
+	// Delete workspace directory
+	workspaceDir := session.WorkspacePath
+	if workspaceDir != "" {
+		if err := os.RemoveAll(workspaceDir); err != nil {
+			h.logger.Warn("Failed to delete workspace directory", zap.Error(err), zap.String("path", workspaceDir))
+		} else {
+			h.logger.Info("Workspace directory deleted", zap.String("path", workspaceDir))
+		}
+	}
+
+	h.logger.Info("Session deleted successfully", zap.String("session_id", sessionIDStr))
+
+	// Check if this was the current session
+	currentSessionID, exists := c.Get("sessionID")
+	if exists && currentSessionID.(uuid.UUID) == sessionID {
+		// Deleting the current session - clear cookie and redirect to create new session
+		c.SetCookie(middleware.SessionCookieName, "", -1, "/", "", false, true)
+	}
+
+	// Always redirect to home page to refresh the UI
+	// The HX-Redirect header tells HTMX to perform a full page redirect
+	c.Header("HX-Redirect", "/")
+	c.Status(http.StatusOK)
+}
+
 func (h *ChatHandler) Index(c *gin.Context) {
 	sessionID, exists := c.Get("sessionID")
 	if !exists {
