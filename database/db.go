@@ -85,6 +85,23 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 	return nil
 }
 
+func (s *PostgresStore) CreateUser(ctx context.Context) (uuid.UUID, error) {
+	userID := uuid.New()
+	query := `INSERT INTO users (id, created_at) VALUES ($1, $2)`
+	_, err := s.DB.ExecContext(ctx, query, userID, time.Now())
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("failed to create user: %w", err)
+	}
+	return userID, nil
+}
+
+func (s *PostgresStore) GetUserByID(ctx context.Context, userID uuid.UUID) error {
+	query := `SELECT id FROM users WHERE id = $1`
+	var id uuid.UUID
+	err := s.DB.QueryRowContext(ctx, query, userID).Scan(&id)
+	return err
+}
+
 func (s *PostgresStore) CreateSession(ctx context.Context, userID *uuid.UUID) (uuid.UUID, error) {
 	sessionID := uuid.New()
 	workspacePath := filepath.Join("workspaces", sessionID.String())
@@ -133,13 +150,28 @@ func (s *PostgresStore) GetSessionByID(ctx context.Context, sessionID uuid.UUID)
 }
 
 func (s *PostgresStore) GetSessions(ctx context.Context, userID *uuid.UUID) ([]types.Session, error) {
-	query := `
-		SELECT id, user_id, created_at, last_active, workspace_path, title, is_active
-		FROM sessions
-		WHERE is_active = true
-		ORDER BY last_active DESC
-	`
-	rows, err := s.DB.QueryContext(ctx, query)
+	var query string
+	var rows *sql.Rows
+	var err error
+
+	if userID != nil {
+		query = `
+			SELECT id, user_id, created_at, last_active, workspace_path, title, is_active
+			FROM sessions
+			WHERE is_active = true AND user_id = $1
+			ORDER BY last_active DESC
+		`
+		rows, err = s.DB.QueryContext(ctx, query, userID)
+	} else {
+		query = `
+			SELECT id, user_id, created_at, last_active, workspace_path, title, is_active
+			FROM sessions
+			WHERE is_active = true
+			ORDER BY last_active DESC
+		`
+		rows, err = s.DB.QueryContext(ctx, query)
+	}
+
 	if err != nil {
 		return nil, err
 	}

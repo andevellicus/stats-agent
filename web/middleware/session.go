@@ -10,11 +10,54 @@ import (
 )
 
 const SessionCookieName = "stats_agent_session"
+const UserCookieName = "stats_agent_user"
 const CookieMaxAge = 30 * 24 * 60 * 60 // 30 days
 
 func SessionMiddleware(store *database.PostgresStore) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		cookie, err := c.Cookie(SessionCookieName)
+		// First, handle user authentication
+		userCookie, err := c.Cookie(UserCookieName)
+		var userID uuid.UUID
+		createNewUser := false
+
+		if err == http.ErrNoCookie {
+			createNewUser = true
+		} else if err != nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse user cookie"})
+			return
+		} else {
+			parsedUserID, parseErr := uuid.Parse(userCookie)
+			if parseErr != nil {
+				createNewUser = true
+			} else {
+				// Verify the user exists in the database
+				dbErr := store.GetUserByID(c.Request.Context(), parsedUserID)
+				if dbErr != nil {
+					if dbErr == sql.ErrNoRows {
+						createNewUser = true
+					} else {
+						c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify user"})
+						return
+					}
+				} else {
+					userID = parsedUserID
+				}
+			}
+		}
+
+		if createNewUser {
+			var creationErr error
+			userID, creationErr = store.CreateUser(c.Request.Context())
+			if creationErr != nil {
+				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
+				return
+			}
+			// Set the user cookie with a long expiration
+			c.SetCookie(UserCookieName, userID.String(), CookieMaxAge, "/", "", false, true)
+		}
+
+		// Now handle session
+		sessionCookie, err := c.Cookie(SessionCookieName)
 		var sessionID uuid.UUID
 		createNewSession := false
 
@@ -24,40 +67,42 @@ func SessionMiddleware(store *database.PostgresStore) gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse session cookie"})
 			return
 		} else {
-			parsedID, parseErr := uuid.Parse(cookie)
+			parsedID, parseErr := uuid.Parse(sessionCookie)
 			if parseErr != nil {
-				// Invalid UUID in cookie, so create a new session
 				createNewSession = true
 			} else {
 				// Check if the session from the cookie exists in the database
-				_, dbErr := store.GetSessionByID(c.Request.Context(), parsedID)
+				session, dbErr := store.GetSessionByID(c.Request.Context(), parsedID)
 				if dbErr != nil {
 					if dbErr == sql.ErrNoRows {
-						// The session is not in the DB, so we need to create a new one
 						createNewSession = true
 					} else {
-						// A different database error occurred
 						c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify session"})
 						return
 					}
 				} else {
-					// The session is valid
-					sessionID = parsedID
+					// Verify session belongs to this user
+					if session.UserID != nil && *session.UserID == userID {
+						sessionID = parsedID
+					} else {
+						// Session exists but doesn't belong to this user, create new session
+						createNewSession = true
+					}
 				}
 			}
 		}
 
 		if createNewSession {
 			var creationErr error
-			sessionID, creationErr = store.CreateSession(c.Request.Context(), nil)
+			sessionID, creationErr = store.CreateSession(c.Request.Context(), &userID)
 			if creationErr != nil {
 				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to create session"})
 				return
 			}
-			// Set the cookie for the new session
 			c.SetCookie(SessionCookieName, sessionID.String(), CookieMaxAge, "/", "", false, true)
 		}
 
+		c.Set("userID", userID)
 		c.Set("sessionID", sessionID)
 		c.Next()
 	}

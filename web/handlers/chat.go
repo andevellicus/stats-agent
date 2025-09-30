@@ -127,6 +127,13 @@ func (h *ChatHandler) Index(c *gin.Context) {
 	}
 	sessionUUID := sessionID.(uuid.UUID)
 
+	userID, userExists := c.Get("userID")
+	var userUUIDPtr *uuid.UUID
+	if userExists {
+		userUUID := userID.(uuid.UUID)
+		userUUIDPtr = &userUUID
+	}
+
 	workspaceDir := filepath.Join("workspaces", sessionUUID.String())
 	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
 		h.logger.Error("Failed to create workspace directory", zap.Error(err))
@@ -134,7 +141,7 @@ func (h *ChatHandler) Index(c *gin.Context) {
 		return
 	}
 
-	sessions, err := h.store.GetSessions(c.Request.Context(), nil)
+	sessions, err := h.store.GetSessions(c.Request.Context(), userUUIDPtr)
 	if err != nil {
 		h.logger.Error("Failed to get sessions", zap.Error(err))
 	}
@@ -155,7 +162,31 @@ func (h *ChatHandler) LoadSession(c *gin.Context) {
 		return
 	}
 
-	sessions, err := h.store.GetSessions(c.Request.Context(), nil)
+	userID, userExists := c.Get("userID")
+	var userUUIDPtr *uuid.UUID
+	if userExists {
+		userUUID := userID.(uuid.UUID)
+		userUUIDPtr = &userUUID
+	}
+
+	// Verify the session belongs to this user
+	session, err := h.store.GetSessionByID(c.Request.Context(), sessionID)
+	if err != nil {
+		h.logger.Error("Failed to get session", zap.Error(err))
+		c.String(http.StatusNotFound, "Session not found")
+		return
+	}
+
+	// Check ownership
+	if userUUIDPtr != nil && (session.UserID == nil || *session.UserID != *userUUIDPtr) {
+		h.logger.Warn("Attempted to access session belonging to different user")
+
+		// Replace the HX-Redirect header with a standard Gin redirect.
+		c.Redirect(http.StatusFound, "/")
+		return
+	}
+
+	sessions, err := h.store.GetSessions(c.Request.Context(), userUUIDPtr)
 	if err != nil {
 		h.logger.Error("Failed to get sessions", zap.Error(err))
 	}
