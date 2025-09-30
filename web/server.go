@@ -8,7 +8,8 @@ import (
 	"stats-agent/config"
 	"stats-agent/database"
 	"stats-agent/web/handlers"
-	"stats-agent/web/middleware" // Import the middleware package
+	"stats-agent/web/middleware"
+	"stats-agent/web/services"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -57,7 +58,14 @@ func (s *Server) setupRoutes() {
 	s.router.Static("/static", "./web/static")
 	s.router.Static("/workspaces", "./workspaces")
 
-	chatHandler := handlers.NewChatHandler(s.agent, s.logger, s.store)
+	// Initialize services
+	fileService := services.NewFileService(s.store, s.logger)
+	messageService := services.NewMessageService(s.store, s.logger)
+	streamService := services.NewStreamService(s.logger)
+	chatService := services.NewChatService(s.agent, s.store, s.logger, fileService, messageService, streamService)
+
+	// Initialize handlers with services
+	chatHandler := handlers.NewChatHandler(chatService, s.logger, s.store)
 
 	s.router.GET("/", chatHandler.Index)
 	s.router.POST("/chat", chatHandler.SendMessage)

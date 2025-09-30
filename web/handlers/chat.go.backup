@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -325,7 +324,7 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 	c.Header("Connection", "keep-alive")
 	c.Header("Access-Control-Allow-Origin", "*")
 
-	data := services.StreamData{Type: "connection_established"}
+	data := StreamData{Type: "connection_established"}
 	jsonData, _ := json.Marshal(data)
 	fmt.Fprintf(c.Writer, "data: %s\n\n", jsonData)
 	c.Writer.(http.Flusher).Flush()
@@ -374,7 +373,337 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 	h.chatService.StreamAgentResponse(ctx, c.Writer, userMessage.Content, userMessageID, sessionID.String(), agentHistory)
 }
 
-// Helper functions that remain in the handler for presentation logic
+// Helper functions that remain in the handler for HTTP-specific operations
+
+func groupMessages(messages []types.ChatMessage) []types.MessageGroup {
+	h.logger.Info("Initializing new session", zap.String("session_id", sessionID))
+
+	workspaceDir := filepath.Join("workspaces", sessionID)
+	files, err := os.ReadDir(workspaceDir)
+	if err != nil {
+		return fmt.Errorf("could not read workspace directory: %w", err)
+	}
+
+	var uploadedFiles []string
+	for _, file := range files {
+		if !file.IsDir() {
+			uploadedFiles = append(uploadedFiles, file.Name())
+		}
+	}
+
+	initResult, err := h.agent.InitializeSession(ctx, sessionID, uploadedFiles)
+	if err != nil {
+		return fmt.Errorf("failed to initialize python session: %w", err)
+	}
+
+	initMessage := types.ChatMessage{
+		ID:        generateMessageID(),
+		SessionID: sessionID,
+		Role:      "system",
+		Content:   initResult,
+		Rendered:  fmt.Sprintf("<pre><code>%s</code></pre>", initResult),
+	}
+
+	return h.store.CreateMessage(ctx, initMessage)
+}
+
+func (h *ChatHandler) processStreamByWord(ctx context.Context, r io.Reader, writeSSEData func(StreamData) error) {
+	reader := bufio.NewReader(r)
+	var currentWord strings.Builder
+
+	var processToken func(string)
+	processToken = func(token string) {
+		if token == "" {
+			return
+		}
+
+		switch {
+		case strings.Contains(token, "<python>"):
+			parts := strings.SplitN(token, "<python>", 2)
+			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
+			writeSSEData(StreamData{Type: "chunk", Content: "\n```python\n"})
+			processToken(parts[1])
+		case strings.Contains(token, "</python>"):
+			parts := strings.SplitN(token, "</python>", 2)
+			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
+			writeSSEData(StreamData{Type: "chunk", Content: "\n```\n"})
+			processToken(parts[1])
+		case strings.Contains(token, "<execution_results>"):
+			parts := strings.SplitN(token, "<execution_results>", 2)
+			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
+			writeSSEData(StreamData{Type: "chunk", Content: "\n```\n"})
+			processToken(parts[1])
+		case strings.Contains(token, "</execution_results>"):
+			parts := strings.SplitN(token, "</execution_results>", 2)
+			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
+			writeSSEData(StreamData{Type: "chunk", Content: "\n```\n"})
+			processToken(parts[1])
+		case strings.Contains(token, "<agent_status>"):
+			parts := strings.SplitN(token, "<agent_status>", 2)
+			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
+			writeSSEData(StreamData{Type: "chunk", Content: `<div class="agent-status-message">`})
+			processToken(parts[1])
+		case strings.Contains(token, "</agent_status>"):
+			parts := strings.SplitN(token, "</agent_status>", 2)
+			writeSSEData(StreamData{Type: "chunk", Content: parts[0]})
+			writeSSEData(StreamData{Type: "chunk", Content: `</div>`})
+			processToken(parts[1])
+		default:
+			writeSSEData(StreamData{Type: "chunk", Content: token})
+		}
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			char, _, err := reader.ReadRune()
+			if err != nil {
+				if currentWord.Len() > 0 {
+					processToken(currentWord.String())
+				}
+				return
+			}
+
+			currentWord.WriteRune(char)
+
+			if char == ' ' || char == '\n' {
+				processToken(currentWord.String())
+				currentWord.Reset()
+			}
+		}
+	}
+}
+
+func (h *ChatHandler) streamAgentResponse(ctx context.Context, w http.ResponseWriter, input string, userMessageID string, sessionID string) {
+	agentMessageID := generateMessageID()
+	var writeMu sync.Mutex
+
+	writeSSEData := func(data StreamData) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		jsonData, err := json.Marshal(data)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(w, "data: %s\n\n", jsonData)
+		if err != nil {
+			return err
+		}
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		return nil
+	}
+
+	if err := writeSSEData(StreamData{Type: "remove_loader", Content: "loading-" + userMessageID}); err != nil {
+		h.logger.Error("Failed to send remove loader message", zap.Error(err))
+		return
+	}
+
+	if err := writeSSEData(StreamData{Type: "create_container", Content: agentMessageID}); err != nil {
+		h.logger.Error("Failed to send create container message", zap.Error(err))
+		return
+	}
+
+	originalStdout := os.Stdout
+	r, pipeWriter, _ := os.Pipe()
+	os.Stdout = pipeWriter
+	log.SetOutput(pipeWriter)
+
+	var agentResponseForDB bytes.Buffer
+	teeReader := io.TeeReader(r, &agentResponseForDB)
+
+	agentDone := make(chan struct{})
+	streamDone := make(chan struct{})
+
+	go func() {
+		defer close(streamDone)
+		h.processStreamByWord(ctx, teeReader, writeSSEData)
+	}()
+
+	sessionUUID, err := uuid.Parse(sessionID)
+	if err != nil {
+		h.logger.Error("Invalid session ID for streaming", zap.Error(err))
+		return
+	}
+	messages, err := h.store.GetMessagesBySession(ctx, sessionUUID)
+	if err != nil {
+		h.logger.Error("Failed to get message history for agent", zap.Error(err))
+		return
+	}
+	agentHistory := toAgentMessages(messages)
+
+	go func() {
+		defer func() {
+			os.Stdout = originalStdout
+			log.SetOutput(originalStdout)
+			pipeWriter.Close()
+			close(agentDone)
+		}()
+		h.agent.Run(ctx, input, sessionID, agentHistory)
+	}()
+
+	select {
+	case <-ctx.Done():
+		h.logger.Info("Context cancelled, closing SSE connection")
+	case <-agentDone:
+		<-streamDone
+
+		backgroundCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		newFilePaths, err := h.getAndMarkNewFilePaths(backgroundCtx, sessionID)
+		if err != nil {
+			h.logger.Error("Failed to get and mark new file paths", zap.Error(err), zap.String("session_id", sessionID))
+		}
+
+		if len(newFilePaths) > 0 {
+			// This ID must match the one created dynamically in app.js
+			fileContainerID := fmt.Sprintf("file-container-agent-msg-%s", agentMessageID)
+			var oobBuf bytes.Buffer
+			if err := components.FileOOBWrapper(fileContainerID, newFilePaths).Render(backgroundCtx, &oobBuf); err != nil {
+				h.logger.Error("Failed to render file OOB wrapper", zap.Error(err))
+			} else {
+				if err := writeSSEData(StreamData{Type: "file_append_html", Content: oobBuf.String()}); err != nil {
+					h.logger.Error("Failed to stream file HTML", zap.Error(err))
+				}
+			}
+		}
+
+		if err := writeSSEData(StreamData{Type: "end"}); err != nil {
+			h.logger.Error("Failed to send end message", zap.Error(err))
+		}
+
+		dbFilesHTML, err := h.renderFileBlocksForDB(backgroundCtx, newFilePaths)
+		if err != nil {
+			h.logger.Error("Failed to render file blocks for DB", zap.Error(err))
+		}
+
+		rawAgentResponse := agentResponseForDB.String()
+		statusRe := regexp.MustCompile(`(?s)<agent_status>.*?</agent_status>`)
+		rawAgentResponse = statusRe.ReplaceAllString(rawAgentResponse, "")
+
+		re := regexp.MustCompile(`(?s)(<execution_results>.*?</execution_results>)`)
+		parts := re.Split(rawAgentResponse, -1)
+		matches := re.FindAllString(rawAgentResponse, -1)
+
+		// This loop saves the agent's text and tool outputs as separate messages.
+		for i, part := range parts {
+			assistantContent := strings.TrimSpace(part)
+			if assistantContent != "" {
+				assistantRendered, _ := processAgentContentForDB(backgroundCtx, assistantContent)
+				isLastPart := (i == len(parts)-1)
+				if isLastPart && dbFilesHTML != "" {
+					assistantRendered += dbFilesHTML
+				}
+
+				assistantMessage := types.ChatMessage{
+					ID:        generateMessageID(),
+					SessionID: sessionID,
+					Role:      "assistant",
+					Content:   assistantContent,
+					Rendered:  assistantRendered,
+				}
+				if err := h.store.CreateMessage(backgroundCtx, assistantMessage); err != nil {
+					h.logger.Error("Failed to save assistant message part", zap.Error(err))
+				}
+			}
+
+			if i < len(matches) {
+				toolContentRaw := strings.TrimSpace(matches[i])
+				result := strings.TrimSuffix(strings.TrimPrefix(toolContentRaw, "<execution_results>"), "</execution_results>")
+				var buf bytes.Buffer
+				if err := components.ExecutionResultBlock(result).Render(backgroundCtx, &buf); err != nil {
+					h.logger.Error("Failed to render execution result block for DB", zap.Error(err))
+				}
+				toolMessage := types.ChatMessage{
+					ID:        generateMessageID(),
+					SessionID: sessionID,
+					Role:      "tool",
+					Content:   result, // Save raw result
+					Rendered:  buf.String(),
+				}
+				if err := h.store.CreateMessage(backgroundCtx, toolMessage); err != nil {
+					h.logger.Error("Failed to save tool message", zap.Error(err))
+				}
+			}
+		}
+	}
+}
+
+// getAndMarkNewFilePaths finds new files in the workspace, marks them as rendered in the DB, and returns their web paths.
+func (h *ChatHandler) getAndMarkNewFilePaths(ctx context.Context, sessionID string) ([]string, error) {
+	sessionUUID, err := uuid.Parse(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid session ID: %w", err)
+	}
+
+	workspaceDir := filepath.Join("workspaces", sessionID)
+	files, err := os.ReadDir(workspaceDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // No workspace is not an error
+		}
+		return nil, fmt.Errorf("could not read workspace directory: %w", err)
+	}
+
+	renderedFiles, err := h.store.GetRenderedFiles(ctx, sessionUUID)
+	if err != nil {
+		return nil, fmt.Errorf("could not get rendered files: %w", err)
+	}
+
+	var newFilePaths []string
+	for _, file := range files {
+		if !file.IsDir() {
+			fileName := file.Name()
+			if _, rendered := renderedFiles[fileName]; !rendered {
+				webPath := filepath.ToSlash(filepath.Join("/workspaces", sessionID, fileName))
+				newFilePaths = append(newFilePaths, webPath)
+				if err := h.store.AddRenderedFile(ctx, sessionUUID, fileName); err != nil {
+					h.logger.Warn("Failed to mark file as rendered in DB", zap.Error(err), zap.String("filename", fileName))
+				}
+			}
+		}
+	}
+	return newFilePaths, nil
+}
+
+// renderFileBlocksForDB renders file blocks to a raw HTML string for database persistence.
+func (h *ChatHandler) renderFileBlocksForDB(ctx context.Context, filePaths []string) (string, error) {
+	if len(filePaths) == 0 {
+		return "", nil
+	}
+
+	var htmlBuilder strings.Builder
+	for _, path := range filePaths {
+		var buf bytes.Buffer
+		var component templ.Component
+		ext := strings.ToLower(filepath.Ext(path))
+		switch ext {
+		case ".png", ".jpg", ".jpeg", ".gif":
+			component = components.ImageBlock(path)
+		case ".csv", ".xls", ".xlsx":
+			component = components.FileBlock(path)
+		default:
+			component = nil // Ignore other file types
+		}
+
+		if component != nil {
+			if err := component.Render(ctx, &buf); err != nil {
+				return "", fmt.Errorf("failed to render component for db: %w", err)
+			}
+			htmlBuilder.Write(buf.Bytes())
+		}
+	}
+	return htmlBuilder.String(), nil
+}
 
 func groupMessages(messages []types.ChatMessage) []types.MessageGroup {
 	if len(messages) == 0 {
@@ -404,6 +733,56 @@ func groupMessages(messages []types.ChatMessage) []types.MessageGroup {
 		}
 	}
 	return groups
+}
+
+// New helper function to process agent content before saving to DB
+func processAgentContentForDB(ctx context.Context, rawContent string) (string, error) {
+	// Combined regex to find all custom tags
+	re := regexp.MustCompile(`(?s)(<python>.*?</python>|<execution_results>.*?</execution_results>|<agent_status>.*?</agent_status>)`)
+
+	// Split the content by our custom tags. `parts` will contain the text *between* the tags.
+	parts := re.Split(rawContent, -1)
+	// `matches` will contain the tags themselves.
+	matches := re.FindAllString(rawContent, -1)
+
+	var finalHTML strings.Builder
+
+	for i, part := range parts {
+		// Process the plain text part with Markdown
+
+		cleanedPart := strings.TrimSpace(part)
+		if cleanedPart != "" {
+			md := []byte(cleanedPart)
+			html := markdown.ToHTML(md, nil, nil)
+			finalHTML.WriteString(string(html))
+		}
+
+		// If there is a matching component, render it and append it
+		if i < len(matches) {
+			match := matches[i]
+			var componentHTML string
+
+			if after, ok := strings.CutPrefix(match, "<python>"); ok {
+				code := strings.TrimSuffix(after, "</python>")
+				var buf bytes.Buffer
+				components.PythonCodeBlock(code).Render(ctx, &buf)
+				componentHTML = buf.String()
+			} else if after0, ok0 := strings.CutPrefix(match, "<execution_results>"); ok0 {
+				result := strings.TrimSuffix(after0, "</execution_results>")
+				var buf bytes.Buffer
+				components.ExecutionResultBlock(result).Render(ctx, &buf)
+				componentHTML = buf.String()
+			} else if after1, ok1 := strings.CutPrefix(match, "<agent_status>"); ok1 {
+				status := strings.TrimSuffix(after1, "</agent_status>")
+				var buf bytes.Buffer
+				components.AgentStatus(status).Render(ctx, &buf)
+				componentHTML = buf.String()
+			}
+			finalHTML.WriteString(componentHTML)
+		}
+	}
+
+	return finalHTML.String(), nil
 }
 
 func toAgentMessages(messages []types.ChatMessage) []types.AgentMessage {
