@@ -3,15 +3,14 @@ package database
 import (
 	"context"
 	"database/sql"
-	"errors" // Import the errors package
+	"errors"
 	"fmt"
-	"log"
 	"path/filepath"
 	"time"
 
 	"stats-agent/web/types"
 
-	"github.com/google/uuid" // Import the pgtype package
+	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/lib/pq"
 )
@@ -23,12 +22,11 @@ type PostgresStore struct {
 func NewPostgresStore(connStr string) (*PostgresStore, error) {
 	db, err := sql.Open("pgx", connStr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to open database connection: %w", err)
 	}
 	if err := db.Ping(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
-	log.Println("Successfully connected to the database")
 	return &PostgresStore{DB: db}, nil
 }
 
@@ -70,9 +68,11 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		}
 	}
 
+	// Attempt to drop NOT NULL constraint (may already be altered in existing databases)
 	alterStmt := `ALTER TABLE sessions ALTER COLUMN user_id DROP NOT NULL;`
 	if _, err := s.DB.ExecContext(ctx, alterStmt); err != nil {
-		log.Printf("INFO: Could not drop NOT NULL constraint on sessions.user_id (it might already be altered): %v", err)
+		// Ignore error - constraint may already be dropped or not exist
+		// This is a schema migration compatibility step, not a critical operation
 	}
 
 	return nil
@@ -130,7 +130,10 @@ func (s *PostgresStore) GetSessionByID(ctx context.Context, sessionID uuid.UUID)
 	var sess types.Session
 	var userID sql.NullString
 	if err := row.Scan(&sess.ID, &userID, &sess.CreatedAt, &sess.LastActive, &sess.WorkspacePath, &sess.Title, &sess.IsActive); err != nil {
-		return types.Session{}, err // Will return sql.ErrNoRows if not found
+		if errors.Is(err, sql.ErrNoRows) {
+			return types.Session{}, fmt.Errorf("session not found: %w", err)
+		}
+		return types.Session{}, fmt.Errorf("failed to scan session: %w", err)
 	}
 
 	if userID.Valid {
@@ -166,7 +169,7 @@ func (s *PostgresStore) GetSessions(ctx context.Context, userID *uuid.UUID) ([]t
 	}
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to query sessions: %w", err)
 	}
 	defer rows.Close()
 
@@ -175,7 +178,7 @@ func (s *PostgresStore) GetSessions(ctx context.Context, userID *uuid.UUID) ([]t
 		var sess types.Session
 		var userID sql.NullString
 		if err := rows.Scan(&sess.ID, &userID, &sess.CreatedAt, &sess.LastActive, &sess.WorkspacePath, &sess.Title, &sess.IsActive); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to scan session row: %w", err)
 		}
 		if userID.Valid {
 			parsedUUID, err := uuid.Parse(userID.String)
@@ -185,6 +188,11 @@ func (s *PostgresStore) GetSessions(ctx context.Context, userID *uuid.UUID) ([]t
 		}
 		sessions = append(sessions, sess)
 	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating session rows: %w", err)
+	}
+
 	return sessions, nil
 }
 
@@ -195,7 +203,7 @@ func (s *PostgresStore) CreateMessage(ctx context.Context, msg types.ChatMessage
 	`
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -210,15 +218,19 @@ func (s *PostgresStore) CreateMessage(ctx context.Context, msg types.ChatMessage
 
 	_, err = tx.ExecContext(ctx, query, messageUUID, sessionUUID, msg.Role, msg.Content, msg.Rendered, time.Now())
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to insert message: %w", err)
 	}
 
 	_, err = tx.ExecContext(ctx, `UPDATE sessions SET last_active = $1 WHERE id = $2`, time.Now(), sessionUUID)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to update session last_active: %w", err)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
 }
 
 func (s *PostgresStore) GetMessagesBySession(ctx context.Context, sessionID uuid.UUID) ([]types.ChatMessage, error) {
@@ -228,7 +240,7 @@ func (s *PostgresStore) GetMessagesBySession(ctx context.Context, sessionID uuid
 	`
 	rows, err := s.DB.QueryContext(ctx, query, sessionID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to query messages: %w", err)
 	}
 	defer rows.Close()
 
@@ -237,16 +249,21 @@ func (s *PostgresStore) GetMessagesBySession(ctx context.Context, sessionID uuid
 		var msg types.ChatMessage
 		var sessionUUID uuid.UUID
 		if err := rows.Scan(&msg.ID, &sessionUUID, &msg.Role, &msg.Content, &msg.Rendered); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to scan message row: %w", err)
 		}
 		msg.SessionID = sessionUUID.String()
 		messages = append(messages, msg)
 	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating message rows: %w", err)
+	}
+
 	return messages, nil
 }
 
 func (s *PostgresStore) GetRenderedFiles(ctx context.Context, sessionID uuid.UUID) (map[string]bool, error) {
-	var files pq.StringArray // Use pq.StringArray instead of []string
+	var files pq.StringArray
 	query := `SELECT rendered_files FROM sessions WHERE id = $1`
 
 	err := s.DB.QueryRowContext(ctx, query, sessionID).Scan(&files)
@@ -254,7 +271,7 @@ func (s *PostgresStore) GetRenderedFiles(ctx context.Context, sessionID uuid.UUI
 		if errors.Is(err, sql.ErrNoRows) {
 			return make(map[string]bool), nil // No session found, return empty map
 		}
-		return nil, err
+		return nil, fmt.Errorf("failed to get rendered files: %w", err)
 	}
 
 	rendered := make(map[string]bool)
@@ -271,7 +288,38 @@ func (s *PostgresStore) AddRenderedFile(ctx context.Context, sessionID uuid.UUID
         WHERE id = $2
     `
 	_, err := s.DB.ExecContext(ctx, query, filename, sessionID)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to add rendered file: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetStaleSessions(ctx context.Context, lastActiveBefore time.Time) ([]uuid.UUID, error) {
+	query := `
+		SELECT id FROM sessions
+		WHERE last_active < $1
+		ORDER BY last_active ASC
+	`
+	rows, err := s.DB.QueryContext(ctx, query, lastActiveBefore)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query stale sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var sessionIDs []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to scan session ID: %w", err)
+		}
+		sessionIDs = append(sessionIDs, id)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating stale sessions: %w", err)
+	}
+
+	return sessionIDs, nil
 }
 
 func (s *PostgresStore) DeleteSession(ctx context.Context, sessionID uuid.UUID) error {

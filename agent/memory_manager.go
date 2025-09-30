@@ -146,17 +146,23 @@ func (m *MemoryManager) ManageHistory(ctx context.Context, history *[]types.Agen
 
 	messagesToStore := (*history)[:cutoff]
 
-	// Archive to RAG
+	// Archive to RAG - non-critical, log warning if fails but continue
 	if err := m.rag.AddMessagesToStore(ctx, messagesToStore); err != nil {
-		return fmt.Errorf("failed to add messages to long-term memory: %w", err)
+		m.logger.Warn("Failed to archive messages to RAG, they will be lost from long-term memory",
+			zap.Error(err),
+			zap.Int("messages_count", len(messagesToStore)))
+		// Don't return error - continue with memory management to prevent context overflow
+	} else {
+		m.logger.Info("Archived messages to long-term RAG store",
+			zap.Int("messages_moved", len(messagesToStore)))
 	}
 
 	// Remove archived messages from history
 	*history = (*history)[cutoff:]
 
-	m.logger.Info("Memory threshold reached. Moved messages to long-term RAG store",
-		zap.Int("messages_moved", len(messagesToStore)),
-		zap.Int("remaining_messages", len(*history)))
+	m.logger.Info("Memory management complete",
+		zap.Int("remaining_messages", len(*history)),
+		zap.Int("total_tokens", totalTokens))
 
 	return nil
 }

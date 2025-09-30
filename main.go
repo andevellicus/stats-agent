@@ -14,7 +14,6 @@ import (
 	"stats-agent/tools"
 	"stats-agent/web"
 	"syscall"
-	"time"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -67,8 +66,9 @@ func main() {
 		// Run web server
 		logger.Info("Starting Pocket Statistician in web mode", zap.String("port", *port))
 
-		// Start the workspace cleanup go routine
-		go web.StartWorkspaceCleanup(24*time.Hour, 24*time.Hour, logger)
+		// Initialize cleanup service and start background cleanup routine
+		cleanupService := web.NewCleanupService(store, statsAgent, logger)
+		go web.StartWorkspaceCleanup(cfg, cleanupService, logger)
 
 		webServer := web.NewServer(statsAgent, logger, cfg, store)
 

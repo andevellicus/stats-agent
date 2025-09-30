@@ -101,6 +101,8 @@ func (h *ChatHandler) DeleteSession(c *gin.Context) {
 func (h *ChatHandler) Index(c *gin.Context) {
 	sessionID, exists := c.Get("sessionID")
 	if !exists {
+		h.logger.Error("Session ID not found in context")
+		c.String(http.StatusInternalServerError, "Session not found")
 		return
 	}
 	sessionUUID := sessionID.(uuid.UUID)
@@ -114,18 +116,30 @@ func (h *ChatHandler) Index(c *gin.Context) {
 
 	workspaceDir := filepath.Join("workspaces", sessionUUID.String())
 	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
-		h.logger.Error("Failed to create workspace directory", zap.Error(err))
-		c.String(http.StatusInternalServerError, "Could not create workspace.")
+		h.logger.Error("Failed to create workspace directory",
+			zap.Error(err),
+			zap.String("session_id", sessionUUID.String()))
+		c.String(http.StatusInternalServerError, "Could not create workspace")
 		return
 	}
 
+	// Get sessions - non-critical, show empty sidebar if fails
 	sessions, err := h.store.GetSessions(c.Request.Context(), userUUIDPtr)
 	if err != nil {
-		h.logger.Error("Failed to get sessions", zap.Error(err))
+		h.logger.Error("Failed to get sessions for sidebar",
+			zap.Error(err),
+			zap.String("session_id", sessionUUID.String()))
+		sessions = []types.Session{} // Empty sidebar
 	}
+
+	// Get messages - critical for page render
 	messages, err := h.store.GetMessagesBySession(c.Request.Context(), sessionUUID)
 	if err != nil {
-		h.logger.Error("Failed to get messages for session", zap.Error(err))
+		h.logger.Error("Failed to get messages for session",
+			zap.Error(err),
+			zap.String("session_id", sessionUUID.String()))
+		c.String(http.StatusInternalServerError, "Could not load conversation history")
+		return
 	}
 
 	messageGroups := groupMessages(messages)
@@ -150,27 +164,39 @@ func (h *ChatHandler) LoadSession(c *gin.Context) {
 	// Verify the session belongs to this user
 	session, err := h.store.GetSessionByID(c.Request.Context(), sessionID)
 	if err != nil {
-		h.logger.Error("Failed to get session", zap.Error(err))
+		h.logger.Error("Failed to get session",
+			zap.Error(err),
+			zap.String("session_id", sessionID.String()))
 		c.String(http.StatusNotFound, "Session not found")
 		return
 	}
 
-	// Check ownership
+	// Check ownership - security check
 	if userUUIDPtr != nil && (session.UserID == nil || *session.UserID != *userUUIDPtr) {
-		h.logger.Warn("Attempted to access session belonging to different user")
-
-		// Replace the HX-Redirect header with a standard Gin redirect.
+		h.logger.Warn("Attempted to access session belonging to different user",
+			zap.String("session_id", sessionID.String()),
+			zap.String("user_id", userUUIDPtr.String()))
 		c.Redirect(http.StatusFound, "/")
 		return
 	}
 
+	// Get sessions - non-critical, show empty sidebar if fails
 	sessions, err := h.store.GetSessions(c.Request.Context(), userUUIDPtr)
 	if err != nil {
-		h.logger.Error("Failed to get sessions", zap.Error(err))
+		h.logger.Error("Failed to get sessions for sidebar",
+			zap.Error(err),
+			zap.String("session_id", sessionID.String()))
+		sessions = []types.Session{} // Empty sidebar
 	}
+
+	// Get messages - critical for page render
 	messages, err := h.store.GetMessagesBySession(c.Request.Context(), sessionID)
 	if err != nil {
-		h.logger.Error("Failed to get messages for session", zap.Error(err))
+		h.logger.Error("Failed to get messages for session",
+			zap.Error(err),
+			zap.String("session_id", sessionID.String()))
+		c.String(http.StatusInternalServerError, "Could not load conversation history")
+		return
 	}
 
 	messageGroups := groupMessages(messages)
@@ -214,12 +240,19 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 		workspaceDir := filepath.Join("workspaces", req.SessionID)
 		dst := filepath.Join(workspaceDir, sanitizedFilename)
 		if err := c.SaveUploadedFile(file, dst); err != nil {
+			h.logger.Error("Failed to save uploaded file",
+				zap.Error(err),
+				zap.String("filename", sanitizedFilename),
+				zap.String("session_id", req.SessionID))
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not save file"})
 			return
 		}
 
 		if !verifyFileExists(workspaceDir, sanitizedFilename) {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "File verification failed after upload."})
+			h.logger.Error("File verification failed after upload",
+				zap.String("filename", sanitizedFilename),
+				zap.String("workspace", workspaceDir))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "File verification failed after upload"})
 			return
 		}
 
@@ -229,11 +262,18 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 			req.Message = fmt.Sprintf("[📎 File uploaded: %s]\n\n%s", file.Filename, req.Message)
 		}
 
+		// Mark file as rendered - non-critical, log if fails
 		if err := h.store.AddRenderedFile(c.Request.Context(), sessionID, sanitizedFilename); err != nil {
-			h.logger.Error("Failed to mark file as rendered", zap.Error(err))
+			h.logger.Warn("Failed to mark file as rendered",
+				zap.Error(err),
+				zap.String("filename", sanitizedFilename),
+				zap.String("session_id", req.SessionID))
 		}
 
-		h.logger.Info("File uploaded", zap.String("filename", file.Filename), zap.String("session_id", req.SessionID))
+		h.logger.Info("File uploaded successfully",
+			zap.String("filename", file.Filename),
+			zap.String("session_id", req.SessionID),
+			zap.Int64("size_bytes", file.Size))
 	}
 
 	userMessage := types.ChatMessage{
@@ -243,8 +283,11 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 		SessionID: sessionID.String(),
 	}
 
+	// Save user message - critical operation
 	if err := h.store.CreateMessage(c.Request.Context(), userMessage); err != nil {
-		h.logger.Error("Failed to save user message", zap.Error(err))
+		h.logger.Error("Failed to save user message",
+			zap.Error(err),
+			zap.String("session_id", req.SessionID))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not save message"})
 		return
 	}

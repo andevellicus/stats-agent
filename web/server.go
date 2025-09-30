@@ -95,19 +95,45 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 	return srv.Shutdown(context.Background())
 }
 
-func StartWorkspaceCleanup(interval time.Duration, maxAge time.Duration, logger *zap.Logger) {
-	ticker := time.NewTicker(interval)
+// StartWorkspaceCleanup runs a background goroutine that periodically cleans up stale sessions
+func StartWorkspaceCleanup(cfg *config.Config, cleanupService *CleanupService, logger *zap.Logger) {
+	if !cfg.CleanupEnabled {
+		logger.Info("Workspace cleanup disabled by configuration")
+		return
+	}
+
+	logger.Info("Starting workspace cleanup routine",
+		zap.Duration("interval", cfg.CleanupInterval),
+		zap.Duration("retention_age", cfg.SessionRetentionAge))
+
+	ticker := time.NewTicker(cfg.CleanupInterval)
 	defer ticker.Stop()
 
-	// Create a dummy chat handler to access the cleanup method.
-	// This is a bit of a hack, a better solution would be to refactor the session management
-	// into its own struct that can be shared between the server and the cleanup routine.
-	// TODO IMPLEMENT THIS
-	//chatHandler := handlers.NewChatHandler(nil, logger, nil)
+	// Run cleanup immediately on startup
+	runCleanup(cleanupService, cfg, logger)
 
-	for {
-		<-ticker.C
-		logger.Info("Running scheduled workspace cleanup")
-		//chatHandler.CleanupWorkspaces(maxAge, logger)
+	// Then run on schedule
+	for range ticker.C {
+		runCleanup(cleanupService, cfg, logger)
+	}
+}
+
+// runCleanup executes a single cleanup cycle with timeout
+func runCleanup(cleanupService *CleanupService, cfg *config.Config, logger *zap.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	deleted, err := cleanupService.CleanupStaleWorkspaces(ctx, cfg.SessionRetentionAge)
+	if err != nil {
+		logger.Error("Workspace cleanup failed",
+			zap.Error(err),
+			zap.Duration("retention_age", cfg.SessionRetentionAge))
+		return
+	}
+
+	if deleted > 0 {
+		logger.Info("Workspace cleanup completed",
+			zap.Int("sessions_deleted", deleted),
+			zap.Duration("retention_age", cfg.SessionRetentionAge))
 	}
 }

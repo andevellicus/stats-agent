@@ -63,9 +63,12 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 	// 1. Setup: Add user message and retrieve long-term context
 	currentHistory := append(history, types.AgentMessage{Role: "user", Content: input})
 
+	// Query RAG for long-term context - non-critical, log warning if fails
 	longTermContext, err := a.rag.Query(ctx, input, a.cfg.RAGResults)
 	if err != nil {
-		a.logger.Error("Error querying RAG for long-term context", zap.Error(err))
+		a.logger.Warn("Failed to query RAG for long-term context, continuing without it",
+			zap.Error(err),
+			zap.String("session_id", sessionID))
 	}
 
 	// Proactively check if long-term context itself is too large
@@ -86,9 +89,12 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 
 	// 3. Main conversation loop
 	for turn := 0; turn < a.cfg.MaxTurns; turn++ {
-		// Manage memory before each turn
+		// Manage memory before each turn - non-critical, log warning if fails
 		if err := a.memoryManager.ManageHistory(ctx, &currentHistory); err != nil {
-			a.logger.Error("Failed to manage memory", zap.Error(err))
+			a.logger.Warn("Failed to manage memory, continuing with current history",
+				zap.Error(err),
+				zap.Int("turn", turn),
+				zap.String("session_id", sessionID))
 		}
 
 		// Check loop conditions (error limit, max turns)
@@ -100,10 +106,14 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 		// Build messages for LLM (combine long-term context + history)
 		messagesForLLM := a.responseHandler.BuildMessagesForLLM(longTermContext, currentHistory)
 
-		// Get LLM response
+		// Get LLM response - critical operation, break loop on failure
 		responseChan, err := getLLMResponse(ctx, a.cfg.MainLLMHost, messagesForLLM, a.cfg, a.logger)
 		if err != nil {
-			a.logger.Error("Error getting LLM response channel", zap.Error(err))
+			a.logger.Error("Failed to get LLM response, aborting turn",
+				zap.Error(err),
+				zap.Int("turn", turn),
+				zap.String("session_id", sessionID))
+			fmt.Printf("<agent_status>LLM communication error</agent_status>")
 			break
 		}
 
@@ -119,10 +129,14 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 			continue
 		}
 
-		// Process response for code execution
+		// Process response for code execution - critical operation
 		execResult, err := a.executionCoordinator.ProcessResponse(ctx, llmResponse, sessionID)
 		if err != nil {
-			a.logger.Error("Failed to process LLM response", zap.Error(err))
+			a.logger.Error("Failed to process LLM response, aborting turn",
+				zap.Error(err),
+				zap.Int("turn", turn),
+				zap.String("session_id", sessionID))
+			fmt.Printf("<agent_status>Response processing error</agent_status>")
 			break
 		}
 

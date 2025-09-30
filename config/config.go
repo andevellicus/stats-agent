@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -24,6 +25,9 @@ type Config struct {
 	RetryDelaySeconds       time.Duration `mapstructure:"RETRY_DELAY_SECONDS"`
 	ConsecutiveErrors       int           `mapstructure:"CONSECUTIVE_ERRORS"`
 	LLMRequestTimeout       time.Duration `mapstructure:"LLM_REQUEST_TIMEOUT"`
+	CleanupEnabled          bool          `mapstructure:"CLEANUP_ENABLED"`
+	CleanupInterval         time.Duration `mapstructure:"CLEANUP_INTERVAL"`
+	SessionRetentionAge     time.Duration `mapstructure:"SESSION_RETENTION_AGE"`
 }
 
 func Load(logger *zap.Logger) *Config {
@@ -46,6 +50,9 @@ func Load(logger *zap.Logger) *Config {
 	viper.SetDefault("RETRY_DELAY_SECONDS", 2)
 	viper.SetDefault("CONSECUTIVE_ERRORS", 3)
 	viper.SetDefault("LLM_REQUEST_TIMEOUT", 300)
+	viper.SetDefault("CLEANUP_ENABLED", true)
+	viper.SetDefault("CLEANUP_INTERVAL", 24)
+	viper.SetDefault("SESSION_RETENTION_AGE", 168)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if logger != nil {
@@ -54,10 +61,13 @@ func Load(logger *zap.Logger) *Config {
 	}
 
 	if err := viper.Unmarshal(&config); err != nil {
+		// Config unmarshaling is critical - fail fast during bootstrap
 		if logger != nil {
-			logger.Fatal("Unable to decode into struct", zap.Error(err))
+			logger.Fatal("Unable to decode config into struct", zap.Error(err))
 		} else {
-			panic(fmt.Sprintf("Unable to decode config into struct: %v", err))
+			// Fallback if logger not available (should not happen in practice)
+			fmt.Fprintf(os.Stderr, "FATAL: Unable to decode config into struct: %v\n", err)
+			os.Exit(1)
 		}
 	}
 
@@ -83,9 +93,11 @@ func Load(logger *zap.Logger) *Config {
 	}
 	config.PythonExecutorPool = config.PythonExecutorAddresses
 
-	// Convert seconds to a proper time.Duration
+	// Convert seconds/hours to proper time.Duration
 	config.RetryDelaySeconds = config.RetryDelaySeconds * time.Second
 	config.LLMRequestTimeout = config.LLMRequestTimeout * time.Second
+	config.CleanupInterval = config.CleanupInterval * time.Hour
+	config.SessionRetentionAge = config.SessionRetentionAge * time.Hour
 
 	return &config
 }

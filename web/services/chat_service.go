@@ -103,14 +103,18 @@ func (cs *ChatService) StreamAgentResponse(
 		return cs.streamService.WriteSSEData(ctx, w, data, &writeMu)
 	}
 
-	// Send initial SSE messages
+	// Send initial SSE messages - critical for UI responsiveness
 	if err := writeSSEData(StreamData{Type: "remove_loader", Content: "loading-" + userMessageID}); err != nil {
-		cs.logger.Error("Failed to send remove loader message", zap.Error(err))
+		cs.logger.Error("Failed to send remove loader message, aborting stream",
+			zap.Error(err),
+			zap.String("session_id", sessionID))
 		return
 	}
 
 	if err := writeSSEData(StreamData{Type: "create_container", Content: agentMessageID}); err != nil {
-		cs.logger.Error("Failed to send create container message", zap.Error(err))
+		cs.logger.Error("Failed to send create container message, aborting stream",
+			zap.Error(err),
+			zap.String("session_id", sessionID))
 		return
 	}
 
@@ -154,18 +158,23 @@ func (cs *ChatService) StreamAgentResponse(
 		backgroundCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		// Discover and mark new files
+		// Discover and mark new files - non-critical, continue if fails
 		newFilePaths, err := cs.fileService.GetAndMarkNewFiles(backgroundCtx, sessionID)
 		if err != nil {
-			cs.logger.Error("Failed to get and mark new file paths", zap.Error(err), zap.String("session_id", sessionID))
+			cs.logger.Error("Failed to get and mark new file paths",
+				zap.Error(err),
+				zap.String("session_id", sessionID))
+			// Continue - files won't be displayed this time but can be discovered later
 		}
 
-		// Stream new files as OOB updates
+		// Stream new files as OOB updates - non-critical
 		if len(newFilePaths) > 0 {
 			fileContainerID := fmt.Sprintf("file-container-agent-msg-%s", agentMessageID)
 			oobHTML, err := cs.fileService.RenderFileOOBWrapper(backgroundCtx, fileContainerID, newFilePaths)
 			if err != nil {
-				cs.logger.Error("Failed to render file OOB wrapper", zap.Error(err))
+				cs.logger.Error("Failed to render file OOB wrapper",
+					zap.Error(err),
+					zap.Int("file_count", len(newFilePaths)))
 			} else {
 				if err := writeSSEData(StreamData{Type: "file_append_html", Content: oobHTML}); err != nil {
 					cs.logger.Error("Failed to stream file HTML", zap.Error(err))
@@ -173,21 +182,28 @@ func (cs *ChatService) StreamAgentResponse(
 			}
 		}
 
-		// Send end signal
+		// Send end signal - best effort
 		if err := writeSSEData(StreamData{Type: "end"}); err != nil {
 			cs.logger.Error("Failed to send end message", zap.Error(err))
 		}
 
-		// Render file blocks for DB storage
+		// Render file blocks for DB storage - non-critical
 		dbFilesHTML, err := cs.fileService.RenderFileBlocksForDB(backgroundCtx, newFilePaths)
 		if err != nil {
-			cs.logger.Error("Failed to render file blocks for DB", zap.Error(err))
+			cs.logger.Error("Failed to render file blocks for DB",
+				zap.Error(err),
+				zap.Int("file_count", len(newFilePaths)))
+			// Continue without file HTML in DB
+			dbFilesHTML = ""
 		}
 
-		// Parse and save messages to database
+		// Parse and save messages to database - critical for preserving conversation
 		rawAgentResponse := agentResponseForDB.String()
 		if err := cs.messageService.ParseAndSaveAgentResponse(backgroundCtx, rawAgentResponse, sessionID, dbFilesHTML); err != nil {
-			cs.logger.Error("Failed to parse and save agent response", zap.Error(err))
+			cs.logger.Error("Failed to parse and save agent response - CONVERSATION DATA MAY BE LOST",
+				zap.Error(err),
+				zap.String("session_id", sessionID),
+				zap.Int("response_length", len(rawAgentResponse)))
 		}
 	}
 }

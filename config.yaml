@@ -16,3 +16,8 @@ LLM_REQUEST_TIMEOUT: 300
 # --- Retry Logic For Connecting to Llama.CPP ---
 MAX_RETRIES: 5
 RETRY_DELAY_SECONDS: 2
+
+# --- Session Cleanup Configuration ---
+CLEANUP_ENABLED: true
+CLEANUP_INTERVAL: 24        # Run cleanup every 24 hours
+SESSION_RETENTION_AGE: 168  # Delete sessions older than 7 days (168 hours)

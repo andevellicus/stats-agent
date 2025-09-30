@@ -100,9 +100,13 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, messages []types.AgentMess
 			if len(matches) > 1 {
 				code := strings.TrimSpace(matches[1])
 				result := strings.TrimSpace(toolMsg.Content)
+				// Generate fact summary using LLM - non-critical, use fallback if fails
 				summary, err := r.generateFactSummary(ctx, code, result)
 				if err != nil {
-					r.logger.Warn("LLM fact summarization failed, using fallback", zap.Error(err))
+					r.logger.Warn("LLM fact summarization failed, using fallback summary",
+						zap.Error(err),
+						zap.Int("code_length", len(code)),
+						zap.Int("result_length", len(result)))
 					contentToEmbed = "Fact: A code execution event occurred but could not be summarized."
 				} else {
 					contentToEmbed = summary
@@ -116,19 +120,23 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, messages []types.AgentMess
 			metadata["role"] = msg.Role
 			metadata["document_id"] = documentID
 
+			// Deduplication check - non-critical, continue if fails
 			if collection.Count() > 0 {
 				results, err := collection.Query(ctx, contentToEmbed, 1, nil, nil)
 				if err != nil {
-					r.logger.Warn("Deduplication query failed, proceeding to add document", zap.Error(err))
+					r.logger.Warn("Deduplication query failed, proceeding to add document anyway", zap.Error(err))
 				} else if len(results) > 0 && results[0].Similarity > 0.98 {
-					r.logger.Info("Skipping duplicate content", zap.Float32("similarity", results[0].Similarity))
+					r.logger.Debug("Skipping duplicate content", zap.Float32("similarity", results[0].Similarity))
 					continue
 				}
 			}
+			// Generate searchable summary for long messages - non-critical enhancement
 			if len(msg.Content) > 500 {
 				summary, err := r.generateSearchableSummary(ctx, msg.Content)
 				if err != nil {
-					r.logger.Warn("Failed to create searchable summary for long message", zap.Error(err))
+					r.logger.Warn("Failed to create searchable summary for long message, will use full content",
+						zap.Error(err),
+						zap.Int("content_length", len(msg.Content)))
 				} else {
 					summaryDoc := chromem.Document{
 						ID:      uuid.New().String(),
