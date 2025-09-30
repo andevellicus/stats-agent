@@ -91,7 +91,6 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 		messagesForLLM = append(messagesForLLM, currentHistory...)
 
 		var llmResponseBuilder strings.Builder
-		isFirstChunk := true
 
 		responseChan, err := getLLMResponse(ctx, a.cfg.MainLLMHost, messagesForLLM, a.cfg, a.logger)
 		if err != nil {
@@ -100,10 +99,6 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 		}
 
 		for chunk := range responseChan {
-			if isFirstChunk && !strings.Contains(chunk, "<python>") {
-				fmt.Print("Agent: ")
-			}
-			isFirstChunk = false
 			fmt.Print(chunk)
 			llmResponseBuilder.WriteString(chunk)
 		}

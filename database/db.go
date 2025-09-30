@@ -62,13 +62,6 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
             metadata JSONB DEFAULT '{}'::jsonb
         )`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_session_created_at ON messages(session_id, created_at)`,
-		`CREATE TABLE IF NOT EXISTS session_state (
-            session_id UUID PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
-            python_executor TEXT,
-            variables JSONB,
-            last_checkpoint TIMESTAMPTZ,
-            code_blocks TEXT[]
-        )`,
 	}
 
 	for _, stmt := range stmts {
