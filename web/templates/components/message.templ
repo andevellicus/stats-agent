@@ -2,13 +2,43 @@ package components
 
 import "stats-agent/web/types"
 
-templ UserMessage(msg types.ChatMessage) {
-	<div class="flex justify-end">
-		<div class="bg-slate-700 text-white rounded-2xl px-5 py-3 max-w-4xl shadow-lg hover:shadow-xl transition-shadow duration-200">
-			<div class="font-semibold text-sm mb-1 opacity-90 font-display">You</div>
-			<div class="font-sans text-sm text-white/90">{ msg.Content }</div>
+// MessageRole defines the role of the message sender
+type MessageRole string
+
+const (
+	MessageRoleUser  MessageRole = "user"
+	MessageRoleAgent MessageRole = "agent"
+)
+
+// ChatMessage is a unified component for user and agent messages
+templ ChatMessage(msg types.ChatMessage, role MessageRole) {
+	if role == MessageRoleUser {
+		<div class="flex justify-end">
+			<div class="bg-slate-700 text-white rounded-2xl px-5 py-3 max-w-4xl shadow-lg hover:shadow-xl transition-shadow duration-200">
+				<div class="font-semibold text-sm mb-1 opacity-90 font-display">You</div>
+				<div class="font-sans text-sm text-white/90">{ msg.Content }</div>
+			</div>
 		</div>
-	</div>
+	} else {
+		<div class="w-full">
+			<div class="bg-white rounded-2xl px-5 py-3 w-full shadow-md border border-gray-100 hover:shadow-lg transition-shadow duration-200">
+				<div class="font-semibold text-sm text-primary mb-2 font-display">Pocket Statistician</div>
+				<div class="prose max-w-none leading-relaxed text-gray-700 font-sans">
+					@templ.Raw(msg.Rendered)
+				</div>
+			</div>
+		</div>
+	}
+}
+
+// Convenience functions for backward compatibility
+
+templ UserMessage(msg types.ChatMessage) {
+	@ChatMessage(msg, MessageRoleUser)
+}
+
+templ AgentMessage(msg types.ChatMessage) {
+	@ChatMessage(msg, MessageRoleAgent)
 }
 
 templ UserMessageWithLoader(msg types.ChatMessage) {
@@ -23,19 +53,6 @@ templ UserMessageWithLoader(msg types.ChatMessage) {
 					<div class="h-2 w-2 bg-blue-400 rounded-full animate-bounce"></div>
 					<span class="text-sm text-gray-500 ml-2">Thinking...</span>
 				</div>
-			</div>
-		</div>
-	</div>
-}
-
-templ AgentMessage(msg types.ChatMessage) {
-	<div class="w-full">
-		<div class="bg-white rounded-2xl px-5 py-3 w-full shadow-md border border-gray-100 hover:shadow-lg 
- 
- duration-200">
-			<div class="font-semibold text-sm text-primary mb-2 font-display">Pocket Statistician</div>
-			<div class="prose max-w-none leading-relaxed text-gray-700 font-sans">
-				@templ.Raw(msg.Rendered)
 			</div>
 		</div>
 	</div>

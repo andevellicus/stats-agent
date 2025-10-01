@@ -1,0 +1,141 @@
+package components
+
+import "path/filepath"
+
+// BlockType defines the type of collapsible block
+type BlockType string
+
+const (
+	BlockTypePython    BlockType = "python"
+	BlockTypeExecution BlockType = "execution"
+	BlockTypeImage     BlockType = "image"
+)
+
+// BlockConfig holds configuration for a collapsible block
+type BlockConfig struct {
+	Type           BlockType
+	Title          string
+	Content        string
+	InitiallyOpen  bool
+	ShowCopyButton bool
+	DarkBackground bool
+	Language       string // for syntax highlighting (e.g., "python")
+}
+
+// CollapsibleBlock is a unified component for code blocks, execution results, and images
+templ CollapsibleBlock(config BlockConfig) {
+	<div class="mt-4 rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+		<div class="flex items-center justify-between px-5 py-3 bg-gray-50 border-b border-gray-200">
+			<div class="flex items-center space-x-3">
+				@blockIcon(config.Type)
+				<span class="block-title text-xs font-bold text-gray-700 uppercase tracking-wider font-mono">{ config.Title }</span>
+			</div>
+			<div class="flex items-center space-x-4">
+				if config.Type == BlockTypeImage {
+					<a href={ config.Content } target="_blank" class="flex items-center space-x-2 text-xs font-medium text-gray-500 hover:text-indigo-600">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
+						<span>Open</span>
+					</a>
+				}
+				if config.ShowCopyButton {
+					<button class="copy-btn flex items-center space-x-2 text-xs font-medium text-gray-500 hover:text-indigo-600" onclick="copyCode(this)">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+						<span class="copy-text">Copy</span>
+					</button>
+				}
+				<div class="flex items-center space-x-2 cursor-pointer" onclick="toggleCodeBlock(this)">
+					<span class="action-text text-xs font-medium text-gray-500">
+						if config.InitiallyOpen {
+							Hide
+						} else {
+							Show
+						}
+					</span>
+					<svg
+						class={
+							"chevron-icon w-4 h-4 text-gray-500 transform transition-transform",
+							templ.KV("rotate-180", config.InitiallyOpen),
+						}
+						viewBox="0 0 20 20"
+						fill="currentColor"
+					>
+						<path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"></path>
+					</svg>
+				</div>
+			</div>
+		</div>
+		<div
+			class={
+				"code-content",
+				templ.KV("hidden", !config.InitiallyOpen),
+				templ.KV("px-5 py-4 bg-gray-900", config.DarkBackground),
+				templ.KV("p-4 bg-white", !config.DarkBackground && config.Type != BlockTypeImage),
+				templ.KV("p-4 bg-white flex justify-center", config.Type == BlockTypeImage),
+			}
+		>
+			if config.Type == BlockTypeImage {
+				<img src={ config.Content } class="max-w-full h-auto rounded-lg shadow-md border border-gray-200"/>
+			} else if config.DarkBackground {
+				<pre class="font-mono text-sm overflow-x-auto"><code class={ "language-" + config.Language + " text-white" }>{ config.Content }</code></pre>
+			} else {
+				<pre class="font-mono text-sm overflow-x-auto text-white"><code>{ config.Content }</code></pre>
+			}
+		</div>
+	</div>
+}
+
+// blockIcon returns the appropriate icon SVG for each block type
+templ blockIcon(blockType BlockType) {
+	switch blockType {
+		case BlockTypePython:
+			<svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path>
+			</svg>
+		case BlockTypeExecution:
+			<svg class="w-3 h-3 text-gray-600" width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 002-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+			</svg>
+		case BlockTypeImage:
+			<svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+			</svg>
+	}
+}
+
+// Convenience functions for backward compatibility
+
+templ PythonCodeBlock(content string) {
+	@CollapsibleBlock(BlockConfig{
+		Type:           BlockTypePython,
+		Title:          "Python",
+		Content:        content,
+		InitiallyOpen:  true,
+		ShowCopyButton: true,
+		DarkBackground: true,
+		Language:       "python",
+	})
+}
+
+templ ExecutionResultBlock(content string) {
+	@CollapsibleBlock(BlockConfig{
+		Type:           BlockTypeExecution,
+		Title:          "Execution Output",
+		Content:        content,
+		InitiallyOpen:  true,
+		ShowCopyButton: false,
+		DarkBackground: true,
+		Language:       "",
+	})
+}
+
+templ ImageBlock(src string) {
+	@CollapsibleBlock(BlockConfig{
+		Type:           BlockTypeImage,
+		Title:          filepath.Base(src),
+		Content:        src,
+		InitiallyOpen:  false,
+		ShowCopyButton: false,
+		DarkBackground: false,
+		Language:       "",
+	})
+}
