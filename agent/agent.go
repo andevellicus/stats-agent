@@ -189,7 +189,33 @@ func (a *Agent) GenerateTitle(ctx context.Context, content string) (string, erro
 		return "", fmt.Errorf("llm returned an empty title")
 	}
 
-	return strings.TrimSpace(title), nil
+	// Post-process: trim whitespace and strip surrounding quotes if present
+	cleaned := strings.TrimSpace(title)
+	cleaned = stripSurroundingQuotes(cleaned)
+	return cleaned, nil
+}
+
+// stripSurroundingQuotes removes a single pair of matching leading/trailing quotes.
+// Handles common ASCII and smart quote variants.
+func stripSurroundingQuotes(s string) string {
+	if len(s) < 2 {
+		return s
+	}
+	pairs := map[rune]rune{
+		'"':  '"',
+		'\'': '\'',
+		'“':  '”',
+		'”':  '”', // in case only ” is used on both ends
+		'‘':  '’',
+		'’':  '’', // in case only ’ is used on both ends
+	}
+	runes := []rune(s)
+	first := runes[0]
+	last := runes[len(runes)-1]
+	if expected, ok := pairs[first]; ok && last == expected {
+		return string(runes[1 : len(runes)-1])
+	}
+	return s
 }
 
 // handleEmptyResponse attempts to recover from empty LLM responses by summarizing context.

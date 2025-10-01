@@ -13,11 +13,17 @@ import (
 	"stats-agent/web/types"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
+
+type sessionRun struct {
+	cancel context.CancelFunc
+	token  string
+}
 
 type ChatService struct {
 	agent          *agent.Agent
@@ -26,6 +32,8 @@ type ChatService struct {
 	fileService    *FileService
 	messageService *MessageService
 	streamService  *StreamService
+	activeRunsMu   sync.Mutex
+	activeRuns     map[string]sessionRun
 }
 
 func NewChatService(
@@ -43,6 +51,48 @@ func NewChatService(
 		fileService:    fileService,
 		messageService: messageService,
 		streamService:  streamService,
+		activeRuns:     make(map[string]sessionRun),
+	}
+}
+
+func (cs *ChatService) registerRun(sessionID string, cancel context.CancelFunc) string {
+	token := uuid.New().String()
+	var previous context.CancelFunc
+
+	cs.activeRunsMu.Lock()
+	if existing, ok := cs.activeRuns[sessionID]; ok {
+		previous = existing.cancel
+	}
+	cs.activeRuns[sessionID] = sessionRun{cancel: cancel, token: token}
+	cs.activeRunsMu.Unlock()
+
+	if previous != nil {
+		cs.logger.Info("Cancelling previous active run for session", zap.String("session_id", sessionID))
+		previous()
+	}
+
+	return token
+}
+
+func (cs *ChatService) deregisterRun(sessionID, token string) {
+	cs.activeRunsMu.Lock()
+	defer cs.activeRunsMu.Unlock()
+	if existing, ok := cs.activeRuns[sessionID]; ok && existing.token == token {
+		delete(cs.activeRuns, sessionID)
+	}
+}
+
+func (cs *ChatService) StopSessionRun(sessionID string) {
+	cs.activeRunsMu.Lock()
+	run, ok := cs.activeRuns[sessionID]
+	if ok {
+		delete(cs.activeRuns, sessionID)
+	}
+	cs.activeRunsMu.Unlock()
+
+	if ok {
+		cs.logger.Info("Cancelling active run for session", zap.String("session_id", sessionID))
+		run.cancel()
 	}
 }
 
@@ -50,6 +100,17 @@ func NewChatService(
 // and running Python initialization code.
 func (cs *ChatService) InitializeSession(ctx context.Context, sessionID string) error {
 	cs.logger.Info("Initializing new session", zap.String("session_id", sessionID))
+
+	select {
+	case <-ctx.Done():
+		cs.logger.Debug("Request context cancelled during initialization; continuing in background",
+			zap.Error(ctx.Err()),
+			zap.String("session_id", sessionID))
+	default:
+	}
+
+	initCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
 
 	workspaceDir := filepath.Join("workspaces", sessionID)
 	files, err := os.ReadDir(workspaceDir)
@@ -64,7 +125,7 @@ func (cs *ChatService) InitializeSession(ctx context.Context, sessionID string) 
 		}
 	}
 
-	initResult, err := cs.agent.InitializeSession(ctx, sessionID, uploadedFiles)
+	initResult, err := cs.agent.InitializeSession(initCtx, sessionID, uploadedFiles)
 	if err != nil {
 		return fmt.Errorf("failed to initialize python session: %w", err)
 	}
@@ -77,7 +138,7 @@ func (cs *ChatService) InitializeSession(ctx context.Context, sessionID string) 
 		Rendered:  fmt.Sprintf("<pre><code>%s</code></pre>", initResult),
 	}
 
-	return cs.store.CreateMessage(ctx, initMessage)
+	return cs.store.CreateMessage(initCtx, initMessage)
 }
 
 func (cs *ChatService) GenerateAndSetTitle(ctx context.Context, sessionID uuid.UUID, firstMessage string, writeFunc func(StreamData) error) {
@@ -117,6 +178,7 @@ func (cs *ChatService) GenerateAndSetTitle(ctx context.Context, sessionID uuid.U
 
 // CleanupSession cleans up agent session bindings (e.g., Python executor bindings).
 func (cs *ChatService) CleanupSession(sessionID string) {
+	cs.StopSessionRun(sessionID)
 	cs.agent.CleanupSession(sessionID)
 }
 
@@ -132,26 +194,36 @@ func (cs *ChatService) StreamAgentResponse(
 ) {
 	agentMessageID := uuid.New().String()
 	var writeMu sync.Mutex
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	token := cs.registerRun(sessionID, cancelRun)
+	defer func() {
+		cancelRun()
+		cs.deregisterRun(sessionID, token)
+	}()
+	var sseActive atomic.Bool
+	sseActive.Store(true)
 
-	// Helper function to write SSE data
-	writeSSEData := func(data StreamData) error {
-		return cs.streamService.WriteSSEData(ctx, w, data, &writeMu)
+	// Helper function to write SSE data without aborting background work on failure.
+	safeWrite := func(data StreamData) {
+		if runCtx.Err() != nil {
+			return
+		}
+		if !sseActive.Load() {
+			return
+		}
+		if err := cs.streamService.WriteSSEData(ctx, w, data, &writeMu); err != nil {
+			if sseActive.CompareAndSwap(true, false) {
+				cs.logger.Info("SSE stream closed, continuing agent in background",
+					zap.Error(err),
+					zap.String("session_id", sessionID),
+					zap.String("user_message_id", userMessageID))
+			}
+		}
 	}
 
-	// Send initial SSE messages - critical for UI responsiveness
-	if err := writeSSEData(StreamData{Type: "remove_loader", Content: "loading-" + userMessageID}); err != nil {
-		cs.logger.Error("Failed to send remove loader message, aborting stream",
-			zap.Error(err),
-			zap.String("session_id", sessionID))
-		return
-	}
-
-	if err := writeSSEData(StreamData{Type: "create_container", Content: agentMessageID}); err != nil {
-		cs.logger.Error("Failed to send create container message, aborting stream",
-			zap.Error(err),
-			zap.String("session_id", sessionID))
-		return
-	}
+	// Send initial SSE messages - best effort for active clients
+	safeWrite(StreamData{Type: "remove_loader", Content: "loading-" + userMessageID})
+	safeWrite(StreamData{Type: "create_container", Content: agentMessageID})
 
 	// Create streaming orchestrator with proper error handling
 	orchestrator, err := NewStreamingOrchestrator(cs.logger)
@@ -159,7 +231,7 @@ func (cs *ChatService) StreamAgentResponse(
 		cs.logger.Error("Failed to create streaming orchestrator",
 			zap.Error(err),
 			zap.String("session_id", sessionID))
-		writeSSEData(StreamData{Type: "error", Content: "Failed to initialize streaming"})
+		safeWrite(StreamData{Type: "error", Content: "Failed to initialize streaming"})
 		return
 	}
 	defer orchestrator.StopCapture() // Always restore stdout
@@ -173,12 +245,15 @@ func (cs *ChatService) StreamAgentResponse(
 	// Agent execution goroutine
 	go func() {
 		defer close(agentDone)
-		cs.agent.Run(ctx, input, sessionID, history)
+		cs.agent.Run(runCtx, input, sessionID, history)
 		orchestrator.StopCapture() // Close pipe write end to signal stream processor
 	}()
 
 	// Stream processing (runs in current goroutine, blocks until agent done)
-	orchestrator.StreamAndWait(ctx, cs.streamService, writeSSEData)
+	orchestrator.StreamAndWait(runCtx, cs.streamService, func(data StreamData) error {
+		safeWrite(data)
+		return nil
+	})
 
 	// Wait for agent to finish
 	<-agentDone
@@ -205,16 +280,12 @@ func (cs *ChatService) StreamAgentResponse(
 				zap.Error(err),
 				zap.Int("file_count", len(newFilePaths)))
 		} else {
-			if err := writeSSEData(StreamData{Type: "file_append_html", Content: oobHTML}); err != nil {
-				cs.logger.Error("Failed to stream file HTML", zap.Error(err))
-			}
+			safeWrite(StreamData{Type: "file_append_html", Content: oobHTML})
 		}
 	}
 
 	// Send end signal - best effort
-	if err := writeSSEData(StreamData{Type: "end"}); err != nil {
-		cs.logger.Error("Failed to send end message", zap.Error(err))
-	}
+	safeWrite(StreamData{Type: "end"})
 
 	// Render file blocks for DB storage - non-critical
 	dbFilesHTML, err := cs.fileService.RenderFileBlocksForDB(backgroundCtx, newFilePaths)
