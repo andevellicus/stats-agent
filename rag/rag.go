@@ -1,19 +1,19 @@
 package rag
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"errors"
 	"fmt"
-	"net/http"
 	"regexp"
 	"sort"
 	"stats-agent/config"
+	"stats-agent/database"
+	"stats-agent/llmclient"
 	"stats-agent/web/types"
 	"strings"
-	"time"
-
-	"io"
 
 	"github.com/google/uuid"
 	"github.com/philippgille/chromem-go"
@@ -28,30 +28,20 @@ const (
 )
 
 type RAG struct {
-	cfg          *config.Config
-	db           *chromem.DB
-	messageStore map[string]string
-	embedder     chromem.EmbeddingFunc
-	logger       *zap.Logger
-}
-type LlamaCppEmbeddingRequest struct {
-	Content string `json:"content"`
+	cfg      *config.Config
+	db       *chromem.DB
+	store    *database.PostgresStore
+	embedder chromem.EmbeddingFunc
+	logger   *zap.Logger
 }
 
-type LlamaCppEmbeddingResponse []struct {
-	Embedding [][]float32 `json:"embedding"`
-}
-type LlamaCppChatRequest struct {
-	Messages []types.AgentMessage `json:"messages"`
-	Stream   bool                 `json:"stream"`
-}
-type LlamaCppChatResponse struct {
-	Choices []struct {
-		Message types.AgentMessage `json:"message"` // Corrected to use local type
-	} `json:"choices"`
-}
+// Embedding request/response types moved to llmclient
 
-func New(cfg *config.Config, logger *zap.Logger) (*RAG, error) {
+func New(cfg *config.Config, store *database.PostgresStore, logger *zap.Logger) (*RAG, error) {
+	if store == nil {
+		return nil, fmt.Errorf("postgres store is required for RAG persistence")
+	}
+
 	db := chromem.NewDB()
 	embedder := createLlamaCppEmbedding(cfg, logger)
 	_, err := db.GetOrCreateCollection("long-term-memory", nil, embedder)
@@ -59,16 +49,16 @@ func New(cfg *config.Config, logger *zap.Logger) (*RAG, error) {
 		return nil, fmt.Errorf("failed to create initial collection: %w", err)
 	}
 	rag := &RAG{
-		cfg:          cfg,
-		db:           db,
-		messageStore: make(map[string]string),
-		embedder:     embedder,
-		logger:       logger,
+		cfg:      cfg,
+		db:       db,
+		store:    store,
+		embedder: embedder,
+		logger:   logger,
 	}
 	return rag, nil
 }
 
-func (r *RAG) AddMessagesToStore(ctx context.Context, messages []types.AgentMessage) error {
+func (r *RAG) AddMessagesToStore(ctx context.Context, sessionID string, messages []types.AgentMessage) error {
 	collection := r.db.GetCollection("long-term-memory", r.embedder)
 	if collection == nil {
 		return fmt.Errorf("long-term memory collection not found")
@@ -83,24 +73,32 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, messages []types.AgentMess
 		}
 
 		message := messages[i]
+		documentUUID := uuid.New()
+		documentID := documentUUID.String()
+		metadata := map[string]string{
+			"document_id": documentID,
+		}
+		if sessionID != "" {
+			metadata["session_id"] = sessionID
+		}
+
 		var contentToEmbed string
-		metadata := make(map[string]string)
-		documentID := uuid.New().String()
+		var storedContent string
+		var summaryDoc *chromem.Document
 
 		if message.Role == "assistant" && i+1 < len(messages) && messages[i+1].Role == "tool" {
 			toolMessage := messages[i+1]
 			processedIndices[i] = true
 			processedIndices[i+1] = true
 			fullFactContent := fmt.Sprintf("%s\n<execution_results>\n%s\n</execution_results>", message.Content, toolMessage.Content)
-			r.messageStore[documentID] = fullFactContent
+			storedContent = fullFactContent
 			metadata["role"] = "fact"
-			metadata["document_id"] = documentID
+
 			re := regexp.MustCompile(`(?s)<python>(.*)</python>`)
 			matches := re.FindStringSubmatch(message.Content)
 			if len(matches) > 1 {
 				code := strings.TrimSpace(matches[1])
 				result := strings.TrimSpace(toolMessage.Content)
-				// Generate fact summary using LLM - non-critical, use fallback if fails
 				summary, err := r.generateFactSummary(ctx, code, result)
 				if err != nil {
 					r.logger.Warn("LLM fact summarization failed, using fallback summary",
@@ -115,41 +113,71 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, messages []types.AgentMess
 				contentToEmbed = "Fact: An assistant action with a tool execution occurred."
 			}
 		} else {
-			r.messageStore[documentID] = message.Content
-			contentToEmbed = message.Content
+			storedContent = message.Content
 			metadata["role"] = message.Role
-			metadata["document_id"] = documentID
+			contentToEmbed = message.Content
 
-			// Deduplication check - non-critical, continue if fails
 			if collection.Count() > 0 {
 				results, err := collection.Query(ctx, contentToEmbed, 1, nil, nil)
 				if err != nil {
 					r.logger.Warn("Deduplication query failed, proceeding to add document anyway", zap.Error(err))
-				} else if len(results) > 0 && results[0].Similarity > 0.98 {
-					r.logger.Debug("Skipping duplicate content", zap.Float32("similarity", results[0].Similarity))
+				} else if len(results) > 0 && results[0].Similarity > 0.98 && results[0].Metadata["role"] == message.Role {
+					r.logger.Debug("Skipping duplicate content", zap.Float32("similarity", results[0].Similarity), zap.String("role", message.Role))
 					continue
 				}
 			}
-			// Generate searchable summary for long messages - non-critical enhancement
-			if len(message.Content) > 500 {
-				summary, err := r.generateSearchableSummary(ctx, message.Content)
-				if err != nil {
-					r.logger.Warn("Failed to create searchable summary for long message, will use full content",
-						zap.Error(err),
-						zap.Int("content_length", len(message.Content)))
-				} else {
-					summaryDoc := chromem.Document{
-						ID:      uuid.New().String(),
-						Content: summary,
-						Metadata: map[string]string{
-							"role":        message.Role,
-							"document_id": documentID,
-							"type":        "summary",
-						},
-					}
-					documentsToEmbed = append(documentsToEmbed, summaryDoc)
+		}
+
+		if storedContent == "" {
+			storedContent = contentToEmbed
+		}
+
+		role := metadata["role"]
+		normalizedContent := normalizeForHash(storedContent)
+		contentHash := hashContent(normalizedContent)
+		if contentHash != "" {
+			metadata["content_hash"] = contentHash
+			existingDocID, err := r.store.FindRAGDocumentByHash(ctx, sessionID, role, contentHash)
+			if err != nil {
+				r.logger.Warn("Failed to check for existing RAG document",
+					zap.Error(err),
+					zap.String("session_id", sessionID))
+				continue
+			}
+			if existingDocID != uuid.Nil {
+				r.logger.Debug("Skipping duplicate RAG document",
+					zap.String("existing_document_id", existingDocID.String()),
+					zap.String("session_id", sessionID),
+					zap.String("role", role))
+				continue
+			}
+		}
+
+		if role != "fact" && len(message.Content) > 500 {
+			summary, err := r.generateSearchableSummary(ctx, message.Content)
+			if err != nil {
+				r.logger.Warn("Failed to create searchable summary for long message, will use full content",
+					zap.Error(err),
+					zap.Int("content_length", len(message.Content)))
+			} else {
+				summaryMetadata := map[string]string{
+					"role":        message.Role,
+					"document_id": documentID,
+					"type":        "summary",
+				}
+				if sessionID != "" {
+					summaryMetadata["session_id"] = sessionID
+				}
+				summaryDoc = &chromem.Document{
+					ID:       uuid.New().String(),
+					Content:  summary,
+					Metadata: summaryMetadata,
 				}
 			}
+		}
+
+		if err := r.store.UpsertRAGDocument(ctx, documentUUID, storedContent, metadata, contentHash); err != nil {
+			r.logger.Warn("Failed to persist RAG document", zap.Error(err), zap.String("document_id", documentID))
 		}
 
 		if len(contentToEmbed) > maxEmbeddingChars {
@@ -177,6 +205,10 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, messages []types.AgentMess
 				Metadata: metadata,
 			}
 			documentsToEmbed = append(documentsToEmbed, doc)
+		}
+
+		if summaryDoc != nil {
+			documentsToEmbed = append(documentsToEmbed, *summaryDoc)
 		}
 	}
 
@@ -241,6 +273,7 @@ func (r *RAG) Query(ctx context.Context, query string, nResults int) (string, er
 	contextBuilder.WriteString("<memory>\n")
 
 	processedDocIDs := make(map[string]bool)
+	docContents := make(map[string]string)
 	addedDocs := 0
 
 	for _, result := range results {
@@ -255,14 +288,28 @@ func (r *RAG) Query(ctx context.Context, query string, nResults int) (string, er
 		}
 
 		if !processedDocIDs[docID] {
-			fullContent, contentOk := r.messageStore[docID]
-			if !contentOk {
-				r.logger.Warn("Could not find full content for document id", zap.String("document_id", docID))
-				continue
+			content, cached := docContents[docID]
+			if !cached {
+				docUUID, err := uuid.Parse(docID)
+				if err != nil {
+					r.logger.Warn("Invalid document_id stored in metadata", zap.String("document_id", docID), zap.Error(err))
+					continue
+				}
+
+				content, err = r.store.GetRAGDocumentContent(ctx, docUUID)
+				if err != nil {
+					if errors.Is(err, sql.ErrNoRows) {
+						r.logger.Warn("No stored content found for document", zap.String("document_id", docID))
+					} else {
+						r.logger.Warn("Failed to load RAG document content", zap.String("document_id", docID), zap.Error(err))
+					}
+					continue
+				}
+				docContents[docID] = content
 			}
 
 			role := result.Metadata["role"]
-			contextBuilder.WriteString(fmt.Sprintf("- %s: %s\n", role, fullContent))
+			contextBuilder.WriteString(fmt.Sprintf("- %s: %s\n", role, content))
 
 			processedDocIDs[docID] = true
 			addedDocs++
@@ -305,7 +352,8 @@ func (r *RAG) SummarizeLongTermMemory(ctx context.Context, context string) (stri
 		{Role: "user", Content: userPrompt},
 	}
 
-	summary, err := getLLMResponse(ctx, r.cfg.SummarizationLLMHost, messages, r.cfg, r.logger)
+	// Non-streaming summarization
+	summary, err := llmclient.New(r.cfg, r.logger).Chat(ctx, r.cfg.SummarizationLLMHost, messages)
 	if err != nil {
 		return "", fmt.Errorf("llm chat call failed for memory summary: %w", err)
 	}
@@ -362,7 +410,7 @@ Output:
 		{Role: "user", Content: userPrompt},
 	}
 
-	summary, err := getLLMResponse(ctx, r.cfg.SummarizationLLMHost, messages, r.cfg, r.logger)
+	summary, err := llmclient.New(r.cfg, r.logger).Chat(ctx, r.cfg.SummarizationLLMHost, messages)
 	if err != nil {
 		return "", fmt.Errorf("llm chat call failed for summary: %w", err)
 	}
@@ -391,7 +439,7 @@ func (r *RAG) generateSearchableSummary(ctx context.Context, content string) (st
 		{Role: "user", Content: userPrompt},
 	}
 
-	summary, err := getLLMResponse(ctx, r.cfg.SummarizationLLMHost, messages, r.cfg, r.logger)
+	summary, err := llmclient.New(r.cfg, r.logger).Chat(ctx, r.cfg.SummarizationLLMHost, messages)
 	if err != nil {
 		return "", fmt.Errorf("llm chat call failed for searchable summary: %w", err)
 	}
@@ -401,6 +449,18 @@ func (r *RAG) generateSearchableSummary(ctx context.Context, content string) (st
 	}
 
 	return strings.TrimSpace(summary), nil
+}
+
+func normalizeForHash(content string) string {
+	return strings.TrimSpace(content)
+}
+
+func hashContent(content string) string {
+	if content == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
 }
 
 func compressMiddle(s string, maxLength int, preserveStart int, preserveEnd int) string {
@@ -414,118 +474,8 @@ func compressMiddle(s string, maxLength int, preserveStart int, preserveEnd int)
 }
 
 func createLlamaCppEmbedding(cfg *config.Config, logger *zap.Logger) chromem.EmbeddingFunc {
+	client := llmclient.New(cfg, logger)
 	return func(ctx context.Context, doc string) ([]float32, error) {
-		reqBody := LlamaCppEmbeddingRequest{
-			Content: doc,
-		}
-		jsonBody, err := json.Marshal(reqBody)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal embedding request body: %w", err)
-		}
-
-		url := fmt.Sprintf("%s/v1/embeddings", cfg.EmbeddingLLMHost)
-		var resp *http.Response
-
-		for i := 0; i < cfg.MaxRetries; i++ {
-			req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
-			if err != nil {
-				return nil, fmt.Errorf("failed to create embedding request: %w", err)
-			}
-			req.Header.Set("Content-Type", "application/json")
-
-			client := &http.Client{}
-			resp, err = client.Do(req)
-			if err != nil {
-				return nil, fmt.Errorf("failed to send embedding request: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusServiceUnavailable {
-				break
-			}
-
-			resp.Body.Close()
-			logger.Warn("Embedding model is loading, retrying", zap.Duration("retry_delay", cfg.RetryDelaySeconds))
-			time.Sleep(cfg.RetryDelaySeconds)
-		}
-		defer resp.Body.Close()
-
-		bodyBytes, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read embedding response body: %w", err)
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("llama.cpp server returned non-200 status for embedding: %s, body: %s", resp.Status, string(bodyBytes))
-		}
-
-		var embeddingResponse LlamaCppEmbeddingResponse
-		if err := json.Unmarshal(bodyBytes, &embeddingResponse); err != nil {
-			logger.Error("Failed to decode embedding response body", zap.String("raw_response", string(bodyBytes)), zap.Error(err))
-			return nil, fmt.Errorf("failed to decode embedding response body: %w", err)
-		}
-
-		if len(embeddingResponse) > 0 && len(embeddingResponse[0].Embedding) > 0 {
-			return embeddingResponse[0].Embedding[0], nil
-		}
-
-		return nil, fmt.Errorf("embedding response was empty")
+		return client.Embed(ctx, cfg.EmbeddingLLMHost, doc)
 	}
-}
-
-func getLLMResponse(ctx context.Context, llamaCppHost string, messages []types.AgentMessage, cfg *config.Config, logger *zap.Logger) (string, error) {
-	reqBody := LlamaCppChatRequest{
-		Messages: messages,
-		Stream:   false,
-	}
-
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal request body: %w", err)
-	}
-
-	url := fmt.Sprintf("%s/v1/chat/completions", llamaCppHost)
-	var resp *http.Response
-
-	for i := 0; i < cfg.MaxRetries; i++ {
-		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
-		if err != nil {
-			return "", fmt.Errorf("failed to create request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-
-		client := &http.Client{}
-		resp, err = client.Do(req)
-		if err != nil {
-			return "", fmt.Errorf("failed to send request to llama.cpp server: %w", err)
-		}
-
-		if resp.StatusCode != http.StatusServiceUnavailable {
-			break
-		}
-
-		resp.Body.Close()
-		logger.Warn("LLM is loading, retrying", zap.Duration("retry_delay", cfg.RetryDelaySeconds))
-		time.Sleep(cfg.RetryDelaySeconds)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read llm response body: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("llama.cpp server returned non-200 status: %s, body: %s", resp.Status, string(bodyBytes))
-	}
-
-	var chatResponse LlamaCppChatResponse
-	if err := json.Unmarshal(bodyBytes, &chatResponse); err != nil {
-		return "", fmt.Errorf("failed to decode response body: %w", err)
-	}
-
-	if len(chatResponse.Choices) > 0 {
-		return chatResponse.Choices[0].Message.Content, nil
-	}
-
-	return "", fmt.Errorf("no response choices from llama.cpp server")
 }

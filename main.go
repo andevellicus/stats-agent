@@ -54,7 +54,7 @@ func main() {
 	defer pythonTool.Close()
 
 	// Pass the specific hosts to the RAG service
-	rag, err := rag.New(cfg, logger)
+	rag, err := rag.New(cfg, store, logger)
 	if err != nil {
 		logger.Fatal("Failed to initialize RAG", zap.Error(err))
 	}

@@ -60,6 +60,14 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
             metadata JSONB DEFAULT '{}'::jsonb
         )`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_session_created_at ON messages(session_id, created_at)`,
+		`CREATE TABLE IF NOT EXISTS rag_documents (
+            id UUID PRIMARY KEY,
+            document_id UUID NOT NULL,
+            content TEXT NOT NULL,
+            metadata JSONB DEFAULT '{}'::jsonb,
+            content_hash TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )`,
 	}
 
 	for _, stmt := range stmts {
@@ -69,10 +77,25 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 	}
 
 	// Attempt to drop NOT NULL constraint (may already be altered in existing databases)
-	alterStmt := `ALTER TABLE sessions ALTER COLUMN user_id DROP NOT NULL;`
-	if _, err := s.DB.ExecContext(ctx, alterStmt); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE sessions ALTER COLUMN user_id DROP NOT NULL;`); err != nil {
 		// Ignore error - constraint may already be dropped or not exist
 		// This is a schema migration compatibility step, not a critical operation
+	}
+
+	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS content_hash TEXT`); err != nil {
+		return fmt.Errorf("failed to add content_hash column: %w", err)
+	}
+
+	indexStmts := []string{
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_documents_document_id ON rag_documents(document_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_rag_documents_content_hash ON rag_documents(content_hash)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_documents_session_role_hash ON rag_documents (content_hash, COALESCE(metadata ->> 'session_id', ''), COALESCE(metadata ->> 'role', '')) WHERE content_hash IS NOT NULL`,
+	}
+
+	for _, stmt := range indexStmts {
+		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("failed to ensure rag_documents index: %w", err)
+		}
 	}
 
 	return nil

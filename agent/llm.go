@@ -1,39 +1,13 @@
 package agent
 
 import (
-	"bufio"
-	"bytes"
-	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"net"
-	"net/http"
-	"stats-agent/config"
-	"stats-agent/web/types"
-	"strings"
-	"time"
+    "context"
+    "stats-agent/config"
+    "stats-agent/llmclient"
+    "stats-agent/web/types"
 
-	"go.uber.org/zap"
+    "go.uber.org/zap"
 )
-
-// Define a specific error type for context window issues
-var ErrContextWindowExceeded = errors.New("context window exceeded")
-
-type LlamaCppStreamChoice struct {
-	Delta struct {
-		Content string `json:"content"`
-	} `json:"delta"`
-	Index int `json:"index"`
-}
-type LlamaCppStreamResponse struct {
-	Choices []LlamaCppStreamChoice `json:"choices"`
-}
-type LlamaCppChatRequest struct {
-	Messages []types.AgentMessage `json:"messages"` // Use local struct
-	Stream   bool                 `json:"stream"`
-}
 
 func buildSystemPrompt() string {
 	return `You are an expert statistical data analyst using Python. Rigor is mandatory; do not speculate or hallucinate.
@@ -127,115 +101,10 @@ If assumptions fail and no valid alternative exists, stop and explain why.
 }
 
 func getLLMResponse(ctx context.Context, llamaCppHost string, messages []types.AgentMessage, cfg *config.Config, logger *zap.Logger) (<-chan string, error) {
-	systemMessage := types.AgentMessage{
-		Role:    "system",
-		Content: buildSystemPrompt(),
-	}
-	chatMessages := append([]types.AgentMessage{systemMessage}, messages...)
+    // Prepend system message enforcing the analysis protocol
+    systemMessage := types.AgentMessage{Role: "system", Content: buildSystemPrompt()}
+    chatMessages := append([]types.AgentMessage{systemMessage}, messages...)
 
-	reqBody := LlamaCppChatRequest{
-		Messages: chatMessages,
-		Stream:   true,
-	}
-
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request body: %w", err)
-	}
-
-	url := fmt.Sprintf("%s/v1/chat/completions", llamaCppHost)
-	responseChan := make(chan string)
-
-	go func() {
-		defer close(responseChan)
-
-		var resp *http.Response
-		var err error
-
-		// This retry loop is for handling "model is loading" scenarios.
-		for i := 0; i < cfg.MaxRetries; i++ {
-			req, reqErr := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
-			if reqErr != nil {
-				logger.Error("Error creating request", zap.Error(reqErr))
-				// Propagate critical errors through the channel.
-				responseChan <- fmt.Sprintf("ERROR: Could not create request: %v", reqErr)
-				return
-			}
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("Accept", "text/event-stream")
-
-			client := &http.Client{} // No need for long timeout in streaming
-			resp, err = client.Do(req)
-			if err != nil {
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					logger.Warn("Request timed out")
-				} else {
-					logger.Error("Error sending request", zap.Error(err))
-				}
-				// Propagate network errors through the channel.
-				responseChan <- fmt.Sprintf("ERROR: Network request failed: %v", err)
-				return
-			}
-
-			if resp.StatusCode == http.StatusOK {
-				break // Success, exit retry loop
-			}
-
-			// If model is loading, wait and retry.
-			if resp.StatusCode == http.StatusServiceUnavailable {
-				resp.Body.Close()
-				logger.Warn("LLM service unavailable, retrying...", zap.Int("attempt", i+1))
-				time.Sleep(cfg.RetryDelaySeconds)
-				continue
-			}
-
-			// For any other error, break the loop and handle it below.
-			break
-		}
-
-		if resp == nil {
-			logger.Error("No response received after retries")
-			responseChan <- "ERROR: No response from LLM server after retries."
-			return
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			bodyString := string(bodyBytes)
-			// Check for the context error and propagate it via the channel.
-			if strings.Contains(bodyString, "exceeds the available context size") {
-				logger.Error("Context window exceeded", zap.String("response", bodyString))
-				responseChan <- fmt.Sprintf("ERROR: %s", ErrContextWindowExceeded.Error())
-			} else {
-				logger.Error("LLM server returned non-200 status", zap.String("status", resp.Status), zap.String("response", bodyString))
-				responseChan <- fmt.Sprintf("ERROR: LLM server returned status %s", resp.Status)
-			}
-			return
-		}
-
-		scanner := bufio.NewScanner(resp.Body)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.HasPrefix(line, "data: ") {
-				data := strings.TrimPrefix(line, "data: ")
-				if data == "[DONE]" {
-					break
-				}
-
-				var streamResp LlamaCppStreamResponse
-				if err := json.Unmarshal([]byte(data), &streamResp); err == nil {
-					if len(streamResp.Choices) > 0 {
-						responseChan <- streamResp.Choices[0].Delta.Content
-					}
-				}
-			}
-		}
-
-		if err := scanner.Err(); err != nil {
-			logger.Error("Error reading stream", zap.Error(err))
-		}
-	}()
-
-	return responseChan, nil
+    client := llmclient.New(cfg, logger)
+    return client.ChatStream(ctx, llamaCppHost, chatMessages)
 }

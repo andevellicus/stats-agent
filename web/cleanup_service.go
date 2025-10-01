@@ -82,6 +82,16 @@ func (cs *CleanupService) DeleteSessionAndWorkspace(ctx context.Context, session
 		return fmt.Errorf("failed to get session info: %w", err)
 	}
 
+	if deleted, err := cs.store.DeleteRAGDocumentsBySession(ctx, sessionID); err != nil {
+		cs.logger.Warn("Failed to delete RAG documents for session",
+			zap.Error(err),
+			zap.String("session_id", sessionIDStr))
+	} else if deleted > 0 {
+		cs.logger.Debug("Deleted RAG documents for session",
+			zap.String("session_id", sessionIDStr),
+			zap.Int64("documents_deleted", deleted))
+	}
+
 	// Delete from database (this cascades to messages)
 	if err := cs.store.DeleteSession(ctx, sessionID); err != nil {
 		return fmt.Errorf("failed to delete session from database: %w", err)

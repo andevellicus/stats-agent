@@ -111,7 +111,7 @@ func (m *MemoryManager) IsOverThreshold(ctx context.Context, history []types.Age
 
 // ManageHistory checks if history exceeds threshold and archives older messages to RAG.
 // It operates on a pointer to the history slice and modifies it in place.
-func (m *MemoryManager) ManageHistory(ctx context.Context, history *[]types.AgentMessage) error {
+func (m *MemoryManager) ManageHistory(ctx context.Context, sessionID string, history *[]types.AgentMessage) error {
 	totalTokens, err := m.CalculateHistorySize(ctx, *history)
 	if err != nil {
 		return fmt.Errorf("failed to calculate history size: %w", err)
@@ -123,7 +123,7 @@ func (m *MemoryManager) ManageHistory(ctx context.Context, history *[]types.Agen
 		return nil // No action needed
 	}
 
-	fmt.Printf("<agent_status>Archiving older messages....</agent_status>")
+	fmt.Printf("<agent_status>Archiving messages</agent_status>")
 
 	// Cut history in half
 	cutoff := len(*history) / 2
@@ -147,7 +147,7 @@ func (m *MemoryManager) ManageHistory(ctx context.Context, history *[]types.Agen
 	messagesToStore := (*history)[:cutoff]
 
 	// Archive to RAG - non-critical, log warning if fails but continue
-	if err := m.rag.AddMessagesToStore(ctx, messagesToStore); err != nil {
+	if err := m.rag.AddMessagesToStore(ctx, sessionID, messagesToStore); err != nil {
 		m.logger.Warn("Failed to archive messages to RAG, they will be lost from long-term memory",
 			zap.Error(err),
 			zap.Int("messages_count", len(messagesToStore)))

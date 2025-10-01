@@ -91,7 +91,7 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 	// 3. Main conversation loop
 	for turn := 0; turn < a.cfg.MaxTurns; turn++ {
 		// Manage memory before each turn - non-critical, log warning if fails
-		if err := a.memoryManager.ManageHistory(ctx, &currentHistory); err != nil {
+		if err := a.memoryManager.ManageHistory(ctx, sessionID, &currentHistory); err != nil {
 			a.logger.Warn("Failed to manage memory, continuing with current history",
 				zap.Error(err),
 				zap.Int("turn", turn),

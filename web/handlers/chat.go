@@ -71,6 +71,16 @@ func (h *ChatHandler) DeleteSession(c *gin.Context) {
 		return
 	}
 
+	if deleted, err := h.store.DeleteRAGDocumentsBySession(c.Request.Context(), sessionID); err != nil {
+		h.logger.Warn("Failed to delete RAG documents for session",
+			zap.Error(err),
+			zap.String("session_id", sessionIDStr))
+	} else if deleted > 0 {
+		h.logger.Debug("Deleted RAG documents for session",
+			zap.String("session_id", sessionIDStr),
+			zap.Int64("documents_deleted", deleted))
+	}
+
 	// Delete from database (this cascades to messages)
 	if err := h.store.DeleteSession(c.Request.Context(), sessionID); err != nil {
 		h.logger.Error("Failed to delete session from database", zap.Error(err), zap.String("session_id", sessionIDStr))
