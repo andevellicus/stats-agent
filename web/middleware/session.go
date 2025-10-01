@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
 
 const SessionCookieName = "stats_agent_session"
@@ -15,6 +16,10 @@ const CookieMaxAge = 30 * 24 * 60 * 60 // 30 days
 
 func SessionMiddleware(store *database.PostgresStore) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Get logger from context (set by server)
+		logger, _ := c.Get("logger")
+		zapLogger, _ := logger.(*zap.Logger)
+
 		// First, handle user authentication
 		userCookie, err := c.Cookie(UserCookieName)
 		var userID uuid.UUID
@@ -28,6 +33,12 @@ func SessionMiddleware(store *database.PostgresStore) gin.HandlerFunc {
 		} else {
 			parsedUserID, parseErr := uuid.Parse(userCookie)
 			if parseErr != nil {
+				// Invalid UUID format in cookie - treat as corrupted and create new user
+				if zapLogger != nil {
+					zapLogger.Warn("Corrupted user UUID in cookie, creating new user",
+						zap.String("cookie_value", userCookie),
+						zap.Error(parseErr))
+				}
 				createNewUser = true
 			} else {
 				// Verify the user exists in the database
@@ -69,6 +80,12 @@ func SessionMiddleware(store *database.PostgresStore) gin.HandlerFunc {
 		} else {
 			parsedID, parseErr := uuid.Parse(sessionCookie)
 			if parseErr != nil {
+				// Invalid UUID format in cookie - treat as corrupted and create new session
+				if zapLogger != nil {
+					zapLogger.Warn("Corrupted session UUID in cookie, creating new session",
+						zap.String("cookie_value", sessionCookie),
+						zap.Error(parseErr))
+				}
 				createNewSession = true
 			} else {
 				// Check if the session from the cookie exists in the database

@@ -28,6 +28,9 @@ type Config struct {
 	CleanupEnabled          bool          `mapstructure:"CLEANUP_ENABLED"`
 	CleanupInterval         time.Duration `mapstructure:"CLEANUP_INTERVAL"`
 	SessionRetentionAge     time.Duration `mapstructure:"SESSION_RETENTION_AGE"`
+	RateLimitMessagesPerMin int           `mapstructure:"RATE_LIMIT_MESSAGES_PER_MIN"`
+	RateLimitFilesPerHour   int           `mapstructure:"RATE_LIMIT_FILES_PER_HOUR"`
+	RateLimitBurstSize      int           `mapstructure:"RATE_LIMIT_BURST_SIZE"`
 }
 
 func Load(logger *zap.Logger) *Config {
@@ -53,6 +56,9 @@ func Load(logger *zap.Logger) *Config {
 	viper.SetDefault("CLEANUP_ENABLED", true)
 	viper.SetDefault("CLEANUP_INTERVAL", 24)
 	viper.SetDefault("SESSION_RETENTION_AGE", 168)
+	viper.SetDefault("RATE_LIMIT_MESSAGES_PER_MIN", 20)
+	viper.SetDefault("RATE_LIMIT_FILES_PER_HOUR", 10)
+	viper.SetDefault("RATE_LIMIT_BURST_SIZE", 5)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if logger != nil {

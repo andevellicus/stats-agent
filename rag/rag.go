@@ -82,24 +82,24 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, messages []types.AgentMess
 			continue
 		}
 
-		msg := messages[i]
+		message := messages[i]
 		var contentToEmbed string
 		metadata := make(map[string]string)
 		documentID := uuid.New().String()
 
-		if msg.Role == "assistant" && i+1 < len(messages) && messages[i+1].Role == "tool" {
-			toolMsg := messages[i+1]
+		if message.Role == "assistant" && i+1 < len(messages) && messages[i+1].Role == "tool" {
+			toolMessage := messages[i+1]
 			processedIndices[i] = true
 			processedIndices[i+1] = true
-			fullFactContent := fmt.Sprintf("%s\n<execution_results>\n%s\n</execution_results>", msg.Content, toolMsg.Content)
+			fullFactContent := fmt.Sprintf("%s\n<execution_results>\n%s\n</execution_results>", message.Content, toolMessage.Content)
 			r.messageStore[documentID] = fullFactContent
 			metadata["role"] = "fact"
 			metadata["document_id"] = documentID
 			re := regexp.MustCompile(`(?s)<python>(.*)</python>`)
-			matches := re.FindStringSubmatch(msg.Content)
+			matches := re.FindStringSubmatch(message.Content)
 			if len(matches) > 1 {
 				code := strings.TrimSpace(matches[1])
-				result := strings.TrimSpace(toolMsg.Content)
+				result := strings.TrimSpace(toolMessage.Content)
 				// Generate fact summary using LLM - non-critical, use fallback if fails
 				summary, err := r.generateFactSummary(ctx, code, result)
 				if err != nil {
@@ -115,9 +115,9 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, messages []types.AgentMess
 				contentToEmbed = "Fact: An assistant action with a tool execution occurred."
 			}
 		} else {
-			r.messageStore[documentID] = msg.Content
-			contentToEmbed = msg.Content
-			metadata["role"] = msg.Role
+			r.messageStore[documentID] = message.Content
+			contentToEmbed = message.Content
+			metadata["role"] = message.Role
 			metadata["document_id"] = documentID
 
 			// Deduplication check - non-critical, continue if fails
@@ -131,18 +131,18 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, messages []types.AgentMess
 				}
 			}
 			// Generate searchable summary for long messages - non-critical enhancement
-			if len(msg.Content) > 500 {
-				summary, err := r.generateSearchableSummary(ctx, msg.Content)
+			if len(message.Content) > 500 {
+				summary, err := r.generateSearchableSummary(ctx, message.Content)
 				if err != nil {
 					r.logger.Warn("Failed to create searchable summary for long message, will use full content",
 						zap.Error(err),
-						zap.Int("content_length", len(msg.Content)))
+						zap.Int("content_length", len(message.Content)))
 				} else {
 					summaryDoc := chromem.Document{
 						ID:      uuid.New().String(),
 						Content: summary,
 						Metadata: map[string]string{
-							"role":        msg.Role,
+							"role":        message.Role,
 							"document_id": documentID,
 							"type":        "summary",
 						},

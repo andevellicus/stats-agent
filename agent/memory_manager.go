@@ -85,12 +85,12 @@ func (m *MemoryManager) CountTokens(ctx context.Context, text string) (int, erro
 // CalculateHistorySize returns the total token count for the entire message history.
 func (m *MemoryManager) CalculateHistorySize(ctx context.Context, history []types.AgentMessage) (int, error) {
 	var totalTokens int
-	for _, msg := range history {
-		tokens, err := m.CountTokens(ctx, msg.Content)
+	for _, message := range history {
+		tokens, err := m.CountTokens(ctx, message.Content)
 		if err != nil {
 			m.logger.Warn("Could not count tokens for a message, falling back to character count", zap.Error(err))
 			// Fallback: rough estimate of 4 chars per token
-			totalTokens += len(msg.Content) / 4
+			totalTokens += len(message.Content) / 4
 		} else {
 			totalTokens += tokens
 		}

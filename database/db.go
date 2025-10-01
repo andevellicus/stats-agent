@@ -127,9 +127,9 @@ func (s *PostgresStore) GetSessionByID(ctx context.Context, sessionID uuid.UUID)
 	`
 	row := s.DB.QueryRowContext(ctx, query, sessionID)
 
-	var sess types.Session
+	var session types.Session
 	var userID sql.NullString
-	if err := row.Scan(&sess.ID, &userID, &sess.CreatedAt, &sess.LastActive, &sess.WorkspacePath, &sess.Title, &sess.IsActive); err != nil {
+	if err := row.Scan(&session.ID, &userID, &session.CreatedAt, &session.LastActive, &session.WorkspacePath, &session.Title, &session.IsActive); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return types.Session{}, fmt.Errorf("session not found: %w", err)
 		}
@@ -138,11 +138,14 @@ func (s *PostgresStore) GetSessionByID(ctx context.Context, sessionID uuid.UUID)
 
 	if userID.Valid {
 		parsedUUID, err := uuid.Parse(userID.String)
-		if err == nil {
-			sess.UserID = &parsedUUID
+		if err != nil {
+			// UUID parsing failed - this indicates corrupted data in database
+			// Log the error but continue with nil UserID rather than failing the entire query
+			return types.Session{}, fmt.Errorf("failed to parse user ID from database: %w", err)
 		}
+		session.UserID = &parsedUUID
 	}
-	return sess, nil
+	return session, nil
 }
 
 func (s *PostgresStore) GetSessions(ctx context.Context, userID *uuid.UUID) ([]types.Session, error) {
@@ -175,18 +178,20 @@ func (s *PostgresStore) GetSessions(ctx context.Context, userID *uuid.UUID) ([]t
 
 	var sessions []types.Session
 	for rows.Next() {
-		var sess types.Session
+		var session types.Session
 		var userID sql.NullString
-		if err := rows.Scan(&sess.ID, &userID, &sess.CreatedAt, &sess.LastActive, &sess.WorkspacePath, &sess.Title, &sess.IsActive); err != nil {
+		if err := rows.Scan(&session.ID, &userID, &session.CreatedAt, &session.LastActive, &session.WorkspacePath, &session.Title, &session.IsActive); err != nil {
 			return nil, fmt.Errorf("failed to scan session row: %w", err)
 		}
 		if userID.Valid {
 			parsedUUID, err := uuid.Parse(userID.String)
-			if err == nil {
-				sess.UserID = &parsedUUID
+			if err != nil {
+				// UUID parsing failed - this indicates corrupted data in database
+				return nil, fmt.Errorf("failed to parse user ID from session %s: %w", session.ID, err)
 			}
+			session.UserID = &parsedUUID
 		}
-		sessions = append(sessions, sess)
+		sessions = append(sessions, session)
 	}
 
 	if err := rows.Err(); err != nil {

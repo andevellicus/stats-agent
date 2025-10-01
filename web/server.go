@@ -64,11 +64,20 @@ func (s *Server) setupRoutes() {
 	streamService := services.NewStreamService(s.logger)
 	chatService := services.NewChatService(s.agent, s.store, s.logger, fileService, messageService, streamService)
 
+	// Initialize rate limiter
+	rateLimiterConfig := middleware.RateLimiterConfig{
+		MessagesPerMinute: s.config.RateLimitMessagesPerMin,
+		FilesPerHour:      s.config.RateLimitFilesPerHour,
+		BurstSize:         s.config.RateLimitBurstSize,
+		CleanupInterval:   5 * time.Minute,
+	}
+	rateLimiter := middleware.NewSessionRateLimiter(rateLimiterConfig, s.logger)
+
 	// Initialize handlers with services
 	chatHandler := handlers.NewChatHandler(chatService, s.logger, s.store)
 
 	s.router.GET("/", chatHandler.Index)
-	s.router.POST("/chat", chatHandler.SendMessage)
+	s.router.POST("/chat", middleware.RateLimitMiddleware(rateLimiter, "message"), chatHandler.SendMessage)
 	s.router.GET("/chat/new", chatHandler.NewChat)
 	s.router.GET("/chat/stream", chatHandler.StreamResponse)
 	s.router.GET("/chat/:sessionID", chatHandler.LoadSession)

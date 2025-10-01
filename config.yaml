@@ -21,3 +21,8 @@ RETRY_DELAY_SECONDS: 2
 CLEANUP_ENABLED: true
 CLEANUP_INTERVAL: 24        # Run cleanup every 24 hours
 SESSION_RETENTION_AGE: 168  # Delete sessions older than 7 days (168 hours)
+
+# --- Rate Limiting Configuration ---
+RATE_LIMIT_MESSAGES_PER_MIN: 20  # Max messages per session per minute
+RATE_LIMIT_FILES_PER_HOUR: 10    # Max file uploads per session per hour
+RATE_LIMIT_BURST_SIZE: 5         # Allow burst of N requests

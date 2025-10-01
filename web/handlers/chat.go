@@ -51,7 +51,7 @@ func (h *ChatHandler) DeleteSession(c *gin.Context) {
 	sessionIDStr := c.Param("sessionID")
 	sessionID, err := uuid.Parse(sessionIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid session ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid session ID"})
 		return
 	}
 
@@ -150,7 +150,7 @@ func (h *ChatHandler) Index(c *gin.Context) {
 func (h *ChatHandler) LoadSession(c *gin.Context) {
 	sessionID, err := uuid.Parse(c.Param("sessionID"))
 	if err != nil {
-		c.String(http.StatusBadRequest, "Invalid session ID")
+		c.String(http.StatusBadRequest, "invalid session ID")
 		return
 	}
 
@@ -310,7 +310,7 @@ func (h *ChatHandler) UploadFile(c *gin.Context) {
 
 	sessionID, err := uuid.Parse(sessionIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid session ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid session ID"})
 		return
 	}
 
@@ -359,7 +359,7 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 	}
 	sessionID, err := uuid.Parse(sessionIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Session ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid session ID"})
 		return
 	}
 
@@ -426,10 +426,10 @@ func groupMessages(messages []types.ChatMessage) []types.MessageGroup {
 	var groups []types.MessageGroup
 	i := 0
 	for i < len(messages) {
-		msg := messages[i]
-		switch msg.Role {
+		message := messages[i]
+		switch message.Role {
 		case "user":
-			groups = append(groups, types.MessageGroup{PrimaryRole: "user", Messages: []types.ChatMessage{msg}})
+			groups = append(groups, types.MessageGroup{PrimaryRole: "user", Messages: []types.ChatMessage{message}})
 			i++
 		case "system":
 			i++ // Skip system messages
@@ -451,11 +451,11 @@ func groupMessages(messages []types.ChatMessage) []types.MessageGroup {
 
 func toAgentMessages(messages []types.ChatMessage) []types.AgentMessage {
 	var agentMessages []types.AgentMessage
-	for _, msg := range messages {
-		if msg.Role == "user" || msg.Role == "assistant" || msg.Role == "tool" {
+	for _, message := range messages {
+		if message.Role == "user" || message.Role == "assistant" || message.Role == "tool" {
 			agentMessages = append(agentMessages, types.AgentMessage{
-				Role:    msg.Role,
-				Content: msg.Content,
+				Role:    message.Role,
+				Content: message.Content,
 			})
 		}
 	}

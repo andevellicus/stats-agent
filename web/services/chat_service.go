@@ -1,11 +1,8 @@
 package services
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -118,92 +115,85 @@ func (cs *ChatService) StreamAgentResponse(
 		return
 	}
 
-	// Capture agent's stdout for streaming
-	originalStdout := os.Stdout
-	r, pipeWriter, _ := os.Pipe()
-	os.Stdout = pipeWriter
-	log.SetOutput(pipeWriter)
+	// Create streaming orchestrator with proper error handling
+	orchestrator, err := NewStreamingOrchestrator(cs.logger)
+	if err != nil {
+		cs.logger.Error("Failed to create streaming orchestrator",
+			zap.Error(err),
+			zap.String("session_id", sessionID))
+		writeSSEData(StreamData{Type: "error", Content: "Failed to initialize streaming"})
+		return
+	}
+	defer orchestrator.StopCapture() // Always restore stdout
 
-	var agentResponseForDB bytes.Buffer
-	teeReader := io.TeeReader(r, &agentResponseForDB)
+	// Start capturing stdout
+	orchestrator.StartCapture()
 
+	// Reduced goroutines: Run agent + stream processor in parallel
 	agentDone := make(chan struct{})
-	streamDone := make(chan struct{})
-
-	// Stream processing goroutine
-	go func() {
-		defer close(streamDone)
-		cs.streamService.ProcessStreamByWord(ctx, teeReader, writeSSEData)
-	}()
 
 	// Agent execution goroutine
 	go func() {
-		defer func() {
-			os.Stdout = originalStdout
-			log.SetOutput(originalStdout)
-			pipeWriter.Close()
-			close(agentDone)
-		}()
+		defer close(agentDone)
 		cs.agent.Run(ctx, input, sessionID, history)
+		orchestrator.StopCapture() // Close pipe write end to signal stream processor
 	}()
 
-	// Wait for completion and handle post-processing
-	select {
-	case <-ctx.Done():
-		cs.logger.Info("Context cancelled, closing SSE connection")
-	case <-agentDone:
-		<-streamDone
+	// Stream processing (runs in current goroutine, blocks until agent done)
+	orchestrator.StreamAndWait(ctx, cs.streamService, writeSSEData)
 
-		// Use background context for DB operations after request context might be cancelled
-		backgroundCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+	// Wait for agent to finish
+	<-agentDone
 
-		// Discover and mark new files - non-critical, continue if fails
-		newFilePaths, err := cs.fileService.GetAndMarkNewFiles(backgroundCtx, sessionID)
+	// Use background context for DB operations after request context might be cancelled
+	backgroundCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Discover and mark new files - non-critical, continue if fails
+	newFilePaths, err := cs.fileService.GetAndMarkNewFiles(backgroundCtx, sessionID)
+	if err != nil {
+		cs.logger.Error("Failed to get and mark new file paths",
+			zap.Error(err),
+			zap.String("session_id", sessionID))
+		// Continue - files won't be displayed this time but can be discovered later
+	}
+
+	// Stream new files as OOB updates - non-critical
+	if len(newFilePaths) > 0 {
+		fileContainerID := fmt.Sprintf("file-container-agent-msg-%s", agentMessageID)
+		oobHTML, err := cs.fileService.RenderFileOOBWrapper(backgroundCtx, fileContainerID, newFilePaths)
 		if err != nil {
-			cs.logger.Error("Failed to get and mark new file paths",
-				zap.Error(err),
-				zap.String("session_id", sessionID))
-			// Continue - files won't be displayed this time but can be discovered later
-		}
-
-		// Stream new files as OOB updates - non-critical
-		if len(newFilePaths) > 0 {
-			fileContainerID := fmt.Sprintf("file-container-agent-msg-%s", agentMessageID)
-			oobHTML, err := cs.fileService.RenderFileOOBWrapper(backgroundCtx, fileContainerID, newFilePaths)
-			if err != nil {
-				cs.logger.Error("Failed to render file OOB wrapper",
-					zap.Error(err),
-					zap.Int("file_count", len(newFilePaths)))
-			} else {
-				if err := writeSSEData(StreamData{Type: "file_append_html", Content: oobHTML}); err != nil {
-					cs.logger.Error("Failed to stream file HTML", zap.Error(err))
-				}
-			}
-		}
-
-		// Send end signal - best effort
-		if err := writeSSEData(StreamData{Type: "end"}); err != nil {
-			cs.logger.Error("Failed to send end message", zap.Error(err))
-		}
-
-		// Render file blocks for DB storage - non-critical
-		dbFilesHTML, err := cs.fileService.RenderFileBlocksForDB(backgroundCtx, newFilePaths)
-		if err != nil {
-			cs.logger.Error("Failed to render file blocks for DB",
+			cs.logger.Error("Failed to render file OOB wrapper",
 				zap.Error(err),
 				zap.Int("file_count", len(newFilePaths)))
-			// Continue without file HTML in DB
-			dbFilesHTML = ""
+		} else {
+			if err := writeSSEData(StreamData{Type: "file_append_html", Content: oobHTML}); err != nil {
+				cs.logger.Error("Failed to stream file HTML", zap.Error(err))
+			}
 		}
+	}
 
-		// Parse and save messages to database - critical for preserving conversation
-		rawAgentResponse := agentResponseForDB.String()
-		if err := cs.messageService.ParseAndSaveAgentResponse(backgroundCtx, rawAgentResponse, sessionID, dbFilesHTML); err != nil {
-			cs.logger.Error("Failed to parse and save agent response - CONVERSATION DATA MAY BE LOST",
-				zap.Error(err),
-				zap.String("session_id", sessionID),
-				zap.Int("response_length", len(rawAgentResponse)))
-		}
+	// Send end signal - best effort
+	if err := writeSSEData(StreamData{Type: "end"}); err != nil {
+		cs.logger.Error("Failed to send end message", zap.Error(err))
+	}
+
+	// Render file blocks for DB storage - non-critical
+	dbFilesHTML, err := cs.fileService.RenderFileBlocksForDB(backgroundCtx, newFilePaths)
+	if err != nil {
+		cs.logger.Error("Failed to render file blocks for DB",
+			zap.Error(err),
+			zap.Int("file_count", len(newFilePaths)))
+		// Continue without file HTML in DB
+		dbFilesHTML = ""
+	}
+
+	// Parse and save messages to database - critical for preserving conversation
+	rawAgentResponse := orchestrator.GetCapturedContent()
+	if err := cs.messageService.ParseAndSaveAgentResponse(backgroundCtx, rawAgentResponse, sessionID, dbFilesHTML); err != nil {
+		cs.logger.Error("Failed to parse and save agent response - CONVERSATION DATA MAY BE LOST",
+			zap.Error(err),
+			zap.String("session_id", sessionID),
+			zap.Int("response_length", len(rawAgentResponse)))
 	}
 }
