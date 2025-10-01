@@ -15,6 +15,8 @@ import (
 	"go.uber.org/zap"
 )
 
+var agentStatusRe = regexp.MustCompile(`(?s)<agent_status>.*?</agent_status>`)
+
 type MessageService struct {
 	store  *database.PostgresStore
 	logger *zap.Logger
@@ -30,14 +32,10 @@ func NewMessageService(store *database.PostgresStore, logger *zap.Logger) *Messa
 // ParseAndSaveAgentResponse parses the agent's raw response, splits it into assistant and tool messages,
 // and saves them to the database. Returns error if save fails.
 func (ms *MessageService) ParseAndSaveAgentResponse(ctx context.Context, rawResponse, sessionID, filesHTML string) error {
-	// Remove agent_status tags as they're only for UI streaming
-	statusRe := regexp.MustCompile(`(?s)<agent_status>.*?</agent_status>`)
-	cleanedResponse := statusRe.ReplaceAllString(rawResponse, "")
-
 	// Split by execution_results tags
 	re := regexp.MustCompile(`(?s)(<execution_results>.*?</execution_results>)`)
-	parts := re.Split(cleanedResponse, -1)
-	matches := re.FindAllString(cleanedResponse, -1)
+	parts := re.Split(rawResponse, -1)
+	matches := re.FindAllString(rawResponse, -1)
 
 	// Save assistant messages and tool messages alternately
 	for i, part := range parts {
@@ -54,11 +52,13 @@ func (ms *MessageService) ParseAndSaveAgentResponse(ctx context.Context, rawResp
 				assistantRendered += filesHTML
 			}
 
+			cleanContent := strings.TrimSpace(agentStatusRe.ReplaceAllString(assistantContent, ""))
+
 			assistantMessage := types.ChatMessage{
 				ID:        generateMessageID(),
 				SessionID: sessionID,
 				Role:      "assistant",
-				Content:   assistantContent,
+				Content:   cleanContent,
 				Rendered:  assistantRendered,
 			}
 			if err := ms.store.CreateMessage(ctx, assistantMessage); err != nil {
@@ -72,8 +72,8 @@ func (ms *MessageService) ParseAndSaveAgentResponse(ctx context.Context, rawResp
 			toolContentRaw := strings.TrimSpace(matches[i])
 			result := strings.TrimSuffix(strings.TrimPrefix(toolContentRaw, "<execution_results>"), "</execution_results>")
 
-			var buf bytes.Buffer
-			if err := components.ExecutionResultBlock(result).Render(ctx, &buf); err != nil {
+			renderedTool, err := ms.renderToolContent(ctx, result)
+			if err != nil {
 				ms.logger.Error("Failed to render execution result block for DB", zap.Error(err))
 				return fmt.Errorf("failed to render tool message: %w", err)
 			}
@@ -83,7 +83,7 @@ func (ms *MessageService) ParseAndSaveAgentResponse(ctx context.Context, rawResp
 				SessionID: sessionID,
 				Role:      "tool",
 				Content:   result,
-				Rendered:  buf.String(),
+				Rendered:  renderedTool,
 			}
 			if err := ms.store.CreateMessage(ctx, toolMessage); err != nil {
 				ms.logger.Error("Failed to save tool message", zap.Error(err))
@@ -99,6 +99,14 @@ func (ms *MessageService) ParseAndSaveAgentResponse(ctx context.Context, rawResp
 // Delegates to the format package for consistent conversion logic.
 func (ms *MessageService) processContentForDB(ctx context.Context, rawContent string) (string, error) {
 	return format.ConvertToHTML(ctx, rawContent)
+}
+
+func (ms *MessageService) renderToolContent(ctx context.Context, result string) (string, error) {
+	var buf bytes.Buffer
+	if err := components.ExecutionResultBlock(result).Render(ctx, &buf); err != nil {
+		return "", fmt.Errorf("render execution result block: %w", err)
+	}
+	return buf.String(), nil
 }
 
 func generateMessageID() string {
