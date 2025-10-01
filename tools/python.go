@@ -358,7 +358,7 @@ func (t *StatefulPythonTool) CleanupSession(sessionID string) {
 }
 
 // ExecutePythonCode now requires a sessionID to be passed.
-func (t *StatefulPythonTool) ExecutePythonCode(ctx context.Context, text string, sessionID string) (string, string, bool) {
+func (t *StatefulPythonTool) ExecutePythonCode(ctx context.Context, text string, sessionID string, output io.Writer) (string, string, bool) {
 	startTag := "<python>"
 	endTag := "</python>"
 
@@ -390,9 +390,13 @@ func (t *StatefulPythonTool) ExecutePythonCode(ctx context.Context, text string,
 		t.logger.Debug("Python code executed successfully", zap.String("result_preview", execResult[:min(100, len(execResult))]))
 	}
 
-	// ONLY print the execution result, wrapped in tags.
-	// This is the only output from this function that goes to the web UI stream.
-	fmt.Printf("<execution_results>%s</execution_results>", execResult)
+	if output != nil {
+		if _, writeErr := io.WriteString(output, fmt.Sprintf("<execution_results>%s</execution_results>", execResult)); writeErr != nil {
+			if t.logger != nil {
+				t.logger.Warn("Failed to stream python execution result", zap.Error(writeErr))
+			}
+		}
+	}
 
 	return pythonCode, execResult, true
 }

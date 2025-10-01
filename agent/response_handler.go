@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"fmt"
 	"stats-agent/config"
 	"stats-agent/web/types"
 	"strings"
@@ -42,19 +41,21 @@ func (r *ResponseHandler) BuildMessagesForLLM(longTermContext string, history []
 
 // CollectStreamedResponse reads chunks from a streaming response channel and builds
 // the complete response. It also prints chunks to stdout for real-time display.
-func (r *ResponseHandler) CollectStreamedResponse(responseChan <-chan string) string {
+func (r *ResponseHandler) CollectStreamedResponse(responseChan <-chan string, stream *Stream) string {
 	var llmResponseBuilder strings.Builder
 
 	for chunk := range responseChan {
-		fmt.Print(chunk)
+		if stream != nil {
+			_, _ = stream.WriteString(chunk)
+		}
 		llmResponseBuilder.WriteString(chunk)
 	}
 
 	llmResponse := llmResponseBuilder.String()
 
 	// Add newline if response doesn't end with one
-	if !strings.HasSuffix(llmResponse, "\n") {
-		fmt.Println()
+	if stream != nil && !strings.HasSuffix(llmResponse, "\n") {
+		_, _ = stream.WriteString("\n")
 	}
 
 	return llmResponse

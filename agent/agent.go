@@ -1,13 +1,14 @@
 package agent
 
 import (
-	"context"
-	"fmt"
-	"stats-agent/config"
-	"stats-agent/rag"
-	"stats-agent/tools"
-	"stats-agent/web/types"
-	"strings"
+    "context"
+    "fmt"
+    "stats-agent/config"
+    "stats-agent/rag"
+    "stats-agent/tools"
+    "stats-agent/llmclient"
+    "stats-agent/web/types"
+    "strings"
 
 	"go.uber.org/zap"
 )
@@ -60,7 +61,7 @@ func (a *Agent) CleanupSession(sessionID string) {
 
 // Run executes the agent's conversation loop with the given user input.
 // It orchestrates memory management, LLM interaction, and Python code execution.
-func (a *Agent) Run(ctx context.Context, input string, sessionID string, history []types.AgentMessage) {
+func (a *Agent) Run(ctx context.Context, input string, sessionID string, history []types.AgentMessage, stream *Stream) {
 	// 1. Setup: Add user message and retrieve long-term context
 	currentHistory := append(history, types.AgentMessage{Role: "user", Content: input})
 
@@ -77,7 +78,7 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 		contextTokens, err := a.memoryManager.CountTokens(ctx, longTermContext)
 		if err == nil && contextTokens > int(float64(a.cfg.ContextLength)*0.75) {
 			a.logger.Info("Proactive check: RAG context is too large, summarizing", zap.Int("context_tokens", contextTokens))
-			fmt.Printf("<agent_status>Compressing memory....</agent_status>")
+			_ = stream.Status("Compressing memory....")
 			summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(ctx, longTermContext)
 			if summaryErr == nil {
 				longTermContext = summarizedContext
@@ -91,7 +92,7 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 	// 3. Main conversation loop
 	for turn := 0; turn < a.cfg.MaxTurns; turn++ {
 		// Manage memory before each turn - non-critical, log warning if fails
-		if err := a.memoryManager.ManageHistory(ctx, sessionID, &currentHistory); err != nil {
+		if err := a.memoryManager.ManageHistory(ctx, sessionID, &currentHistory, stream); err != nil {
 			a.logger.Warn("Failed to manage memory, continuing with current history",
 				zap.Error(err),
 				zap.Int("turn", turn),
@@ -100,7 +101,7 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 
 		// Check loop conditions (error limit, max turns)
 		if shouldContinue, reason := loop.ShouldContinue(turn); !shouldContinue {
-			fmt.Printf("<agent_status>%s</agent_status>", reason)
+			_ = stream.Status(reason)
 			break
 		}
 
@@ -114,16 +115,16 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 				zap.Error(err),
 				zap.Int("turn", turn),
 				zap.String("session_id", sessionID))
-			fmt.Printf("<agent_status>LLM communication error</agent_status>")
+			_ = stream.Status("LLM communication error")
 			break
 		}
 
 		// Collect streamed response
-		llmResponse := a.responseHandler.CollectStreamedResponse(responseChan)
+		llmResponse := a.responseHandler.CollectStreamedResponse(responseChan, stream)
 
 		// Handle empty response (usually context window error)
 		if a.responseHandler.IsEmpty(llmResponse) {
-			longTermContext = a.handleEmptyResponse(ctx, longTermContext)
+			longTermContext = a.handleEmptyResponse(ctx, longTermContext, stream)
 			if longTermContext == "" {
 				break // Recovery failed
 			}
@@ -131,13 +132,13 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 		}
 
 		// Process response for code execution - critical operation
-		execResult, err := a.executionCoordinator.ProcessResponse(ctx, llmResponse, sessionID)
+		execResult, err := a.executionCoordinator.ProcessResponse(ctx, llmResponse, sessionID, stream)
 		if err != nil {
 			a.logger.Error("Failed to process LLM response, aborting turn",
 				zap.Error(err),
 				zap.Int("turn", turn),
 				zap.String("session_id", sessionID))
-			fmt.Printf("<agent_status>Response processing error</agent_status>")
+			_ = stream.Status("Response processing error")
 			break
 		}
 
@@ -148,7 +149,7 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 				types.AgentMessage{Role: "tool", Content: execResult.Result})
 
 			if execResult.HasError {
-				fmt.Printf("<agent_status>Error - attempting to self-correct</agent_status>")
+				_ = stream.Status("Error - attempting to self-correct")
 				loop.RecordError()
 			} else {
 				loop.RecordSuccess()
@@ -177,13 +178,12 @@ func (a *Agent) GenerateTitle(ctx context.Context, content string) (string, erro
 		{Role: "user", Content: userPrompt},
 	}
 
-	responseChan, err := getLLMResponse(ctx, a.cfg.SummarizationLLMHost, messages, a.cfg, a.logger)
-	if err != nil {
-		return "", fmt.Errorf("llm chat call failed for title generation: %w", err)
-	}
-
-	// Use the new silent response collector
-	title := a.responseHandler.CollectResponse(responseChan)
+    // Use non-streaming client without agent system prompt injection
+    client := llmclient.New(a.cfg, a.logger)
+    title, err := client.Chat(ctx, a.cfg.SummarizationLLMHost, messages)
+    if err != nil {
+        return "", fmt.Errorf("llm chat call failed for title generation: %w", err)
+    }
 
 	if title == "" {
 		return "", fmt.Errorf("llm returned an empty title")
@@ -219,9 +219,9 @@ func stripSurroundingQuotes(s string) string {
 }
 
 // handleEmptyResponse attempts to recover from empty LLM responses by summarizing context.
-func (a *Agent) handleEmptyResponse(ctx context.Context, longTermContext string) string {
+func (a *Agent) handleEmptyResponse(ctx context.Context, longTermContext string, stream *Stream) string {
 	a.logger.Warn("LLM response was empty, likely due to a context window error. Attempting to summarize context")
-	fmt.Printf("<agent_status>Compressing memory due to a context window error...</agent_status>")
+	_ = stream.Status("Compressing memory due to a context window error...")
 
 	summarizedContext, err := a.rag.SummarizeLongTermMemory(ctx, longTermContext)
 	if err != nil {

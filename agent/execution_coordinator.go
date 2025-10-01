@@ -34,12 +34,12 @@ func NewExecutionCoordinator(pythonTool *tools.StatefulPythonTool, logger *zap.L
 
 // ProcessResponse checks if the LLM response contains Python code, executes it if found,
 // and returns the execution result.
-func (e *ExecutionCoordinator) ProcessResponse(ctx context.Context, llmResponse, sessionID string) (*ExecutionResult, error) {
+func (e *ExecutionCoordinator) ProcessResponse(ctx context.Context, llmResponse, sessionID string, stream *Stream) (*ExecutionResult, error) {
 	// Convert markdown code blocks to XML tags first
 	processedResponse := e.ConvertMarkdownToXML(llmResponse)
 
 	// Try to execute Python code if present
-	code, result, wasExecuted := e.pythonTool.ExecutePythonCode(ctx, processedResponse, sessionID)
+	code, result, wasExecuted := e.pythonTool.ExecutePythonCode(ctx, processedResponse, sessionID, stream)
 
 	if !wasExecuted {
 		return &ExecutionResult{

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -225,38 +226,36 @@ func (cs *ChatService) StreamAgentResponse(
 	safeWrite(StreamData{Type: "remove_loader", Content: "loading-" + userMessageID})
 	safeWrite(StreamData{Type: "create_container", Content: agentMessageID})
 
-	// Create streaming orchestrator with proper error handling
-	orchestrator, err := NewStreamingOrchestrator(cs.logger)
-	if err != nil {
-		cs.logger.Error("Failed to create streaming orchestrator",
-			zap.Error(err),
-			zap.String("session_id", sessionID))
-		safeWrite(StreamData{Type: "error", Content: "Failed to initialize streaming"})
-		return
-	}
-	defer orchestrator.StopCapture() // Always restore stdout
+	pipeReader, pipeWriter := io.Pipe()
+	defer pipeReader.Close()
 
-	// Start capturing stdout
-	orchestrator.StartCapture()
+	var captureBuffer bytes.Buffer
+	fanOutWriter := io.MultiWriter(&captureBuffer, pipeWriter)
+	agentStream := agent.NewStream(fanOutWriter)
 
-	// Reduced goroutines: Run agent + stream processor in parallel
-	agentDone := make(chan struct{})
-
-	// Agent execution goroutine
+	streamDone := make(chan struct{})
 	go func() {
-		defer close(agentDone)
-		cs.agent.Run(runCtx, input, sessionID, history)
-		orchestrator.StopCapture() // Close pipe write end to signal stream processor
+		defer close(streamDone)
+		cs.streamService.ProcessStreamByWord(runCtx, pipeReader, func(data StreamData) error {
+			safeWrite(data)
+			return nil
+		})
 	}()
 
-	// Stream processing (runs in current goroutine, blocks until agent done)
-	orchestrator.StreamAndWait(runCtx, cs.streamService, func(data StreamData) error {
-		safeWrite(data)
-		return nil
-	})
+	agentDone := make(chan struct{})
+	go func() {
+		defer close(agentDone)
+		cs.agent.Run(runCtx, input, sessionID, history, agentStream)
+		_ = pipeWriter.Close()
+	}()
 
-	// Wait for agent to finish
+	go func() {
+		<-runCtx.Done()
+		pipeWriter.CloseWithError(runCtx.Err())
+	}()
+
 	<-agentDone
+	<-streamDone
 
 	// Use background context for DB operations after request context might be cancelled
 	backgroundCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -298,7 +297,7 @@ func (cs *ChatService) StreamAgentResponse(
 	}
 
 	// Parse and save messages to database - critical for preserving conversation
-	rawAgentResponse := orchestrator.GetCapturedContent()
+	rawAgentResponse := captureBuffer.String()
 	if err := cs.messageService.ParseAndSaveAgentResponse(backgroundCtx, rawAgentResponse, sessionID, dbFilesHTML); err != nil {
 		cs.logger.Error("Failed to parse and save agent response - CONVERSATION DATA MAY BE LOST",
 			zap.Error(err),
