@@ -110,6 +110,34 @@ func (ss *StreamService) ProcessStreamByWord(ctx context.Context, r io.Reader, w
 				return
 			}
 
+			// If we encounter '<' that could be a tag start, check if it's one of our known tags
+			// This prevents tags from being concatenated while not breaking on comparison operators like "5 < 3"
+			if char == '<' && currentWord.Len() > 0 {
+				// Peek ahead to see if this could be a known tag
+				currentWordStr := currentWord.String()
+
+				// Check if we're potentially at the start of a known tag
+				couldBeTag := false
+				for _, tag := range format.AllTags {
+					// Check both opening and closing tags
+					if len(tag.OpenTag) > 0 && tag.OpenTag[0] == '<' {
+						couldBeTag = true
+						break
+					}
+				}
+
+				// Only split if this could be a tag (all our tags start with '<')
+				// This allows normal '<' in code like "if x < 5" to pass through
+				if couldBeTag {
+					// Check if the current word ends in a way that suggests a tag boundary
+					// (e.g., ends with '>' from a closing tag, or is at start of line)
+					if strings.HasSuffix(currentWordStr, ">") || len(currentWordStr) == 0 {
+						processToken(currentWordStr)
+						currentWord.Reset()
+					}
+				}
+			}
+
 			currentWord.WriteRune(char)
 
 			if char == ' ' || char == '\n' {

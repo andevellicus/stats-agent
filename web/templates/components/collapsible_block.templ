@@ -24,7 +24,7 @@ type BlockConfig struct {
 
 // CollapsibleBlock is a unified component for code blocks, execution results, and images
 templ CollapsibleBlock(config BlockConfig) {
-	<div class="mt-4 rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+	<div class="mt-4 rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden code-block" data-block-type={ string(config.Type) }>
 		<div class="flex items-center justify-between px-5 py-3 bg-gray-50 border-b border-gray-200">
 			<div class="flex items-center space-x-3">
 				@blockIcon(config.Type)
@@ -126,6 +126,55 @@ templ ExecutionResultBlock(content string) {
 		DarkBackground: true,
 		Language:       "",
 	})
+}
+
+// Template versions for JavaScript cloning (with empty content for templates)
+templ PythonCodeBlockTemplate() {
+	<div id="python-block-template" class="mt-4 rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden code-block" data-block-type="python">
+		<div class="flex items-center justify-between px-5 py-3 bg-gray-50 border-b border-gray-200">
+			<div class="flex items-center space-x-3">
+				@blockIcon(BlockTypePython)
+				<span class="block-title text-xs font-bold text-gray-700 uppercase tracking-wider font-mono">Python</span>
+			</div>
+			<div class="flex items-center space-x-4">
+				<button class="copy-btn flex items-center space-x-2 text-xs font-medium text-gray-500 hover:text-indigo-600" onclick="copyCode(this)">
+					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+					<span class="copy-text">Copy</span>
+				</button>
+				<div class="flex items-center space-x-2 cursor-pointer" onclick="toggleCodeBlock(this)">
+					<span class="action-text text-xs font-medium text-gray-500">Hide</span>
+					<svg class="chevron-icon w-4 h-4 text-gray-500 transform transition-transform rotate-180" viewBox="0 0 20 20" fill="currentColor">
+						<path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"></path>
+					</svg>
+				</div>
+			</div>
+		</div>
+		<div class="code-content px-5 py-4 bg-gray-900">
+			<pre class="font-mono text-sm overflow-x-auto"><code class="language-python text-white"></code></pre>
+		</div>
+	</div>
+}
+
+templ ExecutionResultBlockTemplate() {
+	<div id="execution-block-template" class="mt-4 rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden code-block" data-block-type="execution">
+		<div class="flex items-center justify-between px-5 py-3 bg-gray-50 border-b border-gray-200">
+			<div class="flex items-center space-x-3">
+				@blockIcon(BlockTypeExecution)
+				<span class="block-title text-xs font-bold text-gray-700 uppercase tracking-wider font-mono">Execution Output</span>
+			</div>
+			<div class="flex items-center space-x-4">
+				<div class="flex items-center space-x-2 cursor-pointer" onclick="toggleCodeBlock(this)">
+					<span class="action-text text-xs font-medium text-gray-500">Hide</span>
+					<svg class="chevron-icon w-4 h-4 text-gray-500 transform transition-transform rotate-180" viewBox="0 0 20 20" fill="currentColor">
+						<path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"></path>
+					</svg>
+				</div>
+			</div>
+		</div>
+		<div class="code-content px-5 py-4 bg-gray-900">
+			<pre class="font-mono text-sm overflow-x-auto text-white"><code></code></pre>
+		</div>
+	</div>
 }
 
 templ ImageBlock(src string) {

@@ -38,8 +38,14 @@
   }
 }
 
-  .dock-top {
-    @apply -mt-4 rounded-t-none;
+  /* Python blocks followed by execution blocks should dock together */
+  .code-block[data-block-type="python"] + .code-block[data-block-type="execution"] {
+    @apply mt-0 rounded-t-none border-t-0;
+  }
+
+  /* Python blocks that are followed by execution blocks should have flat bottom */
+  .code-block[data-block-type="python"]:has(+ .code-block[data-block-type="execution"]) {
+    @apply rounded-b-none;
   }
 
 @layer components {

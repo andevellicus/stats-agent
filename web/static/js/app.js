@@ -373,13 +373,6 @@ function renderAndProcessContent(contentDiv, content) {
             newCodeElement.textContent = codeElement.textContent;
         }
 
-        // Check if the previous element was a Python code block wrapper
-        const previousElement = preElement.previousElementSibling;
-        if (!isPython && previousElement && previousElement.id === 'python-block-template') {
-             // If it is, apply the 'dock-top' class to our new wrapper
-             wrapper.classList.add('dock-top');
-        }
-
         preElement.replaceWith(wrapper);
 
         // Apply syntax highlighting
