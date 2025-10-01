@@ -15,29 +15,27 @@ templ ChatPage(activeSessionID uuid.UUID, sessions []types.Session, messageGroup
 			</div>
 
 			// Main Chat Area - scrollable
-			<div class="flex-1 flex flex-col overflow-hidden">
-				<div class="flex-1 flex flex-col items-center p-4 overflow-hidden">
-					<div class="w-full max-w-4xl h-full flex flex-col overflow-hidden">
-						// Messages container - scrollable with autoscroll
-						<div id="messages" class="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin" hx-on::after-swap="this.scrollTop = this.scrollHeight">
-							if len(messageGroups) == 0 {
-								@components.WelcomeMessage()
-							} else {
-								// Use a simple, clean loop
-								for _, group := range messageGroups {
-									switch group.PrimaryRole {
-									case "user":
-										@components.UserMessage(group.Messages[0])
-									case "agent":
-										@components.AgentMessageGroup(group.Messages)
-									}
+			<div class="flex-1 flex flex-col items-center p-4 overflow-hidden">
+				<div class="w-[80%] h-full flex flex-col overflow-hidden">
+					// Messages container - scrollable with autoscroll
+					<div id="messages" class="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin" hx-on::after-swap="this.scrollTop = this.scrollHeight">
+						if len(messageGroups) == 0 {
+							@components.WelcomeMessage()
+						} else {
+							// Use a simple, clean loop
+							for _, group := range messageGroups {
+								switch group.PrimaryRole {
+								case "user":
+									@components.UserMessage(group.Messages[0])
+								case "agent":
+									@components.AgentMessageGroup(group.Messages)
 								}
 							}
-						</div>
-						// Form container - sticky at bottom
-						<div class="flex-shrink-0 p-6 border-t border-gray-200/50 bg-gradient-to-br from-slate-50 to-blue-50">
-							@components.ChatForm(activeSessionID.String())
-						</div>
+						}
+					</div>
+					// Form container - sticky at bottom
+					<div class="flex-shrink-0 p-6 border-t border-gray-200/50 bg-gradient-to-br from-slate-50 to-blue-50">
+						@components.ChatForm(activeSessionID.String())
 					</div>
 				</div>
 			</div>

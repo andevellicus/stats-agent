@@ -89,19 +89,31 @@ function setupFormListener() {
     });
 
     function renderFileBadge(fileName) {
-        fileBadgeContainer.innerHTML = `
-            <div id="file-badge" class="inline-flex items-center justify-between bg-blue-100 text-blue-800 text-sm font-semibold px-3 py-2 rounded-lg mb-2 border border-blue-200 animate-fade-in">
-                <div class="flex items-center space-x-2">
-                    <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path d="M9 2a2 2 0 00-2 2v8a2 2 0 002 2h2a2 2 0 002-2V4a2 2 0 00-2-2H9z"></path><path fill-rule="evenodd" d="M4 8a2 2 0 012-2h3v10H6a2 2 0 01-2-2V8zm12 0a2 2 0 00-2-2h-3v10h3a2 2 0 002-2V8z" clip-rule="evenodd"></path></svg>
-                    <span>${fileName}</span>
-                </div>
-                <button type="button" id="remove-file-btn" class="text-blue-500 hover:text-blue-700">
-                    <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"></path></svg>
-                </button>
-            </div>
-        `;
+        const template = document.getElementById('file-badge-template');
+        if (!template) {
+            console.error('File badge template not found!');
+            return;
+        }
 
-        document.getElementById('remove-file-btn').addEventListener('click', () => {
+        // Clone the template's content
+        const newBadge = template.querySelector('#file-badge').cloneNode(true);
+        
+        // Update the filename in the clone
+        const fileNameSpan = newBadge.querySelector('.file-name');
+        if (fileNameSpan) {
+            fileNameSpan.textContent = fileName;
+        }
+
+        // Add the new badge to the container
+        const fileBadgeContainer = document.getElementById('file-upload-badge-container');
+        fileBadgeContainer.innerHTML = ''; // Clear previous badges
+        fileBadgeContainer.appendChild(newBadge);
+
+        // Add event listener to the new remove button
+        newBadge.querySelector('.remove-file-btn').addEventListener('click', () => {
+            const fileInput = document.getElementById('file-input');
+            const form = document.getElementById('chat-form');
+            
             fileInput.value = ''; // Clear the file input
             fileBadgeContainer.innerHTML = ''; // Remove the badge
             form.removeAttribute('enctype'); // Reset form encoding
