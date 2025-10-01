@@ -56,6 +56,7 @@ After receiving <execution_results></execution_results>, your response must foll
 
 **Critical enforcement**:
 - If you intend to run a statistical test, you must first run and report assumption checks in a separate Act step. Do not run the test until you have printed the assumption results and justified the test choice.
+- You must not state any calculated result (e.g., mean, p-value) that has not first been printed in an <execution_results></execution_results> block from a preceding step. All results must be derived directly from code output.
 
 ---
 

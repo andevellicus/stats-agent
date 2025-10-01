@@ -74,7 +74,7 @@ func (s *Server) setupRoutes() {
 	rateLimiter := middleware.NewSessionRateLimiter(rateLimiterConfig, s.logger)
 
 	// Initialize handlers with services
-	chatHandler := handlers.NewChatHandler(chatService, s.logger, s.store)
+	chatHandler := handlers.NewChatHandler(chatService, streamService, s.logger, s.store)
 
 	s.router.GET("/", chatHandler.Index)
 	s.router.POST("/chat", middleware.RateLimitMiddleware(rateLimiter, "message"), chatHandler.SendMessage)

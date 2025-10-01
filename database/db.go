@@ -148,6 +148,15 @@ func (s *PostgresStore) GetSessionByID(ctx context.Context, sessionID uuid.UUID)
 	return session, nil
 }
 
+func (s *PostgresStore) UpdateSessionTitle(ctx context.Context, sessionID uuid.UUID, title string) error {
+	query := `UPDATE sessions SET title = $1 WHERE id = $2`
+	_, err := s.DB.ExecContext(ctx, query, title, sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to update session title: %w", err)
+	}
+	return nil
+}
+
 func (s *PostgresStore) GetSessions(ctx context.Context, userID *uuid.UUID) ([]types.Session, error) {
 	var query string
 	var rows *sql.Rows

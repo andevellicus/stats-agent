@@ -140,25 +140,27 @@ function copyCode(button) {
     const codeContainer = button.closest('.overflow-hidden');
     if (!codeContainer) {
         console.error("Could not find the code container to copy from.");
-        autoScrollEnabled = true;
+        autoScrollEnabled = true; // Re-enable on error
         return;
     }
     const codeBlock = codeContainer.querySelector('code');
     const textToCopy = codeBlock.textContent;
     const copyText = button.querySelector('.copy-text');
 
+    const handleCopySuccess = () => {
+        copyText.textContent = 'Copied!';
+        // Separate timer just for UI feedback, does not affect scrolling
+        setTimeout(() => {
+            copyText.textContent = 'Copy';
+        }, 1000);
+    };
+
     if (navigator.clipboard && window.isSecureContext) {
-        navigator.clipboard.writeText(textToCopy).then(() => {
-            copyText.textContent = 'Copied!';
-            setTimeout(() => {
-                copyText.textContent = 'Copy';
-                autoScrollEnabled = true;
-            }, 2000);
-        }).catch(err => {
+        navigator.clipboard.writeText(textToCopy).then(handleCopySuccess).catch(err => {
             console.error('Failed to copy text: ', err);
-            autoScrollEnabled = true;
         });
     } else {
+        // Fallback for non-secure contexts
         const textArea = document.createElement("textarea");
         textArea.value = textToCopy;
         textArea.style.position = "fixed";
@@ -168,17 +170,17 @@ function copyCode(button) {
         textArea.select();
         try {
             document.execCommand('copy');
-            copyText.textContent = 'Copied!';
-            setTimeout(() => {
-                copyText.textContent = 'Copy';
-                autoScrollEnabled = true;
-            }, 2000);
+            handleCopySuccess();
         } catch (err) {
             console.error('Fallback copy failed: ', err);
-            autoScrollEnabled = true;
         }
         document.body.removeChild(textArea);
     }
+
+    // Re-enable scrolling after a very short delay
+    setTimeout(() => {
+        autoScrollEnabled = true;
+    }, 1100);
 }
 
 function toggleCodeBlock(element) {
@@ -293,6 +295,20 @@ function initiateSSE() {
                         </div>
                     `;
                     document.getElementById('messages').appendChild(messageContainer);
+                    break;
+                 case 'sidebar_update':
+                    if (data.content) {
+                        const parser = new DOMParser();
+                        const doc = parser.parseFromString(data.content, 'text/html');
+                        const newLink = doc.body.firstChild;
+                        if (newLink) {
+                            const targetId = newLink.id;
+                            const targetLink = document.getElementById(targetId);
+                            if (targetLink) {
+                                targetLink.innerHTML = newLink.innerHTML;
+                            }
+                        }
+                    }
                     break;
                  case 'file_append_html':
                     if (data.content) {

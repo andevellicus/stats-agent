@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -14,6 +14,7 @@ import (
 	"stats-agent/web/templates/pages"
 	"stats-agent/web/types"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -21,9 +22,10 @@ import (
 )
 
 type ChatHandler struct {
-	chatService *services.ChatService
-	logger      *zap.Logger
-	store       *database.PostgresStore
+	chatService   *services.ChatService
+	streamService *services.StreamService
+	logger        *zap.Logger
+	store         *database.PostgresStore
 }
 
 type ChatRequest struct {
@@ -31,11 +33,17 @@ type ChatRequest struct {
 	SessionID string `json:"session_id" form:"session_id"`
 }
 
-func NewChatHandler(chatService *services.ChatService, logger *zap.Logger, store *database.PostgresStore) *ChatHandler {
+func NewChatHandler(
+	chatService *services.ChatService,
+	streamService *services.StreamService,
+	logger *zap.Logger,
+	store *database.PostgresStore,
+) *ChatHandler {
 	return &ChatHandler{
-		chatService: chatService,
-		logger:      logger,
-		store:       store,
+		chatService:   chatService,
+		streamService: streamService,
+		logger:        logger,
+		store:         store,
 	}
 }
 
@@ -368,32 +376,18 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 	c.Header("Connection", "keep-alive")
 	c.Header("Access-Control-Allow-Origin", "*")
 
-	data := services.StreamData{Type: "connection_established"}
-	jsonData, _ := json.Marshal(data)
-	fmt.Fprintf(c.Writer, "data: %s\n\n", jsonData)
-	c.Writer.(http.Flusher).Flush()
+	// Use a single mutex for all SSE writes in this request
+	var mu sync.Mutex
 
 	ctx := c.Request.Context()
 
+	// Use the service layer method
+	h.streamService.WriteSSEData(ctx, c.Writer, services.StreamData{Type: "connection_established"}, &mu)
+
 	messages, err := h.store.GetMessagesBySession(ctx, sessionID)
 	if err != nil {
-		fmt.Fprintf(c.Writer, "data: Error fetching messages\n\n")
-		c.Writer.(http.Flusher).Flush()
+		h.streamService.WriteSSEData(ctx, c.Writer, services.StreamData{Type: "error", Content: "Error fetching messages"}, &mu)
 		return
-	}
-
-	// Check if this is the first message in the session to trigger initialization
-	if len(messages) == 1 {
-		if err := h.chatService.InitializeSession(ctx, sessionID.String()); err != nil {
-			h.logger.Error("Failed to initialize session", zap.Error(err))
-		}
-		// Re-fetch messages to include the initialization message
-		messages, err = h.store.GetMessagesBySession(ctx, sessionID)
-		if err != nil {
-			fmt.Fprintf(c.Writer, "data: Error fetching messages after initialization\n\n")
-			c.Writer.(http.Flusher).Flush()
-			return
-		}
 	}
 
 	var userMessage *types.ChatMessage
@@ -405,9 +399,26 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 	}
 
 	if userMessage == nil {
-		fmt.Fprintf(c.Writer, "data: User message not found\n\n")
-		c.Writer.(http.Flusher).Flush()
+		h.streamService.WriteSSEData(ctx, c.Writer, services.StreamData{Type: "error", Content: "User message not found"}, &mu)
 		return
+	}
+
+	// Check if this is the first message in the session to trigger initialization and title generation
+	if len(messages) == 1 {
+		// Pass the service method to the goroutine
+		go h.chatService.GenerateAndSetTitle(context.Background(), sessionID, userMessage.Content, func(data services.StreamData) error {
+			return h.streamService.WriteSSEData(context.Background(), c.Writer, data, &mu)
+		})
+
+		if err := h.chatService.InitializeSession(ctx, sessionID.String()); err != nil {
+			h.logger.Error("Failed to initialize session", zap.Error(err))
+		}
+		// Re-fetch messages to include the initialization message for the agent's context
+		messages, err = h.store.GetMessagesBySession(ctx, sessionID)
+		if err != nil {
+			h.streamService.WriteSSEData(ctx, c.Writer, services.StreamData{Type: "error", Content: "Error fetching messages after initialization"}, &mu)
+			return
+		}
 	}
 
 	// Convert messages to agent history format

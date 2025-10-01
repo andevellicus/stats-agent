@@ -7,6 +7,7 @@ import (
 	"stats-agent/rag"
 	"stats-agent/tools"
 	"stats-agent/web/types"
+	"strings"
 
 	"go.uber.org/zap"
 )
@@ -160,6 +161,37 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 	}
 }
 
+func (a *Agent) GenerateTitle(ctx context.Context, content string) (string, error) {
+	systemPrompt := `You are an expert at creating concise, 5-word titles from user messages. Your task is to distill the user's message into a short, descriptive title.`
+
+	userPrompt := fmt.Sprintf(`Create a 5-word title for the following user message.
+
+**User Message:**
+"%s"
+
+**Title:**
+`, content)
+
+	messages := []types.AgentMessage{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
+	}
+
+	responseChan, err := getLLMResponse(ctx, a.cfg.SummarizationLLMHost, messages, a.cfg, a.logger)
+	if err != nil {
+		return "", fmt.Errorf("llm chat call failed for title generation: %w", err)
+	}
+
+	// Use the new silent response collector
+	title := a.responseHandler.CollectResponse(responseChan)
+
+	if title == "" {
+		return "", fmt.Errorf("llm returned an empty title")
+	}
+
+	return strings.TrimSpace(title), nil
+}
+
 // handleEmptyResponse attempts to recover from empty LLM responses by summarizing context.
 func (a *Agent) handleEmptyResponse(ctx context.Context, longTermContext string) string {
 	a.logger.Warn("LLM response was empty, likely due to a context window error. Attempting to summarize context")
@@ -173,4 +205,3 @@ func (a *Agent) handleEmptyResponse(ctx context.Context, longTermContext string)
 
 	return summarizedContext
 }
-

@@ -60,6 +60,18 @@ func (r *ResponseHandler) CollectStreamedResponse(responseChan <-chan string) st
 	return llmResponse
 }
 
+// CollectResponse reads chunks from a response channel and builds the complete response
+// without printing it to stdout.
+func (r *ResponseHandler) CollectResponse(responseChan <-chan string) string {
+	var llmResponseBuilder strings.Builder
+
+	for chunk := range responseChan {
+		llmResponseBuilder.WriteString(chunk)
+	}
+
+	return llmResponseBuilder.String()
+}
+
 // IsEmpty checks if the response is empty or only whitespace.
 func (r *ResponseHandler) IsEmpty(response string) bool {
 	return strings.TrimSpace(response) == ""

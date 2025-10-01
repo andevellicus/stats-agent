@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -8,7 +9,9 @@ import (
 	"path/filepath"
 	"stats-agent/agent"
 	"stats-agent/database"
+	"stats-agent/web/templates/components"
 	"stats-agent/web/types"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,6 +78,41 @@ func (cs *ChatService) InitializeSession(ctx context.Context, sessionID string) 
 	}
 
 	return cs.store.CreateMessage(ctx, initMessage)
+}
+
+func (cs *ChatService) GenerateAndSetTitle(ctx context.Context, sessionID uuid.UUID, firstMessage string, writeFunc func(StreamData) error) {
+	session, err := cs.store.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		cs.logger.Error("Failed to get session for title update", zap.Error(err), zap.String("session_id", sessionID.String()))
+		return
+	}
+
+	title, err := cs.agent.GenerateTitle(ctx, firstMessage)
+	if err != nil {
+		cs.logger.Warn("Failed to generate title", zap.Error(err), zap.String("session_id", sessionID.String()))
+		return
+	}
+
+	if title != "" && len(strings.Split(title, " ")) <= 10 {
+		if err := cs.store.UpdateSessionTitle(ctx, sessionID, title); err != nil {
+			cs.logger.Warn("Failed to update session title", zap.Error(err), zap.String("session_id", sessionID.String()))
+			return
+		}
+
+		// Update the session object with the new title before rendering
+		session.Title = title
+
+		// Render the component to a buffer
+		var buf bytes.Buffer
+		if err := components.SessionLinkOOB(session).Render(ctx, &buf); err != nil {
+			cs.logger.Error("Failed to render SessionLinkOOB component", zap.Error(err))
+			return
+		}
+
+		if err := writeFunc(StreamData{Type: "sidebar_update", Content: buf.String()}); err != nil {
+			cs.logger.Warn("Failed to send sidebar update SSE", zap.Error(err))
+		}
+	}
 }
 
 // CleanupSession cleans up agent session bindings (e.g., Python executor bindings).
