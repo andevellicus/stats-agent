@@ -10,6 +10,10 @@ import (
 type AgentMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+	// TokenCount caches the token count for the message to avoid recomputation.
+	TokenCount int `json:"-"`
+	// TokenCountComputed tells whether TokenCount has been populated.
+	TokenCountComputed bool `json:"-"`
 }
 
 // ChatMessage represents a single message in the chat, stored in the DB.

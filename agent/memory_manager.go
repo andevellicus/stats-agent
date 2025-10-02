@@ -85,17 +85,54 @@ func (m *MemoryManager) CountTokens(ctx context.Context, text string) (int, erro
 // CalculateHistorySize returns the total token count for the entire message history.
 func (m *MemoryManager) CalculateHistorySize(ctx context.Context, history []types.AgentMessage) (int, error) {
 	var totalTokens int
-	for _, message := range history {
-		tokens, err := m.CountTokens(ctx, message.Content)
-		if err != nil {
-			m.logger.Warn("Could not count tokens for a message, falling back to character count", zap.Error(err))
-			// Fallback: rough estimate of 4 chars per token
-			totalTokens += len(message.Content) / 4
-		} else {
-			totalTokens += tokens
+	for i := range history {
+		message := &history[i]
+		if message.TokenCountComputed {
+			totalTokens += message.TokenCount
+			continue
 		}
+
+		tokens, err := m.countTokensWithRetry(ctx, message.Content)
+		if err != nil {
+			return 0, fmt.Errorf("failed to count tokens for message: %w", err)
+		}
+
+		message.TokenCount = tokens
+		message.TokenCountComputed = true
+		totalTokens += tokens
 	}
 	return totalTokens, nil
+}
+
+func (m *MemoryManager) countTokensWithRetry(ctx context.Context, text string) (int, error) {
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		tokens, err := m.CountTokens(ctx, text)
+		if err == nil {
+			return tokens, nil
+		}
+
+		lastErr = err
+		if m.logger != nil {
+			m.logger.Warn("Token count attempt failed, retrying", zap.Int("attempt", attempt), zap.Error(err))
+		}
+
+		if attempt == maxAttempts {
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+
+	if lastErr != nil {
+		return 0, lastErr
+	}
+	return 0, fmt.Errorf("token count retry loop exhausted")
 }
 
 // IsOverThreshold checks if the history size exceeds 75% of the context window.
