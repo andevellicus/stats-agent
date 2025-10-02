@@ -64,8 +64,10 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
             id UUID PRIMARY KEY,
             document_id UUID NOT NULL,
             content TEXT NOT NULL,
+            embedding_content TEXT,
             metadata JSONB DEFAULT '{}'::jsonb,
             content_hash TEXT,
+            embedding REAL[],
             created_at TIMESTAMPTZ DEFAULT NOW()
         )`,
 	}
@@ -84,6 +86,12 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 
 	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS content_hash TEXT`); err != nil {
 		return fmt.Errorf("failed to add content_hash column: %w", err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS embedding_content TEXT`); err != nil {
+		return fmt.Errorf("failed to add embedding_content column: %w", err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS embedding REAL[]`); err != nil {
+		return fmt.Errorf("failed to add embedding column: %w", err)
 	}
 
 	indexStmts := []string{

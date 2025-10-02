@@ -1,14 +1,15 @@
 package agent
 
 import (
-    "context"
-    "fmt"
-    "stats-agent/config"
-    "stats-agent/rag"
-    "stats-agent/tools"
-    "stats-agent/llmclient"
-    "stats-agent/web/types"
-    "strings"
+	"context"
+	"fmt"
+	"strings"
+
+	"stats-agent/config"
+	"stats-agent/llmclient"
+	"stats-agent/rag"
+	"stats-agent/tools"
+	"stats-agent/web/types"
 
 	"go.uber.org/zap"
 )
@@ -57,6 +58,13 @@ func (a *Agent) InitializeSession(ctx context.Context, sessionID string, uploade
 
 func (a *Agent) CleanupSession(sessionID string) {
 	a.pythonTool.CleanupSession(sessionID)
+	if a.rag != nil {
+		if err := a.rag.DeleteSessionDocuments(sessionID); err != nil {
+			a.logger.Warn("Failed to remove session documents from RAG",
+				zap.String("session_id", sessionID),
+				zap.Error(err))
+		}
+	}
 }
 
 // Run executes the agent's conversation loop with the given user input.

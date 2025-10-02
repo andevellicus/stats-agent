@@ -1,12 +1,12 @@
 package agent
 
 import (
-    "context"
-    "stats-agent/config"
-    "stats-agent/llmclient"
-    "stats-agent/web/types"
+	"context"
+	"stats-agent/config"
+	"stats-agent/llmclient"
+	"stats-agent/web/types"
 
-    "go.uber.org/zap"
+	"go.uber.org/zap"
 )
 
 func buildSystemPrompt() string {
@@ -21,7 +21,7 @@ If a <memory></memory> block is provided with facts or summaries from a past ana
 ## Workflow Loop (repeat until complete)
 **CRITICAL: You MUST NEVER generate <execution_results> tags yourself. Only the execution environment generates these tags.**
 
-After receiving <execution_results></execution_results>, your response must follow this sequence:
+After receiving execution results (marked with role: "tool"), your response must follow this sequence:
 1.  First, state your observation from the execution results. If there was an error, explain it.
 2.  Next, in 1-2 sentences, state your plan for the single next step.
 3.  Finally, provide a short <python></python> block to execute that plan (≤15 lines, one logical step).
@@ -101,10 +101,10 @@ If assumptions fail and no valid alternative exists, stop and explain why.
 }
 
 func getLLMResponse(ctx context.Context, llamaCppHost string, messages []types.AgentMessage, cfg *config.Config, logger *zap.Logger) (<-chan string, error) {
-    // Prepend system message enforcing the analysis protocol
-    systemMessage := types.AgentMessage{Role: "system", Content: buildSystemPrompt()}
-    chatMessages := append([]types.AgentMessage{systemMessage}, messages...)
+	// Prepend system message enforcing the analysis protocol
+	systemMessage := types.AgentMessage{Role: "system", Content: buildSystemPrompt()}
+	chatMessages := append([]types.AgentMessage{systemMessage}, messages...)
 
-    client := llmclient.New(cfg, logger)
-    return client.ChatStream(ctx, llamaCppHost, chatMessages)
+	client := llmclient.New(cfg, logger)
+	return client.ChatStream(ctx, llamaCppHost, chatMessages)
 }

@@ -58,6 +58,9 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to initialize RAG", zap.Error(err))
 	}
+	if err := rag.LoadPersistedDocuments(ctx); err != nil {
+		logger.Warn("Failed to load persisted RAG documents", zap.Error(err))
+	}
 
 	// Pass the main host to the Agent
 	statsAgent := agent.NewAgent(cfg, pythonTool, rag, logger)
