@@ -281,6 +281,30 @@ func (s *PostgresStore) CreateMessage(ctx context.Context, msg types.ChatMessage
 	return nil
 }
 
+// AppendToMessageRendered appends additional HTML to an existing message's rendered field.
+func (s *PostgresStore) AppendToMessageRendered(ctx context.Context, messageID string, extraHTML string) error {
+	if extraHTML == "" {
+		return nil
+	}
+
+	msgUUID, err := uuid.Parse(messageID)
+	if err != nil {
+		return fmt.Errorf("invalid message ID: %w", err)
+	}
+
+	query := `
+		UPDATE messages
+		SET rendered = COALESCE(rendered, '') || $1
+		WHERE id = $2
+	`
+
+	if _, err := s.DB.ExecContext(ctx, query, extraHTML, msgUUID); err != nil {
+		return fmt.Errorf("append to message rendered: %w", err)
+	}
+
+	return nil
+}
+
 func (s *PostgresStore) GetMessagesBySession(ctx context.Context, sessionID uuid.UUID) ([]types.ChatMessage, error) {
 	query := `
 		SELECT id, session_id, role, content, rendered FROM messages

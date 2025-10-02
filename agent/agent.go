@@ -74,7 +74,7 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 	currentHistory := append(history, types.AgentMessage{Role: "user", Content: input})
 
 	// Query RAG for long-term context - non-critical, log warning if fails
-	longTermContext, err := a.rag.Query(ctx, input, a.cfg.RAGResults)
+	longTermContext, err := a.rag.Query(ctx, sessionID, input, a.cfg.RAGResults)
 	if err != nil {
 		a.logger.Warn("Failed to query RAG for long-term context, continuing without it",
 			zap.Error(err),
@@ -87,7 +87,7 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 		if err == nil && contextTokens > int(float64(a.cfg.ContextLength)*0.75) {
 			a.logger.Info("Proactive check: RAG context is too large, summarizing", zap.Int("context_tokens", contextTokens))
 			_ = stream.Status("Compressing memory....")
-			summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(ctx, longTermContext)
+			summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(ctx, longTermContext, input)
 			if summaryErr == nil {
 				longTermContext = summarizedContext
 			}
@@ -132,7 +132,7 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 
 		// Handle empty response (usually context window error)
 		if a.responseHandler.IsEmpty(llmResponse) {
-			longTermContext = a.handleEmptyResponse(ctx, longTermContext, stream)
+			longTermContext = a.handleEmptyResponse(ctx, longTermContext, input, stream)
 			if longTermContext == "" {
 				break // Recovery failed
 			}
@@ -186,12 +186,12 @@ func (a *Agent) GenerateTitle(ctx context.Context, content string) (string, erro
 		{Role: "user", Content: userPrompt},
 	}
 
-    // Use non-streaming client without agent system prompt injection
-    client := llmclient.New(a.cfg, a.logger)
-    title, err := client.Chat(ctx, a.cfg.SummarizationLLMHost, messages)
-    if err != nil {
-        return "", fmt.Errorf("llm chat call failed for title generation: %w", err)
-    }
+	// Use non-streaming client without agent system prompt injection
+	client := llmclient.New(a.cfg, a.logger)
+	title, err := client.Chat(ctx, a.cfg.SummarizationLLMHost, messages)
+	if err != nil {
+		return "", fmt.Errorf("llm chat call failed for title generation: %w", err)
+	}
 
 	if title == "" {
 		return "", fmt.Errorf("llm returned an empty title")
@@ -227,11 +227,11 @@ func stripSurroundingQuotes(s string) string {
 }
 
 // handleEmptyResponse attempts to recover from empty LLM responses by summarizing context.
-func (a *Agent) handleEmptyResponse(ctx context.Context, longTermContext string, stream *Stream) string {
+func (a *Agent) handleEmptyResponse(ctx context.Context, longTermContext, latestUserMessage string, stream *Stream) string {
 	a.logger.Warn("LLM response was empty, likely due to a context window error. Attempting to summarize context")
 	_ = stream.Status("Compressing memory due to a context window error...")
 
-	summarizedContext, err := a.rag.SummarizeLongTermMemory(ctx, longTermContext)
+	summarizedContext, err := a.rag.SummarizeLongTermMemory(ctx, longTermContext, latestUserMessage)
 	if err != nil {
 		a.logger.Error("Recovery failed: Could not summarize RAG context. Aborting turn", zap.Error(err))
 		return ""

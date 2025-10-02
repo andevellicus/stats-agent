@@ -4,9 +4,9 @@ import "strings"
 
 // Tag definitions - single source of truth for all custom XML tags
 const (
-	TagPython           = "python"
-	TagExecutionResults = "execution_results"
-	TagAgentStatus      = "agent_status"
+	TagPython      = "python"
+	TagTool        = "tool"
+	TagAgentStatus = "agent_status"
 )
 
 // Tag represents a custom XML-like tag used in the application.
@@ -26,10 +26,10 @@ var (
 		MarkdownAlt: "```python",
 	}
 
-	ExecutionResultsTag = Tag{
-		Name:     TagExecutionResults,
-		OpenTag:  "<execution_results>",
-		CloseTag: "</execution_results>",
+	ToolTag = Tag{
+		Name:     TagTool,
+		OpenTag:  "<tool>",
+		CloseTag: "</tool>",
 	}
 
 	AgentStatusTag = Tag{
@@ -39,7 +39,7 @@ var (
 	}
 
 	// AllTags contains all tags for iteration
-	AllTags = []Tag{PythonTag, ExecutionResultsTag, AgentStatusTag}
+	AllTags = []Tag{PythonTag, ToolTag, AgentStatusTag}
 )
 
 // HasTag checks if text contains a specific tag (opening or closing).
@@ -89,4 +89,34 @@ func StripAllTags(text string) string {
 		text = StripTag(text, tag)
 	}
 	return text
+}
+
+// StreamTransform defines how a tag should be transformed for SSE streaming.
+type StreamTransform struct {
+	OpenReplace  string // Replacement for opening tag
+	CloseReplace string // Replacement for closing tag
+}
+
+// GetStreamTransform returns the streaming transformation for a given tag.
+// This is used by the stream service to convert XML tags to display format.
+func GetStreamTransform(tag Tag) StreamTransform {
+	switch tag.Name {
+	case TagPython:
+		return StreamTransform{
+			OpenReplace:  "\n```python\n",
+			CloseReplace: "\n```\n",
+		}
+	case TagTool:
+		return StreamTransform{
+			OpenReplace:  "\n```\n",
+			CloseReplace: "\n```\n",
+		}
+	case TagAgentStatus:
+		return StreamTransform{
+			OpenReplace:  `<div class="agent-status-message">`,
+			CloseReplace: `</div>`,
+		}
+	default:
+		return StreamTransform{}
+	}
 }

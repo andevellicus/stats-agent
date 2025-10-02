@@ -46,7 +46,8 @@ func (s *PostgresStore) UpsertRAGDocument(ctx context.Context, documentID uuid.U
 	        DO UPDATE SET content = EXCLUDED.content, embedding_content = EXCLUDED.embedding_content, metadata = EXCLUDED.metadata, content_hash = EXCLUDED.content_hash, embedding = EXCLUDED.embedding, created_at = NOW()
 	    `
 
-	if _, err := s.DB.ExecContext(ctx, query, documentID, documentID, content, embeddingContent, string(metaJSON), hashValue, embeddingValue); err != nil {
+	rowID := uuid.New()
+	if _, err := s.DB.ExecContext(ctx, query, rowID, documentID, content, embeddingContent, string(metaJSON), hashValue, embeddingValue); err != nil {
 		return fmt.Errorf("failed to upsert rag document: %w", err)
 	}
 	return nil

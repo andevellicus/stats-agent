@@ -136,10 +136,10 @@ func renderTagComponent(ctx context.Context, taggedContent string) (string, erro
 		if err := components.PythonCodeBlock(code).Render(ctx, &buf); err != nil {
 			return "", fmt.Errorf("failed to render python block: %w", err)
 		}
-	} else if after, ok := strings.CutPrefix(taggedContent, ExecutionResultsTag.OpenTag); ok {
-		result := strings.TrimSuffix(after, ExecutionResultsTag.CloseTag)
+	} else if after, ok := strings.CutPrefix(taggedContent, ToolTag.OpenTag); ok {
+		result := strings.TrimSuffix(after, ToolTag.CloseTag)
 		if err := components.ExecutionResultBlock(result).Render(ctx, &buf); err != nil {
-			return "", fmt.Errorf("failed to render execution result block: %w", err)
+			return "", fmt.Errorf("failed to render tool block: %w", err)
 		}
 	} else if after, ok := strings.CutPrefix(taggedContent, AgentStatusTag.OpenTag); ok {
 		status := strings.TrimSuffix(after, AgentStatusTag.CloseTag)
@@ -149,34 +149,4 @@ func renderTagComponent(ctx context.Context, taggedContent string) (string, erro
 	}
 
 	return buf.String(), nil
-}
-
-// StreamTransform defines how a tag should be transformed for SSE streaming.
-type StreamTransform struct {
-	OpenReplace  string // Replacement for opening tag
-	CloseReplace string // Replacement for closing tag
-}
-
-// GetStreamTransform returns the streaming transformation for a given tag.
-// This is used by the stream service to convert XML tags to display format.
-func GetStreamTransform(tag Tag) StreamTransform {
-	switch tag.Name {
-	case TagPython:
-		return StreamTransform{
-			OpenReplace:  "\n```python\n",
-			CloseReplace: "\n```\n",
-		}
-	case TagExecutionResults:
-		return StreamTransform{
-			OpenReplace:  "\n```\n",
-			CloseReplace: "\n```\n",
-		}
-	case TagAgentStatus:
-		return StreamTransform{
-			OpenReplace:  `<div class="agent-status-message">`,
-			CloseReplace: `</div>`,
-		}
-	default:
-		return StreamTransform{}
-	}
 }

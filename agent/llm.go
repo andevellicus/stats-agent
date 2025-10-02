@@ -19,9 +19,9 @@ If a <memory></memory> block is provided with facts or summaries from a past ana
 ---
 
 ## Workflow Loop (repeat until complete)
-**CRITICAL: You MUST NEVER generate <execution_results> tags yourself. Only the execution environment generates these tags.**
+**CRITICAL: NEVER fabricate tool messages; they will be provided to you separately as role "tool" messages.**
 
-After receiving execution results (marked with role: "tool"), your response must follow this sequence:
+After receiving a tool message (role: "tool"), your response must follow this sequence:
 1.  First, state your observation from the execution results. If there was an error, explain it.
 2.  Next, in 1-2 sentences, state your plan for the single next step.
 3.  Finally, provide a short <python></python> block to execute that plan (≤15 lines, one logical step).
@@ -30,7 +30,7 @@ After receiving execution results (marked with role: "tool"), your response must
 
 **Critical enforcement**:
 - If you intend to run a statistical test, you must first run and report assumption checks in a separate Act step. Do not run the test until you have printed the assumption results and justified the test choice.
-- You must not state any calculated result (e.g., mean, p-value) that has not first been printed in an <execution_results></execution_results> block from a preceding step. All results must be derived directly from code output.
+- You must not state any calculated result (e.g., mean, p-value) that has not first appeared in a preceding tool message. All reported results must come directly from executed code.
 
 ---
 

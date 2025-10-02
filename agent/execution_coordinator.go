@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"stats-agent/tools"
 	"stats-agent/web/format"
 	"strings"
@@ -39,7 +38,7 @@ func (e *ExecutionCoordinator) ProcessResponse(ctx context.Context, llmResponse,
 	processedResponse := e.ConvertMarkdownToXML(llmResponse)
 
 	// Try to execute Python code if present
-	code, result, wasExecuted := e.pythonTool.ExecutePythonCode(ctx, processedResponse, sessionID, stream)
+	code, result, wasExecuted := e.pythonTool.ExecutePythonCode(ctx, processedResponse, sessionID, nil)
 
 	if !wasExecuted {
 		return &ExecutionResult{
@@ -55,13 +54,18 @@ func (e *ExecutionCoordinator) ProcessResponse(ctx context.Context, llmResponse,
 			zap.String("error_preview", result[:min(200, len(result))]))
 	}
 
-	// Format result with XML tags for consistency
-	formattedResult := fmt.Sprintf("<execution_results>\n%s\n</execution_results>", result)
+	if stream != nil {
+		if err := stream.Tool(result); err != nil {
+			e.logger.Warn("Failed to stream tool result",
+				zap.String("session_id", sessionID),
+				zap.Error(err))
+		}
+	}
 
 	return &ExecutionResult{
 		WasCodeExecuted: true,
 		Code:            code,
-		Result:          formattedResult,
+		Result:          result,
 		HasError:        hasError,
 	}, nil
 }

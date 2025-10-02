@@ -517,13 +517,5 @@ func (t *StatefulPythonTool) ExecutePythonCode(ctx context.Context, text string,
 		t.logger.Debug("Python code executed successfully", zap.String("result_preview", execResult[:min(100, len(execResult))]))
 	}
 
-	if output != nil {
-		if _, writeErr := io.WriteString(output, fmt.Sprintf("<execution_results>%s</execution_results>", execResult)); writeErr != nil {
-			if t.logger != nil {
-				t.logger.Warn("Failed to stream python execution result", zap.Error(writeErr))
-			}
-		}
-	}
-
 	return pythonCode, execResult, true
 }

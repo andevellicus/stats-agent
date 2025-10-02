@@ -69,6 +69,16 @@ func New(cfg *config.Config, store *database.PostgresStore, logger *zap.Logger) 
 	return rag, nil
 }
 
+func canonicalizeFactText(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " \t")
+	}
+	joined := strings.Join(lines, "\n")
+	return strings.TrimSpace(joined)
+}
+
 func (r *RAG) AddMessagesToStore(ctx context.Context, sessionID string, messages []types.AgentMessage) error {
 	collection := r.db.GetCollection("long-term-memory", r.embedder)
 	if collection == nil {
@@ -77,6 +87,10 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, sessionID string, messages
 
 	var documentsToEmbed []chromem.Document
 	processedIndices := make(map[int]bool)
+	var sessionFilter map[string]string
+	if sessionID != "" {
+		sessionFilter = map[string]string{"session_id": sessionID}
+	}
 	copyMetadata := func(src map[string]string) map[string]string {
 		if src == nil {
 			return nil
@@ -113,13 +127,13 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, sessionID string, messages
 			processedIndices[i+1] = true
 			metadata["role"] = "fact"
 
-			assistantContent := message.Content
-			toolContent := strings.TrimSpace(stripExecutionResultsWrapper(toolMessage.Content))
+			assistantContent := canonicalizeFactText(message.Content)
+			toolContent := canonicalizeFactText(stripExecutionResultsWrapper(toolMessage.Content))
 
 			userContent := ""
 			for prev := i - 1; prev >= 0; prev-- {
 				if messages[prev].Role == "user" {
-					userContent = messages[prev].Content
+					userContent = canonicalizeFactText(messages[prev].Content)
 					break
 				}
 			}
@@ -134,8 +148,8 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, sessionID string, messages
 
 			factJSON, marshalErr := json.Marshal(factPayload)
 			if marshalErr != nil {
-				r.logger.Warn("Failed to marshal fact payload, falling back to legacy format", zap.Error(marshalErr))
-				storedContent = fmt.Sprintf("%s\n<execution_results>\n%s\n</execution_results>", assistantContent, toolContent)
+				r.logger.Warn("Failed to marshal fact payload, falling back to concatenated format", zap.Error(marshalErr))
+				storedContent = fmt.Sprintf("%s\n\n%s", assistantContent, toolContent)
 			} else {
 				storedContent = string(factJSON)
 			}
@@ -153,7 +167,7 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, sessionID string, messages
 						zap.Int("result_length", len(result)))
 					contentToEmbed = "Fact: A code execution event occurred but could not be summarized."
 				} else {
-					contentToEmbed = summary
+					contentToEmbed = strings.TrimSpace(summary)
 				}
 			} else {
 				contentToEmbed = "Fact: An assistant action with a tool execution occurred."
@@ -167,12 +181,13 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, sessionID string, messages
 				}
 			}
 
-			storedContent = message.Content
+			storedContent = canonicalizeFactText(message.Content)
 			metadata["role"] = message.Role
-			contentToEmbed = message.Content
+			contentToEmbed = storedContent
 
+			contentToEmbed = canonicalizeFactText(contentToEmbed)
 			if collection.Count() > 0 {
-				results, err := collection.Query(ctx, contentToEmbed, 1, nil, nil)
+				results, err := collection.Query(ctx, contentToEmbed, 1, sessionFilter, nil)
 				if err != nil {
 					r.logger.Warn("Deduplication query failed, proceeding to add document anyway", zap.Error(err))
 				} else if len(results) > 0 && results[0].Similarity > 0.98 && results[0].Metadata["role"] == message.Role {
@@ -423,7 +438,7 @@ func (r *RAG) LoadPersistedDocuments(ctx context.Context) error {
 	return nil
 }
 
-func (r *RAG) Query(ctx context.Context, query string, nResults int) (string, error) {
+func (r *RAG) Query(ctx context.Context, sessionID string, query string, nResults int) (string, error) {
 	collection := r.db.GetCollection("long-term-memory", r.embedder)
 	if collection == nil {
 		return "", fmt.Errorf("failed to get collection: collection not found")
@@ -433,7 +448,11 @@ func (r *RAG) Query(ctx context.Context, query string, nResults int) (string, er
 	}
 
 	candidateCount := min(nResults*5, collection.Count())
-	results, err := collection.Query(ctx, query, candidateCount, nil, nil)
+	var where map[string]string
+	if sessionID != "" {
+		where = map[string]string{"session_id": sessionID}
+	}
+	results, err := collection.Query(ctx, query, candidateCount, where, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to query collection: %w", err)
 	}
@@ -538,16 +557,16 @@ func (r *RAG) Query(ctx context.Context, query string, nResults int) (string, er
 		if role == "fact" {
 			var fact factStoredContent
 			if err := json.Unmarshal([]byte(content), &fact); err == nil && (fact.User != "" || fact.Assistant != "" || fact.Tool != "") {
-				userTrimmed := strings.TrimSpace(fact.User)
+				userTrimmed := canonicalizeFactText(fact.User)
 				if userTrimmed != "" && userTrimmed != lastEmittedUser {
 					contextBuilder.WriteString(fmt.Sprintf("- user: %s\n", userTrimmed))
 					lastEmittedUser = userTrimmed
 				}
 				if fact.Assistant != "" {
-					contextBuilder.WriteString(fmt.Sprintf("- assistant: %s\n", strings.TrimSpace(fact.Assistant)))
+					contextBuilder.WriteString(fmt.Sprintf("- assistant: %s\n", canonicalizeFactText(fact.Assistant)))
 				}
 				if fact.Tool != "" {
-					contextBuilder.WriteString(fmt.Sprintf("- tool: %s\n", strings.TrimSpace(stripExecutionResultsWrapper(fact.Tool))))
+					contextBuilder.WriteString(fmt.Sprintf("- tool: %s\n", canonicalizeFactText(stripExecutionResultsWrapper(fact.Tool))))
 				}
 
 				processedDocIDs[lookupID] = true
@@ -556,23 +575,23 @@ func (r *RAG) Query(ctx context.Context, query string, nResults int) (string, er
 			}
 
 			// Fallback for legacy fact payloads
-			assistantContent := strings.TrimSpace(content)
+			assistantContent := canonicalizeFactText(content)
 			toolContent := ""
 			if idx := strings.Index(content, "<execution_results>"); idx != -1 {
-				assistantContent = strings.TrimSpace(content[:idx])
+				assistantContent = canonicalizeFactText(content[:idx])
 				remainder := content[idx+len("<execution_results>"):]
 				if endIdx := strings.Index(remainder, "</execution_results>"); endIdx != -1 {
-					toolContent = strings.TrimSpace(remainder[:endIdx])
+					toolContent = canonicalizeFactText(remainder[:endIdx])
 				} else {
-					toolContent = strings.TrimSpace(remainder)
+					toolContent = canonicalizeFactText(remainder)
 				}
 			}
 
 			if assistantContent != "" {
-				contextBuilder.WriteString(fmt.Sprintf("- assistant: %s\n", assistantContent))
+				contextBuilder.WriteString(fmt.Sprintf("- assistant: %s\n", canonicalizeFactText(assistantContent)))
 			}
 			if toolContent != "" {
-				contextBuilder.WriteString(fmt.Sprintf("- tool: %s\n", toolContent))
+				contextBuilder.WriteString(fmt.Sprintf("- tool: %s\n", canonicalizeFactText(toolContent)))
 			}
 		} else {
 			contextBuilder.WriteString(fmt.Sprintf("- %s: %s\n", role, content))
@@ -624,7 +643,8 @@ func stripExecutionResultsWrapper(text string) string {
 }
 
 // SummarizeLongTermMemory takes a large context string and condenses it.
-func (r *RAG) SummarizeLongTermMemory(ctx context.Context, context string) (string, error) {
+func (r *RAG) SummarizeLongTermMemory(ctx context.Context, context, latestUserMessage string) (string, error) {
+	latestUserMessage = strings.TrimSpace(latestUserMessage)
 	systemPrompt := `You are an expert at creating concise, searchable facts from code and its output. Your task is to generate a single, descriptive sentence that captures the key finding, action, or error.
 
 	Follow these rules:
@@ -648,7 +668,17 @@ func (r *RAG) SummarizeLongTermMemory(ctx context.Context, context string) (stri
 	**Your Output:**
 	Fact: The dataframe contains columns for age, gender, and side.
 	---`
-	userPrompt := fmt.Sprintf("History to summarize:\n%s", context)
+	if latestUserMessage == "" {
+		latestUserMessage = "(no new user question provided)"
+	}
+
+	userPrompt := fmt.Sprintf(`The user's latest question is:
+"%s"
+
+Summarize the following memory so that it highlights information that helps answer that question.
+
+History to summarize:
+%s`, latestUserMessage, context)
 
 	messages := []types.AgentMessage{
 		{Role: "system", Content: systemPrompt},

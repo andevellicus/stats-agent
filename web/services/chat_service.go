@@ -230,8 +230,43 @@ func (cs *ChatService) StreamAgentResponse(
 	defer pipeReader.Close()
 
 	var captureBuffer bytes.Buffer
-	fanOutWriter := io.MultiWriter(&captureBuffer, pipeWriter)
-	agentStream := agent.NewStream(fanOutWriter)
+
+	var lastAssistantMu sync.Mutex
+	var lastAssistantID string
+
+	persist := func(assistant string, tool *string) {
+		assistant = strings.TrimSpace(assistant)
+		toolStr := ""
+		if tool != nil {
+			toolStr = strings.TrimSpace(*tool)
+		}
+		if assistant == "" && toolStr == "" {
+			return
+		}
+
+		ctxPersist, cancelPersist := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancelPersist()
+
+		var toolPtr *string
+		if toolStr != "" {
+			toolPtr = &toolStr
+		}
+
+		id, err := cs.messageService.SaveAssistantAndTool(ctxPersist, sessionID, assistant, toolPtr, "")
+		if err != nil {
+			cs.logger.Error("Incremental message persistence failed",
+				zap.Error(err),
+				zap.String("session_id", sessionID))
+			return
+		}
+		if id != "" {
+			lastAssistantMu.Lock()
+			lastAssistantID = id
+			lastAssistantMu.Unlock()
+		}
+	}
+
+	agentStream := agent.NewStream(&captureBuffer, pipeWriter, persist)
 
 	streamDone := make(chan struct{})
 	go func() {
@@ -256,6 +291,8 @@ func (cs *ChatService) StreamAgentResponse(
 
 	<-agentDone
 	<-streamDone
+
+	agentStream.Finalize()
 
 	// Use background context for DB operations after request context might be cancelled
 	backgroundCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -296,12 +333,16 @@ func (cs *ChatService) StreamAgentResponse(
 		dbFilesHTML = ""
 	}
 
-	// Parse and save messages to database - critical for preserving conversation
-	rawAgentResponse := captureBuffer.String()
-	if err := cs.messageService.ParseAndSaveAgentResponse(backgroundCtx, rawAgentResponse, sessionID, dbFilesHTML); err != nil {
-		cs.logger.Error("Failed to parse and save agent response - CONVERSATION DATA MAY BE LOST",
-			zap.Error(err),
-			zap.String("session_id", sessionID),
-			zap.Int("response_length", len(rawAgentResponse)))
+	if dbFilesHTML != "" {
+		lastAssistantMu.Lock()
+		assistantID := lastAssistantID
+		lastAssistantMu.Unlock()
+		if assistantID != "" {
+			if err := cs.messageService.AppendFilesToMessage(backgroundCtx, assistantID, dbFilesHTML); err != nil {
+				cs.logger.Error("Failed to append files HTML to assistant message",
+					zap.Error(err),
+					zap.String("message_id", assistantID))
+			}
+		}
 	}
 }
