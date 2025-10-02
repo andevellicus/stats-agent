@@ -46,6 +46,18 @@ type factStoredContent struct {
 	Tool      string `json:"tool"`
 }
 
+type hybridCandidate struct {
+	DocumentID    string
+	Metadata      map[string]string
+	Content       string
+	SemanticScore float64
+	BM25Score     float64
+	ExactBonus    float64
+	HasSemantic   bool
+	HasBM25       bool
+	Score         float64
+}
+
 // Embedding request/response types moved to llmclient
 
 func New(cfg *config.Config, store *database.PostgresStore, logger *zap.Logger) (*RAG, error) {
@@ -439,80 +451,169 @@ func (r *RAG) LoadPersistedDocuments(ctx context.Context) error {
 }
 
 func (r *RAG) Query(ctx context.Context, sessionID string, query string, nResults int) (string, error) {
-	collection := r.db.GetCollection("long-term-memory", r.embedder)
-	if collection == nil {
-		return "", fmt.Errorf("failed to get collection: collection not found")
-	}
-	if collection.Count() == 0 {
+	if nResults <= 0 {
 		return "", nil
 	}
 
-	candidateCount := min(nResults*5, collection.Count())
-	var where map[string]string
-	if sessionID != "" {
-		where = map[string]string{"session_id": sessionID}
+	collection := r.db.GetCollection("long-term-memory", r.embedder)
+	const maxHybridCandidates = 100
+	candidateLimit := max(nResults*4, 20)
+	if candidateLimit > maxHybridCandidates {
+		candidateLimit = maxHybridCandidates
 	}
-	results, err := collection.Query(ctx, query, candidateCount, where, nil)
+
+	lowerQuery := strings.ToLower(query)
+	isQueryForError := strings.Contains(lowerQuery, "error")
+	candidates := make(map[string]*hybridCandidate)
+
+	if collection == nil {
+		r.logger.Warn("Vector collection not found, using BM25 fallback only")
+	} else {
+		total := collection.Count()
+		if total > 0 {
+			limit := candidateLimit
+			if limit > total {
+				limit = total
+			}
+			if limit > 0 {
+				var where map[string]string
+				if sessionID != "" {
+					where = map[string]string{"session_id": sessionID}
+				}
+				semanticResults, err := collection.Query(ctx, query, limit, where, nil)
+				if err != nil {
+					return "", fmt.Errorf("failed to query collection: %w", err)
+				}
+				for _, res := range semanticResults {
+					docID := res.Metadata["document_id"]
+					if docID == "" {
+						r.logger.Warn("Vector result missing document_id, skipping")
+						continue
+					}
+					cand := ensureCandidate(candidates, docID, res.Metadata)
+					if float64(res.Similarity) > cand.SemanticScore {
+						cand.SemanticScore = float64(res.Similarity)
+						cand.Content = res.Content
+					}
+					cand.HasSemantic = true
+				}
+			}
+		}
+	}
+
+	bm25Results, err := r.store.SearchRAGDocumentsBM25(ctx, query, candidateLimit, sessionID)
 	if err != nil {
-		return "", fmt.Errorf("failed to query collection: %w", err)
+		return "", fmt.Errorf("failed to run BM25 search: %w", err)
+	}
+	for _, bm := range bm25Results {
+		docID := bm.Metadata["document_id"]
+		if docID == "" {
+			docID = bm.DocumentID.String()
+			if bm.Metadata == nil {
+				bm.Metadata = make(map[string]string)
+			}
+			bm.Metadata["document_id"] = docID
+		}
+		cand := ensureCandidate(candidates, docID, bm.Metadata)
+		combined := bm.BM25Score + bm.ExactMatchBonus
+		existingCombined := cand.BM25Score + cand.ExactBonus
+
+		embContent := bm.EmbeddingContent
+		if embContent == "" {
+			embContent = bm.Content
+		}
+
+		if combined > existingCombined {
+			cand.BM25Score = bm.BM25Score
+			cand.ExactBonus = bm.ExactMatchBonus
+			if embContent != "" {
+				cand.Content = embContent
+			}
+		} else if cand.Content == "" && embContent != "" {
+			cand.Content = embContent
+		}
+		cand.HasBM25 = true
 	}
 
-	sort.Slice(results, func(i, j int) bool {
-		scoreI := results[i].Similarity
-		scoreJ := results[j].Similarity
+	if len(candidates) == 0 {
+		return "", nil
+	}
 
-		// Boost the score if the document is a fact
-		if results[i].Metadata["role"] == "fact" {
-			scoreI *= 1.3 // Boost facts
+	var maxSemantic float64
+	var maxBM float64
+	for _, cand := range candidates {
+		if cand.SemanticScore > maxSemantic {
+			maxSemantic = cand.SemanticScore
 		}
-		if results[j].Metadata["role"] == "fact" {
-			scoreJ *= 1.3
+		bmCombined := cand.BM25Score + cand.ExactBonus
+		if bmCombined > maxBM {
+			maxBM = bmCombined
+		}
+	}
+
+	candidateList := make([]*hybridCandidate, 0, len(candidates))
+	for _, cand := range candidates {
+		weighted := 0.0
+		weightSum := 0.0
+		if cand.HasSemantic && maxSemantic > 0 {
+			weighted += 0.7 * (cand.SemanticScore / maxSemantic)
+			weightSum += 0.7
+		}
+		if cand.HasBM25 && maxBM > 0 {
+			weighted += 0.3 * ((cand.BM25Score + cand.ExactBonus) / maxBM)
+			weightSum += 0.3
+		}
+		combined := 0.0
+		if weightSum > 0 {
+			combined = weighted / weightSum
 		}
 
-		// Boost summaries even more
-		if results[i].Metadata["type"] == "summary" {
-			scoreI *= 1.2 // Higher boost for high-level summaries
+		role := cand.Metadata["role"]
+		if role == "fact" {
+			combined *= 1.3
 		}
-		if results[j].Metadata["type"] == "summary" {
-			scoreJ *= 1.2
+		if cand.Metadata["type"] == "summary" {
+			combined *= 1.2
 		}
-
-		// Slightly penalize error messages unless the query is specifically about errors
-		isQueryForError := strings.Contains(strings.ToLower(query), "error")
-		if strings.Contains(results[i].Content, "Error:") && !isQueryForError {
-			scoreI *= 0.8 // Penalize
-		}
-		if strings.Contains(results[j].Content, "Error:") && !isQueryForError {
-			scoreJ *= 0.8
+		if cand.Content != "" && strings.Contains(cand.Content, "Error:") && !isQueryForError {
+			combined *= 0.8
 		}
 
-		return scoreI > scoreJ
+		cand.Score = combined
+		candidateList = append(candidateList, cand)
+	}
+
+	sort.Slice(candidateList, func(i, j int) bool {
+		if candidateList[i].Score == candidateList[j].Score {
+			return candidateList[i].DocumentID < candidateList[j].DocumentID
+		}
+		return candidateList[i].Score > candidateList[j].Score
 	})
+
+	docContents := make(map[string]string)
 
 	var contextBuilder strings.Builder
 	contextBuilder.WriteString("<memory>\n")
 
 	processedDocIDs := make(map[string]bool)
-	docContents := make(map[string]string)
 	lastEmittedUser := ""
 	addedDocs := 0
 
-	for _, result := range results {
+	for _, cand := range candidateList {
 		if addedDocs >= nResults {
 			break
 		}
 
-		docID, ok := result.Metadata["document_id"]
-		if !ok {
+		docID := cand.Metadata["document_id"]
+		if docID == "" {
 			r.logger.Warn("Document is missing a document_id, skipping")
 			continue
 		}
 
-		lookupID := docID
-		if docType, hasType := result.Metadata["type"]; hasType && (docType == "summary" || docType == "chunk") {
-			if parentID, hasParent := result.Metadata["parent_document_id"]; hasParent && parentID != "" {
-				lookupID = parentID
-			}
+		lookupID := resolveLookupID(cand.Metadata)
+		if lookupID == "" {
+			r.logger.Warn("Unable to resolve lookup identifier for document", zap.String("document_id", docID))
+			continue
 		}
 
 		if processedDocIDs[lookupID] {
@@ -547,12 +648,7 @@ func (r *RAG) Query(ctx context.Context, sessionID string, query string, nResult
 			docContents[lookupID] = content
 		}
 
-		role := result.Metadata["role"]
-		if role == "" {
-			if parentRole, hasParentRole := result.Metadata["parent_document_role"]; hasParentRole {
-				role = parentRole
-			}
-		}
+		role := resolveRole(cand.Metadata)
 
 		if role == "fact" {
 			var fact factStoredContent
@@ -574,7 +670,6 @@ func (r *RAG) Query(ctx context.Context, sessionID string, query string, nResult
 				continue
 			}
 
-			// Fallback for legacy fact payloads
 			assistantContent := canonicalizeFactText(content)
 			toolContent := ""
 			if idx := strings.Index(content, "<execution_results>"); idx != -1 {
@@ -603,6 +698,66 @@ func (r *RAG) Query(ctx context.Context, sessionID string, query string, nResult
 
 	contextBuilder.WriteString("</memory>\n")
 	return contextBuilder.String(), nil
+}
+
+func ensureCandidate(candidates map[string]*hybridCandidate, docID string, metadata map[string]string) *hybridCandidate {
+	if cand, ok := candidates[docID]; ok {
+		if cand.Metadata == nil {
+			cand.Metadata = make(map[string]string)
+		}
+		for k, v := range metadata {
+			if v == "" {
+				continue
+			}
+			if existing, exists := cand.Metadata[k]; !exists || existing == "" {
+				cand.Metadata[k] = v
+			}
+		}
+		return cand
+	}
+
+	metaCopy := cloneStringMap(metadata)
+	cand := &hybridCandidate{
+		DocumentID: docID,
+		Metadata:   metaCopy,
+	}
+	candidates[docID] = cand
+	return cand
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return make(map[string]string)
+	}
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func resolveLookupID(metadata map[string]string) string {
+	if metadata == nil {
+		return ""
+	}
+	docID := metadata["document_id"]
+	lookupID := docID
+	if docType, ok := metadata["type"]; ok && (docType == "summary" || docType == "chunk") {
+		if parentID := metadata["parent_document_id"]; parentID != "" {
+			lookupID = parentID
+		}
+	}
+	return lookupID
+}
+
+func resolveRole(metadata map[string]string) string {
+	if metadata == nil {
+		return ""
+	}
+	if role := metadata["role"]; role != "" {
+		return role
+	}
+	return metadata["parent_document_role"]
 }
 
 // DeleteSessionDocuments removes in-memory documents associated with a session from the vector store.
