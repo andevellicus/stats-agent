@@ -87,6 +87,9 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 	}
 
 	indexStmts := []string{
+		`CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_user_active ON sessions(user_id, is_active, last_active DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_rag_documents_created_at ON rag_documents(created_at)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_documents_document_id ON rag_documents(document_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_rag_documents_content_hash ON rag_documents(content_hash)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_documents_session_role_hash ON rag_documents (content_hash, COALESCE(metadata ->> 'session_id', ''), COALESCE(metadata ->> 'role', '')) WHERE content_hash IS NOT NULL`,

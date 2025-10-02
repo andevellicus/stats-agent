@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	EOM_TOKEN               = "<|EOM|>"
-	defaultExecutorCooldown = 5 * time.Second
+	EOM_TOKEN                        = "<|EOM|>"
+	defaultExecutorCooldown          = 5 * time.Second
+	defaultMaxConnectionsPerExecutor = 4
 )
 
 type executorNode struct {
@@ -29,6 +30,98 @@ type executorPool struct {
 	mu       sync.Mutex
 	next     int
 	cooldown time.Duration
+}
+
+type connPool struct {
+	address string
+	idle    chan net.Conn
+	sem     chan struct{}
+	dial    func(context.Context) (net.Conn, error)
+}
+
+func newConnPool(address string, maxSize int, dial func(context.Context) (net.Conn, error)) *connPool {
+	if maxSize <= 0 {
+		maxSize = 1
+	}
+	return &connPool{
+		address: address,
+		idle:    make(chan net.Conn, maxSize),
+		sem:     make(chan struct{}, maxSize),
+		dial:    dial,
+	}
+}
+
+func (p *connPool) Get(ctx context.Context) (net.Conn, error) {
+	for {
+		select {
+		case conn := <-p.idle:
+			if conn != nil {
+				return conn, nil
+			}
+		default:
+		}
+
+		select {
+		case p.sem <- struct{}{}:
+			conn, err := p.dial(ctx)
+			if err != nil {
+				select {
+				case <-p.sem:
+				default:
+				}
+				return nil, err
+			}
+			return conn, nil
+		case conn := <-p.idle:
+			if conn != nil {
+				return conn, nil
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+func (p *connPool) Put(conn net.Conn) {
+	if conn == nil {
+		return
+	}
+	select {
+	case p.idle <- conn:
+	default:
+		_ = conn.Close()
+		select {
+		case <-p.sem:
+		default:
+		}
+	}
+}
+
+func (p *connPool) Discard(conn net.Conn) {
+	if conn != nil {
+		_ = conn.Close()
+	}
+	select {
+	case <-p.sem:
+	default:
+	}
+}
+
+func (p *connPool) Close() {
+	for {
+		select {
+		case conn := <-p.idle:
+			if conn != nil {
+				_ = conn.Close()
+				select {
+				case <-p.sem:
+				default:
+				}
+			}
+		default:
+			return
+		}
+	}
 }
 
 func newExecutorPool(addresses []string, cooldown time.Duration) (*executorPool, error) {
@@ -114,12 +207,15 @@ func (p *executorPool) Addresses() []string {
 }
 
 type StatefulPythonTool struct {
-	pool        *executorPool
-	logger      *zap.Logger
-	dialTimeout time.Duration
-	ioTimeout   time.Duration
-	sessionMu   sync.RWMutex
-	sessionAddr map[string]string
+	pool                      *executorPool
+	logger                    *zap.Logger
+	dialTimeout               time.Duration
+	ioTimeout                 time.Duration
+	sessionMu                 sync.RWMutex
+	sessionAddr               map[string]string
+	connPoolsMu               sync.RWMutex
+	connPools                 map[string]*connPool
+	maxConnectionsPerExecutor int
 }
 
 // NewStatefulPythonTool no longer creates a session ID.
@@ -129,11 +225,13 @@ func NewStatefulPythonTool(ctx context.Context, addresses []string, logger *zap.
 		return nil, err
 	}
 	tool := &StatefulPythonTool{
-		pool:        pool,
-		logger:      logger,
-		dialTimeout: 3 * time.Second,
-		ioTimeout:   60 * time.Second,
-		sessionAddr: make(map[string]string),
+		pool:                      pool,
+		logger:                    logger,
+		dialTimeout:               3 * time.Second,
+		ioTimeout:                 60 * time.Second,
+		sessionAddr:               make(map[string]string),
+		connPools:                 make(map[string]*connPool),
+		maxConnectionsPerExecutor: defaultMaxConnectionsPerExecutor,
 	}
 	if err := tool.ensureInitialConnectivity(ctx); err != nil {
 		return nil, err
@@ -144,11 +242,31 @@ func NewStatefulPythonTool(ctx context.Context, addresses []string, logger *zap.
 	return tool, nil
 }
 
+func (t *StatefulPythonTool) getConnPool(address string) *connPool {
+	t.connPoolsMu.RLock()
+	pool := t.connPools[address]
+	t.connPoolsMu.RUnlock()
+	if pool != nil {
+		return pool
+	}
+
+	t.connPoolsMu.Lock()
+	defer t.connPoolsMu.Unlock()
+	if pool = t.connPools[address]; pool == nil {
+		pool = newConnPool(address, t.maxConnectionsPerExecutor, func(ctx context.Context) (net.Conn, error) {
+			return t.dial(ctx, address)
+		})
+		t.connPools[address] = pool
+	}
+	return pool
+}
+
 func (t *StatefulPythonTool) ensureInitialConnectivity(ctx context.Context) error {
 	addresses := t.pool.Addresses()
 	var lastErr error
 	for _, addr := range addresses {
-		conn, err := t.dial(ctx, addr)
+		cp := t.getConnPool(addr)
+		conn, err := cp.Get(ctx)
 		if err != nil {
 			t.pool.MarkFailure(addr)
 			lastErr = err
@@ -157,7 +275,7 @@ func (t *StatefulPythonTool) ensureInitialConnectivity(ctx context.Context) erro
 			}
 			continue
 		}
-		_ = conn.Close()
+		cp.Put(conn)
 		t.pool.MarkSuccess(addr)
 		return nil
 	}
@@ -317,7 +435,8 @@ func (t *StatefulPythonTool) Call(ctx context.Context, input string, sessionID s
 }
 
 func (t *StatefulPythonTool) callExecutor(ctx context.Context, addr, input, sessionID string) (string, error) {
-	conn, err := t.dial(ctx, addr)
+	cp := t.getConnPool(addr)
+	conn, err := cp.Get(ctx)
 	if err != nil {
 		t.pool.MarkFailure(addr)
 		if t.logger != nil {
@@ -327,8 +446,8 @@ func (t *StatefulPythonTool) callExecutor(ctx context.Context, addr, input, sess
 	}
 
 	result, execErr := t.execute(conn, input, sessionID)
-	_ = conn.Close()
 	if execErr != nil {
+		cp.Discard(conn)
 		t.pool.MarkFailure(addr)
 		if t.logger != nil {
 			t.logger.Warn("Python executor call failed", zap.String("address", addr), zap.Error(execErr))
@@ -336,6 +455,7 @@ func (t *StatefulPythonTool) callExecutor(ctx context.Context, addr, input, sess
 		return "", fmt.Errorf("executor %s: %w", addr, execErr)
 	}
 
+	cp.Put(conn)
 	t.pool.MarkSuccess(addr)
 	if t.logger != nil {
 		t.logger.Debug("Python code executed", zap.String("address", addr), zap.String("session_id", sessionID))
@@ -344,7 +464,14 @@ func (t *StatefulPythonTool) callExecutor(ctx context.Context, addr, input, sess
 }
 
 func (t *StatefulPythonTool) Close() {
-	// Connections are opened per-call, so there is nothing persistent to close.
+	t.connPoolsMu.Lock()
+	defer t.connPoolsMu.Unlock()
+	for addr, pool := range t.connPools {
+		if pool != nil {
+			pool.Close()
+		}
+		delete(t.connPools, addr)
+	}
 }
 
 // CleanupSession removes the session binding from the executor pool
