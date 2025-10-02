@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +23,16 @@ type StoredRAGDocument struct {
 	ContentHash      string
 	Embedding        []float32
 	CreatedAt        time.Time
+}
+
+// BM25SearchResult represents a full-text search hit scored via PostgreSQL's ranking engine.
+type BM25SearchResult struct {
+	DocumentID       uuid.UUID
+	Metadata         map[string]string
+	Content          string
+	EmbeddingContent string
+	BM25Score        float64
+	ExactMatchBonus  float64
 }
 
 // UpsertRAGDocument stores or updates a RAG document's content and metadata.
@@ -167,6 +178,86 @@ func (s *PostgresStore) FindRAGDocumentByHash(ctx context.Context, sessionID, ro
 	}
 
 	return documentID, nil
+}
+
+// SearchRAGDocumentsBM25 performs a BM25-style full-text search over the stored RAG documents.
+// It returns ranked results ordered by their textual relevance to the provided query.
+func (s *PostgresStore) SearchRAGDocumentsBM25(ctx context.Context, query string, limit int, sessionID string) ([]BM25SearchResult, error) {
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" || limit <= 0 {
+		return nil, nil
+	}
+
+	const rankExpr = "ts_rank_cd(to_tsvector('simple', COALESCE(embedding_content, content)), websearch_to_tsquery('simple', $1))"
+	const positionExpr = "position(lower($1) in lower(COALESCE(embedding_content, content)))"
+	const bonusExpr = "CASE WHEN " + positionExpr + " > 0 THEN 0.2 ELSE 0 END"
+
+	var builder strings.Builder
+	args := []any{trimmed}
+
+	builder.WriteString("SELECT document_id, metadata, content, embedding_content, ")
+	builder.WriteString(rankExpr)
+	builder.WriteString(" AS rank, ")
+	builder.WriteString(bonusExpr)
+	builder.WriteString(" AS exact_bonus FROM rag_documents")
+
+	// Apply session-specific filtering when provided.
+	if sessionID != "" {
+		builder.WriteString(" WHERE COALESCE(metadata ->> 'session_id', '') = $")
+		builder.WriteString(strconv.Itoa(len(args) + 1))
+		args = append(args, sessionID)
+		builder.WriteString(" AND (" + rankExpr + " > 0 OR " + positionExpr + " > 0)")
+	} else {
+		builder.WriteString(" WHERE " + rankExpr + " > 0 OR " + positionExpr + " > 0")
+	}
+
+	builder.WriteString(" ORDER BY (" + rankExpr + " + " + bonusExpr + ") DESC LIMIT $")
+	builder.WriteString(strconv.Itoa(len(args) + 1))
+	args = append(args, limit)
+
+	rows, err := s.DB.QueryContext(ctx, builder.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute BM25 search: %w", err)
+	}
+	defer rows.Close()
+
+	var results []BM25SearchResult
+	for rows.Next() {
+		var (
+			documentID       uuid.UUID
+			metadataJSON     []byte
+			content          string
+			embeddingContent sql.NullString
+			rank             float64
+			exactBonus       float64
+		)
+
+		if err := rows.Scan(&documentID, &metadataJSON, &content, &embeddingContent, &rank, &exactBonus); err != nil {
+			return nil, fmt.Errorf("failed to scan BM25 search result: %w", err)
+		}
+
+		metadata := make(map[string]string)
+		if len(metadataJSON) > 0 {
+			if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal BM25 metadata: %w", err)
+			}
+		}
+
+		results = append(results, BM25SearchResult{
+			DocumentID:       documentID,
+			Metadata:         metadata,
+			Content:          content,
+			EmbeddingContent: embeddingContent.String,
+			BM25Score:        rank,
+			ExactMatchBonus:  exactBonus,
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating BM25 search results: %w", err)
+	}
+
+	return results, nil
 }
 
 // DeleteRAGDocumentsBySession removes all RAG documents associated with the provided session.

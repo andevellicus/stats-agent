@@ -1,11 +1,12 @@
 x-python-executor: &python-executor
   build:
-    context: .
+    context: ./executor
     dockerfile: python.Dockerfile
   env_file: .env
   user: "${UID}:${GID}"
   volumes:
     - ../workspaces:/app/workspaces
+  restart: unless-stopped
 
 services:
   postgres:
@@ -35,7 +36,18 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    command: "-m ${MAIN_LLM_MODEL_PATH} --host 0.0.0.0 --port ${MAIN_LLM_PORT} -ngl ${N_GPU_LAYERS} -c 16384 --temp 0.1 --top_p 0.85 --top-k 30 --mlock --no-mmap --repeat-penalty 1.1"
+    command: >
+      -m ${MAIN_LLM_MODEL_PATH}
+      --host 0.0.0.0
+      --port ${MAIN_LLM_PORT}
+      -ngl ${N_GPU_LAYERS}
+      -c 16384
+      --temp 0.1
+      --top_p 0.85
+      --top-k 30
+      --mlock
+      --no-mmap
+      --repeat-penalty 1.1
 
   embedding-llm:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
@@ -61,7 +73,7 @@ services:
       -c 2048
       -b 512
       --batch-size 2048
-      --gpu-layers ${N_GPU_LAYERS}
+      --mlock
 
   summarization-llm:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
@@ -87,6 +99,7 @@ services:
       --temp 0.2
       --top-p 0.9
       --top-k 40
+      --mlock
 
   python-executor-1:
     <<: *python-executor

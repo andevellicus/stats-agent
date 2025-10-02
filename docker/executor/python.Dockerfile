@@ -15,7 +15,6 @@ RUN apt-get update && apt-get install -y \
 
 # Copy the executor script into the container
 COPY executor.py .
-COPY .env .
 
 # Install the comprehensive set of Python libraries
 RUN pip install \

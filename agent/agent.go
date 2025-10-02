@@ -171,36 +171,59 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 }
 
 func (a *Agent) GenerateTitle(ctx context.Context, content string) (string, error) {
-	systemPrompt := `You are an expert at creating concise, 5-word titles from user messages. Your task is to distill the user's message into a short, descriptive title.`
+	systemPrompt := `You create concise titles that summarize a user's message.
 
-	userPrompt := fmt.Sprintf(`Create a 5-word title for the following user message.
+Guidelines:
+1. Output only the title text with no labels or commentary.
+2. Use at most five words.
+3. Base the title entirely on the message content; never repeat the instructions or phrases like "Create a 5 word title".
+4. Avoid quotation marks unless they belong in the title.`
 
-**User Message:**
-"%s"
+	userPrompt := fmt.Sprintf(`User message:
+%s
 
-**Title:**
-`, content)
+Respond with only the title.`, content)
 
 	messages := []types.AgentMessage{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userPrompt},
 	}
 
-	// Use non-streaming client without agent system prompt injection
 	client := llmclient.New(a.cfg, a.logger)
 	title, err := client.Chat(ctx, a.cfg.SummarizationLLMHost, messages)
 	if err != nil {
 		return "", fmt.Errorf("llm chat call failed for title generation: %w", err)
 	}
 
-	if title == "" {
-		return "", fmt.Errorf("llm returned an empty title")
+	cleaned := sanitizeTitle(strings.TrimSpace(title))
+	if cleaned == "" {
+		a.logger.Warn("LLM returned invalid title, using fallback",
+			zap.String("raw_title", title),
+			zap.String("content_preview", truncateString(content, 100)))
+		return "Data Analysis Session", nil
 	}
 
-	// Post-process: trim whitespace and strip surrounding quotes if present
-	cleaned := strings.TrimSpace(title)
-	cleaned = stripSurroundingQuotes(cleaned)
+	// Validate word count
+	wordCount := len(strings.Fields(cleaned))
+	if wordCount > 6 {
+		a.logger.Warn("Title exceeds word limit, truncating",
+			zap.String("original_title", cleaned),
+			zap.Int("word_count", wordCount))
+
+		// Truncate to 5 words
+		words := strings.Fields(cleaned)
+		cleaned = strings.Join(words[:5], " ")
+	}
+
 	return cleaned, nil
+}
+
+// Helper function
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // stripSurroundingQuotes removes a single pair of matching leading/trailing quotes.
@@ -224,6 +247,48 @@ func stripSurroundingQuotes(s string) string {
 		return string(runes[1 : len(runes)-1])
 	}
 	return s
+}
+
+func trimQuotesAndSpaces(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	s = stripSurroundingQuotes(s)
+	return strings.TrimSpace(s)
+}
+
+func sanitizeTitle(raw string) string {
+	if raw == "" {
+		return ""
+	}
+
+	lines := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == '\n' || r == '\r'
+	})
+
+	for _, line := range lines {
+		candidate := trimQuotesAndSpaces(line)
+		if candidate == "" {
+			continue
+		}
+
+		if strings.HasPrefix(strings.ToLower(candidate), "title:") {
+			candidate = trimQuotesAndSpaces(candidate[len("title:"):])
+			if candidate == "" {
+				continue
+			}
+		}
+
+		words := strings.Fields(candidate)
+		if len(words) > 5 {
+			candidate = strings.Join(words[:5], " ")
+		}
+
+		return candidate
+	}
+
+	return ""
 }
 
 // handleEmptyResponse attempts to recover from empty LLM responses by summarizing context.

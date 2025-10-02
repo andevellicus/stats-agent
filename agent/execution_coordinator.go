@@ -2,9 +2,10 @@ package agent
 
 import (
 	"context"
+	"strings"
+
 	"stats-agent/tools"
 	"stats-agent/web/format"
-	"strings"
 
 	"go.uber.org/zap"
 )
@@ -34,8 +35,11 @@ func NewExecutionCoordinator(pythonTool *tools.StatefulPythonTool, logger *zap.L
 // ProcessResponse checks if the LLM response contains Python code, executes it if found,
 // and returns the execution result.
 func (e *ExecutionCoordinator) ProcessResponse(ctx context.Context, llmResponse, sessionID string, stream *Stream) (*ExecutionResult, error) {
+	// Normalize malformed tag fragments before further processing
+	sanitizedResponse := sanitizePythonTags(llmResponse)
+
 	// Convert markdown code blocks to XML tags first
-	processedResponse := e.ConvertMarkdownToXML(llmResponse)
+	processedResponse := e.ConvertMarkdownToXML(sanitizedResponse)
 
 	// Try to execute Python code if present
 	code, result, wasExecuted := e.pythonTool.ExecutePythonCode(ctx, processedResponse, sessionID, nil)
@@ -80,4 +84,26 @@ func (e *ExecutionCoordinator) ConvertMarkdownToXML(text string) string {
 // DetectError checks if the execution result contains error indicators.
 func (e *ExecutionCoordinator) DetectError(result string) bool {
 	return strings.Contains(result, "Error:")
+}
+
+// sanitizePythonTags repairs minor formatting issues (extra spaces/newlines) around python tags.
+func sanitizePythonTags(text string) string {
+	replacements := map[string]string{
+		"< python>":   "<python>",
+		"<python >":   "<python>",
+		"< python >":  "<python>",
+		"</ python>":  "</python>",
+		"</python >":  "</python>",
+		"</ python >": "</python>",
+		"<python\n":   "<python>\n",
+		"\npython>":   "\n<python>",
+		"\n/python>":  "\n</python>",
+		"</python\n":  "</python>\n",
+	}
+
+	for old, new := range replacements {
+		text = strings.ReplaceAll(text, old, new)
+	}
+
+	return text
 }

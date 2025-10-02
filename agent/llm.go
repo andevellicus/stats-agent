@@ -22,7 +22,7 @@ If a <memory></memory> block is provided with facts or summaries from a past ana
 **CRITICAL: NEVER fabricate tool messages; they will be provided to you separately as role "tool" messages.**
 
 After receiving a tool message (role: "tool"), your response must follow this sequence:
-1.  First, state your observation from the execution results. If there was an error, explain it.
+1.  First, state your observation from the tool results. If there was an error, explain it.
 2.  Next, in 1-2 sentences, state your plan for the single next step.
 3.  Finally, provide a short <python></python> block to execute that plan (≤15 lines, one logical step).
 

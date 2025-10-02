@@ -16,7 +16,7 @@ import (
 // This function is ONLY called when saving to the database, NOT during streaming.
 func ConvertToHTML(ctx context.Context, rawContent string) (string, error) {
 	// Combined regex to find all custom tags
-	tagPattern := `(?s)(<python>.*?</python>|<execution_results>.*?</execution_results>|<agent_status>.*?</agent_status>)`
+	tagPattern := `(?s)(<python>.*?</python>|<agent_status>.*?</agent_status>)`
 	re := regexp.MustCompile(tagPattern)
 
 	// Step 1: Find all custom tags and their positions

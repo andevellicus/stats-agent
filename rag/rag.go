@@ -140,7 +140,7 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, sessionID string, messages
 			metadata["role"] = "fact"
 
 			assistantContent := canonicalizeFactText(message.Content)
-			toolContent := canonicalizeFactText(stripExecutionResultsWrapper(toolMessage.Content))
+			toolContent := canonicalizeFactText(toolMessage.Content)
 
 			userContent := ""
 			for prev := i - 1; prev >= 0; prev-- {
@@ -662,7 +662,7 @@ func (r *RAG) Query(ctx context.Context, sessionID string, query string, nResult
 					contextBuilder.WriteString(fmt.Sprintf("- assistant: %s\n", canonicalizeFactText(fact.Assistant)))
 				}
 				if fact.Tool != "" {
-					contextBuilder.WriteString(fmt.Sprintf("- tool: %s\n", canonicalizeFactText(stripExecutionResultsWrapper(fact.Tool))))
+					contextBuilder.WriteString(fmt.Sprintf("- tool: %s\n", canonicalizeFactText(fact.Tool)))
 				}
 
 				processedDocIDs[lookupID] = true
@@ -671,22 +671,8 @@ func (r *RAG) Query(ctx context.Context, sessionID string, query string, nResult
 			}
 
 			assistantContent := canonicalizeFactText(content)
-			toolContent := ""
-			if idx := strings.Index(content, "<execution_results>"); idx != -1 {
-				assistantContent = canonicalizeFactText(content[:idx])
-				remainder := content[idx+len("<execution_results>"):]
-				if endIdx := strings.Index(remainder, "</execution_results>"); endIdx != -1 {
-					toolContent = canonicalizeFactText(remainder[:endIdx])
-				} else {
-					toolContent = canonicalizeFactText(remainder)
-				}
-			}
-
 			if assistantContent != "" {
-				contextBuilder.WriteString(fmt.Sprintf("- assistant: %s\n", canonicalizeFactText(assistantContent)))
-			}
-			if toolContent != "" {
-				contextBuilder.WriteString(fmt.Sprintf("- tool: %s\n", canonicalizeFactText(toolContent)))
+				contextBuilder.WriteString(fmt.Sprintf("- assistant: %s\n", assistantContent))
 			}
 		} else {
 			contextBuilder.WriteString(fmt.Sprintf("- %s: %s\n", role, content))
@@ -778,62 +764,77 @@ func (r *RAG) DeleteSessionDocuments(sessionID string) error {
 	return nil
 }
 
-func stripExecutionResultsWrapper(text string) string {
-	cleaned := strings.TrimSpace(text)
-	const openTag = "<execution_results>"
-	const closeTag = "</execution_results>"
-
-	if strings.HasPrefix(cleaned, openTag) && strings.Contains(cleaned, closeTag) {
-		cleaned = strings.TrimPrefix(cleaned, openTag)
-		cleaned = strings.TrimSpace(cleaned)
-		if idx := strings.LastIndex(cleaned, closeTag); idx != -1 {
-			cleaned = cleaned[:idx]
-		}
-		return strings.TrimSpace(cleaned)
-	}
-
-	cleaned = strings.ReplaceAll(cleaned, openTag, "")
-	cleaned = strings.ReplaceAll(cleaned, closeTag, "")
-	return strings.TrimSpace(cleaned)
-}
-
 // SummarizeLongTermMemory takes a large context string and condenses it.
 func (r *RAG) SummarizeLongTermMemory(ctx context.Context, context, latestUserMessage string) (string, error) {
 	latestUserMessage = strings.TrimSpace(latestUserMessage)
-	systemPrompt := `You are an expert at creating concise, searchable facts from code and its output. Your task is to generate a single, descriptive sentence that captures the key finding, action, or error.
 
-	Follow these rules:
-	1. The summary MUST be a single sentence.
-	2. The summary MUST start with "Fact:".
-	3. The summary MUST be less than 100 words.
+	systemPrompt := `You are a technical summarization expert specializing in data analysis and statistics.
 
-	Here is an example:
+Your task: Extract key facts from conversation history that are relevant to the user's current question.
 
-	---
-	**Input:**
-	Code:
-	df.head(3)
+CRITICAL RULES:
+1. Focus on DATA FINDINGS, not process descriptions
+2. ALWAYS preserve: numbers, statistical measures, column names, file names, variable names
+3. Extract MULTIPLE facts if relevant (1-3 facts maximum)
+4. Each fact should be ONE concise sentence
+5. Start each fact with "Fact:" on its own line
+6. Ignore: instructions, system messages, casual chat, failed attempts
+7. If no relevant facts exist, output: "Fact: No relevant prior analysis found."
 
-	Output:
-	age gender  side
-	0   55      M  left
-	1   60      F  right
-	2   65      M  left
-	---
-	**Your Output:**
-	Fact: The dataframe contains columns for age, gender, and side.
-	---`
+WHAT TO EXTRACT:
+✅ Statistical results (correlations, p-values, test results, effect sizes)
+✅ Data characteristics (sample size, distributions, outliers)
+✅ Analysis decisions (which test used, which variables, transformations applied)
+✅ Key findings (patterns discovered, significant differences, trends)
+✅ File/dataset information (which data was analyzed)
+
+❌ DON'T EXTRACT:
+- How-to instructions or explanations
+- Error messages or debugging steps
+- Casual conversation or greetings
+- Process descriptions ("I used pandas to...")
+
+EXAMPLES:
+
+Example 1:
+Memory: "I ran a correlation analysis on customer_data.csv using Pearson method. The correlation between age and purchase_frequency was r=0.67 with p<0.001, indicating a strong positive relationship."
+User question: "What was the correlation in my customer analysis?"
+Output:
+Fact: Correlation analysis on customer_data.csv found strong positive relationship between age and purchase_frequency (Pearson r=0.67, p<0.001).
+
+Example 2:
+Memory: "Let me help you analyze that. First, I loaded the data. Then I checked for missing values - found 23 missing values in the income column. I dropped those rows and proceeded with the t-test. Independent samples t-test comparing male vs female salaries showed t=2.34, df=198, p=0.021, Cohen's d=0.33."
+User question: "What were the results of the gender salary comparison?"
+Output:
+Fact: Dataset had 23 missing values in income column which were removed.
+Fact: Independent t-test found statistically significant salary difference between genders (t=2.34, df=198, p=0.021) with small effect size (d=0.33).
+
+Example 3:
+Memory: "Hi! How can I help you today? What kind of analysis would you like to perform?"
+User question: "What did we discuss about regression?"
+Output:
+Fact: No relevant prior analysis found.
+
+Example 4:
+Memory: "The dataset Q3_2024_sales.csv contains 1,247 records across 8 columns. Applied log transformation to sales_amount due to right skew. Linear regression predicting sales from advertising_spend yielded R²=0.42, β=1.23 (SE=0.15), p<0.001."
+User question: "Tell me about the regression model"
+Output:
+Fact: Q3_2024_sales.csv dataset contains 1,247 records with sales_amount log-transformed due to skewness.
+Fact: Linear regression of sales on advertising_spend shows moderate fit (R²=0.42) with significant positive effect (β=1.23, SE=0.15, p<0.001).
+
+Remember: Be SPECIFIC. Include actual numbers, variable names, and technical details. Vague summaries are useless.`
+
 	if latestUserMessage == "" {
-		latestUserMessage = "(no new user question provided)"
+		latestUserMessage = "(no specific question provided)"
 	}
 
-	userPrompt := fmt.Sprintf(`The user's latest question is:
+	userPrompt := fmt.Sprintf(`User's current question:
 "%s"
 
-Summarize the following memory so that it highlights information that helps answer that question.
+Conversation history to extract from:
+%s
 
-History to summarize:
-%s`, latestUserMessage, context)
+Extract relevant facts following the rules and examples above:`, latestUserMessage, context)
 
 	messages := []types.AgentMessage{
 		{Role: "system", Content: systemPrompt},
@@ -846,12 +847,22 @@ History to summarize:
 		return "", fmt.Errorf("llm chat call failed for memory summary: %w", err)
 	}
 
+	summary = strings.TrimSpace(summary)
 	if summary == "" {
 		return "", fmt.Errorf("llm returned an empty summary for memory")
 	}
 
-	// Wrap the summary in the same tags for consistency
-	return fmt.Sprintf("<memory>\n- %s\n</memory>", strings.TrimSpace(summary)), nil
+	// Post-process: ensure it starts with "Fact:"
+	if !strings.HasPrefix(summary, "Fact:") {
+		r.logger.Warn("Summary didn't start with 'Fact:', attempting to fix",
+			zap.String("summary", summary))
+
+		// Try to salvage it by prepending "Fact:"
+		summary = "Fact: " + summary
+	}
+
+	// Wrap the summary in memory tags
+	return fmt.Sprintf("<memory>\n%s\n</memory>", summary), nil
 }
 
 func (r *RAG) generateFactSummary(ctx context.Context, code, result string) (string, error) {
