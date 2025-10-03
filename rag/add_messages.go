@@ -323,6 +323,11 @@ func (r *RAG) persistChunks(ctx context.Context, baseMetadata map[string]string,
 	var documents []chromem.Document
 	chunkIndex := 0
 
+	sentences := r.sentenceSplitter.Split(content)
+	if len(sentences) == 0 {
+		sentences = []string{content}
+	}
+
 	chunkSize := r.maxEmbeddingChars
 	if chunkSize <= 0 {
 		chunkSize = r.cfg.MaxEmbeddingChars
@@ -337,12 +342,102 @@ func (r *RAG) persistChunks(ctx context.Context, baseMetadata map[string]string,
 	if tokenLimit <= 0 {
 		tokenLimit = len(content)
 	}
-	for j := 0; j < len(content); j += chunkSize {
-		end := min(j+chunkSize, len(content))
-		chunkContent := content[j:end]
-		if int(float64(len(chunkContent))/3.5) > tokenLimit {
-			end = j + (chunkSize * 3 / 4)
-			chunkContent = content[j:end]
+
+	var chunks []string
+	var current strings.Builder
+	var currentTokens int
+
+	for _, sentence := range sentences {
+		sentence = strings.TrimSpace(sentence)
+		if sentence == "" {
+			continue
+		}
+		sentenceLength := len(sentence)
+		estimatedTokens := int(float64(sentenceLength) / 3.5)
+
+		if estimatedTokens > tokenLimit || sentenceLength > chunkSize {
+			if current.Len() > 0 {
+				chunks = append(chunks, current.String())
+				current.Reset()
+				currentTokens = 0
+			}
+			for start := 0; start < sentenceLength; start += chunkSize {
+				end := min(start+chunkSize, sentenceLength)
+				segment := strings.TrimSpace(sentence[start:end])
+				if segment != "" {
+					chunks = append(chunks, segment)
+				}
+			}
+			continue
+		}
+
+		prospectiveLen := current.Len()
+		if prospectiveLen > 0 {
+			prospectiveLen++
+		}
+		prospectiveLen += sentenceLength
+		prospectiveTokens := currentTokens + estimatedTokens
+
+		if prospectiveLen > chunkSize || prospectiveTokens > tokenLimit {
+			chunks = append(chunks, current.String())
+			current.Reset()
+			currentTokens = 0
+		}
+
+		if current.Len() > 0 {
+			current.WriteString(" ")
+		}
+		current.WriteString(sentence)
+		currentTokens += estimatedTokens
+	}
+
+	if current.Len() > 0 {
+		chunks = append(chunks, current.String())
+	}
+
+	overlapRatio := 0.17
+	processedChunks := make([]string, 0, len(chunks))
+	var previousOverlap string
+
+	for _, chunkContent := range chunks {
+		chunkContent = strings.TrimSpace(chunkContent)
+		if chunkContent == "" {
+			continue
+		}
+
+		chunkWithOverlap := chunkContent
+		if previousOverlap != "" {
+			chunkWithOverlap = strings.TrimSpace(previousOverlap + " " + chunkContent)
+		}
+		processedChunks = append(processedChunks, chunkWithOverlap)
+
+		if overlapRatio > 0 {
+			runes := []rune(chunkContent)
+			if len(runes) == 0 {
+				previousOverlap = ""
+				continue
+			}
+			overlapLen := int(float64(len(runes)) * overlapRatio)
+			if overlapLen < 1 {
+				overlapLen = 1
+			}
+			if overlapLen > len(runes) {
+				overlapLen = len(runes)
+			}
+			previousOverlap = string(runes[len(runes)-overlapLen:])
+		} else {
+			previousOverlap = ""
+		}
+	}
+
+	if len(processedChunks) == 0 {
+		processedChunks = append(processedChunks, content)
+	}
+
+	for _, chunkContent := range processedChunks {
+		chunkContent = strings.TrimSpace(chunkContent)
+		if chunkContent == "" {
+			continue
 		}
 
 		chunkDocID := uuid.New()

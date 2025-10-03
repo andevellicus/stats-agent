@@ -196,17 +196,30 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		}
 	}
 
+	semanticWeight := r.cfg.HybridSemanticWeight
+	if semanticWeight < 0 {
+		semanticWeight = 0
+	}
+	bm25Weight := r.cfg.HybridBM25Weight
+	if bm25Weight < 0 {
+		bm25Weight = 0
+	}
+	if semanticWeight == 0 && bm25Weight == 0 {
+		semanticWeight = 0.7
+		bm25Weight = 0.3
+	}
+
 	candidateList := make([]*hybridCandidate, 0, len(candidates))
 	for _, cand := range candidates {
 		weighted := 0.0
 		weightSum := 0.0
-		if cand.HasSemantic && maxSemantic > 0 {
-			weighted += 0.7 * (cand.SemanticScore / maxSemantic)
-			weightSum += 0.7
+		if cand.HasSemantic && maxSemantic > 0 && semanticWeight > 0 {
+			weighted += semanticWeight * (cand.SemanticScore / maxSemantic)
+			weightSum += semanticWeight
 		}
-		if cand.HasBM25 && maxBM > 0 {
-			weighted += 0.3 * ((cand.BM25Score + cand.ExactBonus) / maxBM)
-			weightSum += 0.3
+		if cand.HasBM25 && maxBM > 0 && bm25Weight > 0 {
+			weighted += bm25Weight * ((cand.BM25Score + cand.ExactBonus) / maxBM)
+			weightSum += bm25Weight
 		}
 		combined := 0.0
 		if weightSum > 0 {

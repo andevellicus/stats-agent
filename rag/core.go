@@ -58,6 +58,7 @@ type RAG struct {
 	maxHybridCandidates        int
 	datasetMu                  sync.RWMutex
 	sessionDatasets            map[string]string
+	sentenceSplitter           SentenceSplitter
 }
 
 type factStoredContent struct {
@@ -113,7 +114,7 @@ func New(cfg *config.Config, store *database.PostgresStore, logger *zap.Logger) 
 	minTokenThreshold := cfg.MinTokenCheckCharThreshold
 	hybridCandidates := cfg.MaxHybridCandidates
 
-	return &RAG{
+	r := &RAG{
 		cfg:                        cfg,
 		db:                         db,
 		store:                      store,
@@ -126,7 +127,10 @@ func New(cfg *config.Config, store *database.PostgresStore, logger *zap.Logger) 
 		minTokenCheckCharThreshold: minTokenThreshold,
 		maxHybridCandidates:        hybridCandidates,
 		sessionDatasets:            make(map[string]string),
-	}, nil
+		sentenceSplitter:           NewRegexSentenceSplitter(),
+	}
+
+	return r, nil
 }
 
 func canonicalizeFactText(text string) string {

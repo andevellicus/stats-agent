@@ -40,6 +40,8 @@ EMBEDDING_TOKEN_SOFT_LIMIT: 450        # Token count that triggers truncation be
 EMBEDDING_TOKEN_TARGET: 400            # Target tokens when truncating for embeddings
 MIN_TOKEN_CHECK_CHAR_THRESHOLD: 100    # Skip embedding token counting for short strings
 MAX_HYBRID_CANDIDATES: 100             # Candidate limit when blending semantic/BM25 retrieval
+HYBRID_SEMANTIC_WEIGHT: 0.7            # Weight assigned to semantic similarity during hybrid scoring
+HYBRID_BM25_WEIGHT: 0.3                # Weight assigned to BM25 during hybrid scoring
 SEMANTIC_SIMILARITY_THRESHOLD: 0.7  # Minimum cosine similarity for vector hits
 BM25_SCORE_THRESHOLD: 0.05           # Minimum BM25+bonus score for text hits
 ENABLE_METADATA_FALLBACK: true      # Enable metadata-based fallback search when hybrid results are empty

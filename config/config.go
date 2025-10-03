@@ -22,6 +22,8 @@ const (
 	defaultEmbeddingTokenTarget             = 400
 	defaultMinTokenCheckCharThreshold       = 100
 	defaultMaxHybridCandidates              = 100
+	defaultHybridSemanticWeight             = 0.7
+	defaultHybridBM25Weight                 = 0.3
 )
 
 // Config holds the application's configuration
@@ -60,6 +62,8 @@ type Config struct {
 	EmbeddingTokenTarget             int           `mapstructure:"EMBEDDING_TOKEN_TARGET"`
 	MinTokenCheckCharThreshold       int           `mapstructure:"MIN_TOKEN_CHECK_CHAR_THRESHOLD"`
 	MaxHybridCandidates              int           `mapstructure:"MAX_HYBRID_CANDIDATES"`
+	HybridSemanticWeight             float64       `mapstructure:"HYBRID_SEMANTIC_WEIGHT"`
+	HybridBM25Weight                 float64       `mapstructure:"HYBRID_BM25_WEIGHT"`
 }
 
 func Load(logger *zap.Logger) *Config {
@@ -103,6 +107,8 @@ func Load(logger *zap.Logger) *Config {
 	viper.SetDefault("EMBEDDING_TOKEN_TARGET", 400)
 	viper.SetDefault("MIN_TOKEN_CHECK_CHAR_THRESHOLD", 100)
 	viper.SetDefault("MAX_HYBRID_CANDIDATES", 100)
+	viper.SetDefault("HYBRID_SEMANTIC_WEIGHT", defaultHybridSemanticWeight)
+	viper.SetDefault("HYBRID_BM25_WEIGHT", defaultHybridBM25Weight)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if logger != nil {
@@ -190,6 +196,16 @@ func Load(logger *zap.Logger) *Config {
 	}
 	if config.MaxHybridCandidates <= 0 {
 		config.MaxHybridCandidates = defaultMaxHybridCandidates
+	}
+	if config.HybridSemanticWeight <= 0 {
+		config.HybridSemanticWeight = defaultHybridSemanticWeight
+	}
+	if config.HybridBM25Weight < 0 {
+		config.HybridBM25Weight = defaultHybridBM25Weight
+	}
+	if config.HybridSemanticWeight == 0 && config.HybridBM25Weight == 0 {
+		config.HybridSemanticWeight = defaultHybridSemanticWeight
+		config.HybridBM25Weight = defaultHybridBM25Weight
 	}
 
 	return &config
