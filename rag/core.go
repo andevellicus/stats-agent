@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
 
 	"stats-agent/config"
 	"stats-agent/database"
@@ -19,16 +20,44 @@ import (
 const (
 	// BGE models typically handle 512 tokens max
 	// ~4 chars per token, with safety margin
-	maxEmbeddingChars  = 1000 // Reduced from 1500
-	maxEmbeddingTokens = 250  // Safety margin under 512
+	defaultMaxEmbeddingChars  = 1000
+	defaultMaxEmbeddingTokens = 250
 )
 
+var metadataEmbeddingOrder = []string{
+	"dataset",
+	"primary_test",
+	"analysis_stage",
+	"role",
+	"variables",
+	"test_types",
+	"p_value",
+}
+
+var metadataEmbeddingLabels = map[string][]string{
+	"dataset":        {"dataset"},
+	"primary_test":   {"primary test"},
+	"analysis_stage": {"analysis stage"},
+	"role":           {"conversation role"},
+	"variables":      {"variables"},
+	"test_types":     {"test types"},
+	"p_value":        {"p value"},
+}
+
 type RAG struct {
-	cfg      *config.Config
-	db       *chromem.DB
-	store    *database.PostgresStore
-	embedder chromem.EmbeddingFunc
-	logger   *zap.Logger
+	cfg                        *config.Config
+	db                         *chromem.DB
+	store                      *database.PostgresStore
+	embedder                   chromem.EmbeddingFunc
+	logger                     *zap.Logger
+	maxEmbeddingChars          int
+	maxEmbeddingTokens         int
+	embeddingTokenSoftLimit    int
+	embeddingTokenTarget       int
+	minTokenCheckCharThreshold int
+	maxHybridCandidates        int
+	datasetMu                  sync.RWMutex
+	sessionDatasets            map[string]string
 }
 
 type factStoredContent struct {
@@ -60,12 +89,6 @@ type ragDocumentData struct {
 	SummaryDoc    *chromem.Document
 }
 
-const (
-	embeddingTokenSoftLimit    = 450
-	embeddingTokenTarget       = 400
-	minTokenCheckCharThreshold = 100
-)
-
 func New(cfg *config.Config, store *database.PostgresStore, logger *zap.Logger) (*RAG, error) {
 	if store == nil {
 		return nil, fmt.Errorf("postgres store is required for RAG persistence")
@@ -77,12 +100,32 @@ func New(cfg *config.Config, store *database.PostgresStore, logger *zap.Logger) 
 		return nil, fmt.Errorf("failed to create initial collection: %w", err)
 	}
 
+	maxEmbeddingChars := cfg.MaxEmbeddingChars
+	if maxEmbeddingChars <= 0 {
+		maxEmbeddingChars = defaultMaxEmbeddingChars
+	}
+	maxEmbeddingTokens := cfg.MaxEmbeddingTokens
+	if maxEmbeddingTokens <= 0 {
+		maxEmbeddingTokens = defaultMaxEmbeddingTokens
+	}
+	embeddingSoftLimit := cfg.EmbeddingTokenSoftLimit
+	embeddingTarget := cfg.EmbeddingTokenTarget
+	minTokenThreshold := cfg.MinTokenCheckCharThreshold
+	hybridCandidates := cfg.MaxHybridCandidates
+
 	return &RAG{
-		cfg:      cfg,
-		db:       db,
-		store:    store,
-		embedder: embedder,
-		logger:   logger,
+		cfg:                        cfg,
+		db:                         db,
+		store:                      store,
+		embedder:                   embedder,
+		logger:                     logger,
+		maxEmbeddingChars:          maxEmbeddingChars,
+		maxEmbeddingTokens:         maxEmbeddingTokens,
+		embeddingTokenSoftLimit:    embeddingSoftLimit,
+		embeddingTokenTarget:       embeddingTarget,
+		minTokenCheckCharThreshold: minTokenThreshold,
+		maxHybridCandidates:        hybridCandidates,
+		sessionDatasets:            make(map[string]string),
 	}, nil
 }
 
@@ -127,6 +170,77 @@ func cloneStringMap(src map[string]string) map[string]string {
 		dst[k] = v
 	}
 	return dst
+}
+
+func metadataEmbeddingText(metadata map[string]string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+
+	var parts []string
+	for _, key := range metadataEmbeddingOrder {
+		value := strings.TrimSpace(metadata[key])
+		if value == "" {
+			continue
+		}
+		labels := metadataEmbeddingLabels[key]
+		if len(labels) == 0 {
+			labels = []string{strings.ReplaceAll(key, "_", " ")}
+		}
+		for _, label := range labels {
+			parts = append(parts, fmt.Sprintf("%s: %s", label, value))
+		}
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+
+	return "metadata capsule: " + strings.Join(parts, "; ")
+}
+
+func (r *RAG) augmentEmbeddingContent(base string, metadata map[string]string) string {
+	base = strings.TrimSpace(base)
+	metaText := metadataEmbeddingText(metadata)
+	if metaText == "" {
+		return base
+	}
+	if base == "" {
+		return metaText
+	}
+	return base + "\n\n" + metaText
+}
+
+func (r *RAG) rememberSessionDataset(sessionID, dataset string) {
+	if sessionID == "" {
+		return
+	}
+	dataset = strings.TrimSpace(dataset)
+	if dataset == "" {
+		return
+	}
+	r.datasetMu.Lock()
+	r.sessionDatasets[sessionID] = dataset
+	r.datasetMu.Unlock()
+}
+
+func (r *RAG) getSessionDataset(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	r.datasetMu.RLock()
+	dataset := r.sessionDatasets[sessionID]
+	r.datasetMu.RUnlock()
+	return dataset
+}
+
+func (r *RAG) clearSessionDataset(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	r.datasetMu.Lock()
+	delete(r.sessionDatasets, sessionID)
+	r.datasetMu.Unlock()
 }
 
 func resolveLookupID(metadata map[string]string) string {

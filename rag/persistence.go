@@ -84,18 +84,46 @@ func (r *RAG) LoadPersistedDocuments(ctx context.Context) error {
 }
 
 func (r *RAG) DeleteSessionDocuments(sessionID string) error {
-	collection := r.db.GetCollection("long-term-memory", r.embedder)
-	if collection == nil {
-		return fmt.Errorf("long-term memory collection not found")
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := collection.Delete(ctx, map[string]string{"session_id": sessionID}, nil); err != nil {
-		return fmt.Errorf("failed to delete session documents from collection: %w", err)
+	var resultErr error
+
+	collection := r.db.GetCollection("long-term-memory", r.embedder)
+	if collection == nil {
+		resultErr = fmt.Errorf("long-term memory collection not found")
+		r.logger.Warn("Vector collection missing during session cleanup", zap.String("session_id", sessionID))
+	} else {
+		if err := collection.Delete(ctx, map[string]string{"session_id": sessionID}, nil); err != nil {
+			wrapped := fmt.Errorf("failed to delete session documents from collection: %w", err)
+			r.logger.Warn("Failed to delete session documents from collection",
+				zap.Error(err),
+				zap.String("session_id", sessionID))
+			resultErr = wrapped
+		} else {
+			r.logger.Debug("Removed session documents from RAG collection", zap.String("session_id", sessionID))
+		}
 	}
 
-	r.logger.Debug("Removed session documents from RAG collection", zap.String("session_id", sessionID))
-	return nil
+	if sessionUUID, err := uuid.Parse(sessionID); err != nil {
+		r.logger.Warn("Unable to parse session ID for RAG document cleanup",
+			zap.Error(err),
+			zap.String("session_id", sessionID))
+	} else {
+		if deleted, err := r.store.DeleteRAGDocumentsBySession(ctx, sessionUUID); err != nil {
+			r.logger.Warn("Failed to delete RAG documents from database",
+				zap.Error(err),
+				zap.String("session_id", sessionID))
+			if resultErr == nil {
+				resultErr = fmt.Errorf("failed to delete session documents from database: %w", err)
+			}
+		} else if deleted > 0 {
+			r.logger.Debug("Deleted RAG documents from database",
+				zap.String("session_id", sessionID),
+				zap.Int64("documents_deleted", deleted))
+		}
+	}
+
+	r.clearSessionDataset(sessionID)
+	return resultErr
 }

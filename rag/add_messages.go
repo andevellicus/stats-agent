@@ -61,6 +61,40 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, sessionID string, messages
 	return nil
 }
 
+func (r *RAG) ensureDatasetMetadata(sessionID string, metadata map[string]string, texts ...string) {
+	if metadata == nil {
+		return
+	}
+
+	if existing := strings.TrimSpace(metadata["dataset"]); existing != "" {
+		metadata["dataset"] = existing
+		r.rememberSessionDataset(sessionID, existing)
+		return
+	}
+
+	for _, text := range texts {
+		if text == "" {
+			continue
+		}
+		if matches := datasetQueryRegex.FindStringSubmatch(text); len(matches) > 1 {
+			dataset := strings.TrimSpace(matches[1])
+			if dataset != "" {
+				metadata["dataset"] = dataset
+				r.rememberSessionDataset(sessionID, dataset)
+				return
+			}
+		}
+	}
+
+	if sessionID == "" {
+		return
+	}
+
+	if dataset := strings.TrimSpace(r.getSessionDataset(sessionID)); dataset != "" {
+		metadata["dataset"] = dataset
+	}
+}
+
 func (r *RAG) prepareDocumentForMessage(
 	ctx context.Context,
 	sessionID string,
@@ -79,6 +113,7 @@ func (r *RAG) prepareDocumentForMessage(
 	if sessionID != "" {
 		metadata["session_id"] = sessionID
 	}
+	r.ensureDatasetMetadata(sessionID, metadata, message.Content)
 
 	var storedContent string
 	var contentToEmbed string
@@ -96,6 +131,7 @@ func (r *RAG) prepareDocumentForMessage(
 			code, _ := format.ExtractTagContent(message.Content, format.PythonTag)
 			statMeta := ExtractStatisticalMetadata(code, toolContent)
 			maps.Copy(metadata, statMeta)
+			r.ensureDatasetMetadata(sessionID, metadata, code, toolContent)
 		}
 
 		userContent := ""
@@ -199,6 +235,8 @@ func (r *RAG) prepareDocumentForMessage(
 		}
 	}
 
+	r.ensureDatasetMetadata(sessionID, metadata, message.Content, storedContent, contentToEmbed)
+
 	return &ragDocumentData{
 		ID:            documentUUID,
 		Metadata:      metadata,
@@ -221,6 +259,9 @@ func (r *RAG) buildSummaryDocument(summary string, parentMetadata map[string]str
 	if sessionID != "" {
 		metadata["session_id"] = sessionID
 	}
+	if dataset := parentMetadata["dataset"]; dataset != "" {
+		metadata["dataset"] = dataset
+	}
 
 	return &chromem.Document{
 		ID:       uuid.New().String(),
@@ -234,7 +275,8 @@ func (r *RAG) persistPreparedDocument(ctx context.Context, data *ragDocumentData
 		return nil
 	}
 
-	embedContent := r.ensureEmbeddingTokenLimit(ctx, data.EmbedContent)
+	embeddingSource := r.augmentEmbeddingContent(data.EmbedContent, data.Metadata)
+	embedContent := r.ensureEmbeddingTokenLimit(ctx, embeddingSource)
 	embeddingVector, embedErr := r.embedder(ctx, embedContent)
 	if embedErr != nil {
 		r.logger.Warn("Failed to create embedding for RAG persistence",
@@ -247,7 +289,7 @@ func (r *RAG) persistPreparedDocument(ctx context.Context, data *ragDocumentData
 	}
 
 	var documents []chromem.Document
-	if len(data.EmbedContent) > maxEmbeddingChars {
+	if len(data.EmbedContent) > r.maxEmbeddingChars {
 		r.logger.Info("Chunking oversized message for embedding",
 			zap.String("role", data.Metadata["role"]),
 			zap.Int("length", len(data.EmbedContent)))
@@ -281,11 +323,25 @@ func (r *RAG) persistChunks(ctx context.Context, baseMetadata map[string]string,
 	var documents []chromem.Document
 	chunkIndex := 0
 
-	for j := 0; j < len(content); j += maxEmbeddingChars {
-		end := min(j+maxEmbeddingChars, len(content))
+	chunkSize := r.maxEmbeddingChars
+	if chunkSize <= 0 {
+		chunkSize = r.cfg.MaxEmbeddingChars
+	}
+	if chunkSize <= 0 {
+		chunkSize = len(content)
+	}
+	tokenLimit := r.maxEmbeddingTokens
+	if tokenLimit <= 0 {
+		tokenLimit = r.cfg.MaxEmbeddingTokens
+	}
+	if tokenLimit <= 0 {
+		tokenLimit = len(content)
+	}
+	for j := 0; j < len(content); j += chunkSize {
+		end := min(j+chunkSize, len(content))
 		chunkContent := content[j:end]
-		if int(float64(len(chunkContent))/3.5) > maxEmbeddingTokens {
-			end = j + (maxEmbeddingChars * 3 / 4)
+		if int(float64(len(chunkContent))/3.5) > tokenLimit {
+			end = j + (chunkSize * 3 / 4)
 			chunkContent = content[j:end]
 		}
 
@@ -302,7 +358,8 @@ func (r *RAG) persistChunks(ctx context.Context, baseMetadata map[string]string,
 			chunkMetadata["content_hash"] = chunkHash
 		}
 
-		chunkEmbeddingContent := r.ensureEmbeddingTokenLimit(ctx, chunkContent)
+		chunkEmbeddingSource := r.augmentEmbeddingContent(chunkContent, chunkMetadata)
+		chunkEmbeddingContent := r.ensureEmbeddingTokenLimit(ctx, chunkEmbeddingSource)
 		chunkEmbedding, chunkEmbedErr := r.embedder(ctx, chunkEmbeddingContent)
 		if chunkEmbedErr != nil {
 			r.logger.Warn("Failed to create embedding for chunk",
@@ -353,7 +410,8 @@ func (r *RAG) persistSummaryDocument(ctx context.Context, summaryDoc *chromem.Do
 	}
 
 	summaryContent := summaryDoc.Content
-	summaryEmbeddingContent := r.ensureEmbeddingTokenLimit(ctx, summaryContent)
+	summaryEmbeddingSource := r.augmentEmbeddingContent(summaryContent, summaryMetadata)
+	summaryEmbeddingContent := r.ensureEmbeddingTokenLimit(ctx, summaryEmbeddingSource)
 	summaryHash := hashContent(normalizeForHash(summaryContent))
 	if summaryHash != "" {
 		summaryMetadata["content_hash"] = summaryHash

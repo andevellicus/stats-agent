@@ -4,6 +4,10 @@ PYTHON_EXECUTOR_ADDRESSES:
   - "localhost:9997"
   - "localhost:9996"
   - "localhost:9995"
+PYTHON_EXECUTOR_COOLDOWN_SECONDS: 5      # Seconds to wait before retrying a failed executor
+PYTHON_EXECUTOR_DIAL_TIMEOUT_SECONDS: 3  # TCP dial timeout to python executors
+PYTHON_EXECUTOR_IO_TIMEOUT_SECONDS: 60   # Read/write timeout per execution
+PYTHON_EXECUTOR_MAX_CONNECTIONS: 4       # Max simultaneous connections per executor
 MAIN_LLM_HOST: "http://localhost:8080"
 EMBEDDING_LLM_HOST: "http://localhost:8081"
 SUMMARIZATION_LLM_HOST: "http://localhost:8082"
@@ -11,6 +15,7 @@ MAX_TURNS: 30
 RAG_RESULTS: 3
 #CONTEXT_LENGTH: 16384
 CONTEXT_LENGTH: 2048
+CONTEXT_SOFT_LIMIT_RATIO: 0.75
 CONSECUTIVE_ERRORS: 5
 LLM_REQUEST_TIMEOUT: 300
 
@@ -29,6 +34,12 @@ RATE_LIMIT_FILES_PER_HOUR: 10    # Max file uploads per session per hour
 RATE_LIMIT_BURST_SIZE: 5         # Allow burst of N requests
 
 # --- Retrieval Tuning ---
+MAX_EMBEDDING_CHARS: 1000              # Max characters before a message is chunked for embeddings
+MAX_EMBEDDING_TOKENS: 250              # Target token count per embedded chunk
+EMBEDDING_TOKEN_SOFT_LIMIT: 450        # Token count that triggers truncation before embedding
+EMBEDDING_TOKEN_TARGET: 400            # Target tokens when truncating for embeddings
+MIN_TOKEN_CHECK_CHAR_THRESHOLD: 100    # Skip embedding token counting for short strings
+MAX_HYBRID_CANDIDATES: 100             # Candidate limit when blending semantic/BM25 retrieval
 SEMANTIC_SIMILARITY_THRESHOLD: 0.7  # Minimum cosine similarity for vector hits
 BM25_SCORE_THRESHOLD: 0.05           # Minimum BM25+bonus score for text hits
 ENABLE_METADATA_FALLBACK: true      # Enable metadata-based fallback search when hybrid results are empty

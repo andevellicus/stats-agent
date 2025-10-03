@@ -47,7 +47,7 @@ func main() {
 		logger.Fatal("Failed to ensure database schema", zap.Error(err))
 	}
 
-	pythonTool, err := tools.NewStatefulPythonTool(ctx, cfg.PythonExecutorAddresses, logger)
+	pythonTool, err := tools.NewStatefulPythonTool(ctx, cfg, logger)
 	if err != nil {
 		logger.Fatal("Failed to initialize Python tool", zap.Error(err))
 	}

@@ -142,7 +142,7 @@ func (m *MemoryManager) IsOverThreshold(ctx context.Context, history []types.Age
 		return false, err
 	}
 
-	contextWindowThreshold := int(float64(m.cfg.ContextLength) * 0.75)
+	contextWindowThreshold := m.cfg.ContextSoftLimitTokens()
 	return totalTokens > contextWindowThreshold, nil
 }
 
@@ -154,7 +154,7 @@ func (m *MemoryManager) ManageHistory(ctx context.Context, sessionID string, his
 		return fmt.Errorf("failed to calculate history size: %w", err)
 	}
 
-	contextWindowThreshold := int(float64(m.cfg.ContextLength) * 0.75)
+	contextWindowThreshold := m.cfg.ContextSoftLimitTokens()
 
 	if totalTokens <= contextWindowThreshold {
 		return nil // No action needed

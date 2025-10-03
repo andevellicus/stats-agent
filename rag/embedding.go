@@ -25,7 +25,8 @@ type ragTokenizeResponse struct {
 
 func (r *RAG) ensureEmbeddingTokenLimit(ctx context.Context, content string) string {
 	trimmed := strings.TrimSpace(content)
-	if len(trimmed) <= minTokenCheckCharThreshold {
+	minCharThreshold := r.minTokenCheckCharThreshold
+	if minCharThreshold > 0 && len(trimmed) <= minCharThreshold {
 		return content
 	}
 
@@ -37,12 +38,17 @@ func (r *RAG) ensureEmbeddingTokenLimit(ctx context.Context, content string) str
 		return content
 	}
 
-	if tokenCount <= embeddingTokenSoftLimit {
+	softLimit := r.embeddingTokenSoftLimit
+	if tokenCount <= softLimit {
 		return content
 	}
 
 	runes := []rune(content)
-	safeLen := len(runes) * embeddingTokenTarget / tokenCount
+	targetTokens := r.embeddingTokenTarget
+	if targetTokens <= 0 {
+		return content
+	}
+	safeLen := len(runes) * targetTokens / tokenCount
 	if safeLen <= 0 {
 		safeLen = len(runes)
 	}
@@ -55,7 +61,7 @@ func (r *RAG) ensureEmbeddingTokenLimit(ctx context.Context, content string) str
 	if r.logger != nil {
 		r.logger.Debug("Truncated embedding content to respect token limit",
 			zap.Int("original_tokens", tokenCount),
-			zap.Int("target_tokens", embeddingTokenTarget),
+			zap.Int("target_tokens", targetTokens),
 			zap.Int("original_length", len(runes)),
 			zap.Int("truncated_length", len([]rune(balanced))))
 	}

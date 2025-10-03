@@ -10,31 +10,56 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	defaultContextSoftLimitRatio            = 0.75
+	defaultPythonExecutorCooldownSeconds    = 5 * time.Second
+	defaultPythonExecutorDialTimeoutSeconds = 3 * time.Second
+	defaultPythonExecutorIOTimeoutSeconds   = 60 * time.Second
+	defaultPythonExecutorMaxConnections     = 4
+	defaultMaxEmbeddingChars                = 1000
+	defaultMaxEmbeddingTokens               = 250
+	defaultEmbeddingTokenSoftLimit          = 450
+	defaultEmbeddingTokenTarget             = 400
+	defaultMinTokenCheckCharThreshold       = 100
+	defaultMaxHybridCandidates              = 100
+)
+
 // Config holds the application's configuration
 type Config struct {
-	PythonExecutorAddress       string        `mapstructure:"PYTHON_EXECUTOR_ADDRESS"`
-	PythonExecutorAddresses     []string      `mapstructure:"PYTHON_EXECUTOR_ADDRESSES"`
-	PythonExecutorPool          []string      `mapstructure:"PYTHON_EXECUTOR_POOL"`
-	MainLLMHost                 string        `mapstructure:"MAIN_LLM_HOST"`
-	EmbeddingLLMHost            string        `mapstructure:"EMBEDDING_LLM_HOST"`
-	SummarizationLLMHost        string        `mapstructure:"SUMMARIZATION_LLM_HOST"`
-	MaxTurns                    int           `mapstructure:"MAX_TURNS"`
-	RAGResults                  int           `mapstructure:"RAG_RESULTS"`
-	ContextLength               int           `mapstructure:"CONTEXT_LENGTH"`
-	MaxRetries                  int           `mapstructure:"MAX_RETRIES"`
-	RetryDelaySeconds           time.Duration `mapstructure:"RETRY_DELAY_SECONDS"`
-	ConsecutiveErrors           int           `mapstructure:"CONSECUTIVE_ERRORS"`
-	LLMRequestTimeout           time.Duration `mapstructure:"LLM_REQUEST_TIMEOUT"`
-	CleanupEnabled              bool          `mapstructure:"CLEANUP_ENABLED"`
-	CleanupInterval             time.Duration `mapstructure:"CLEANUP_INTERVAL"`
-	SessionRetentionAge         time.Duration `mapstructure:"SESSION_RETENTION_AGE"`
-	RateLimitMessagesPerMin     int           `mapstructure:"RATE_LIMIT_MESSAGES_PER_MIN"`
-	RateLimitFilesPerHour       int           `mapstructure:"RATE_LIMIT_FILES_PER_HOUR"`
-	RateLimitBurstSize          int           `mapstructure:"RATE_LIMIT_BURST_SIZE"`
-	SemanticSimilarityThreshold float64       `mapstructure:"SEMANTIC_SIMILARITY_THRESHOLD"`
-	BM25ScoreThreshold          float64       `mapstructure:"BM25_SCORE_THRESHOLD"`
-	EnableMetadataFallback      bool          `mapstructure:"ENABLE_METADATA_FALLBACK"`
-	MetadataFallbackMaxFilters  int           `mapstructure:"METADATA_FALLBACK_MAX_FILTERS"`
+	PythonExecutorAddress            string        `mapstructure:"PYTHON_EXECUTOR_ADDRESS"`
+	PythonExecutorAddresses          []string      `mapstructure:"PYTHON_EXECUTOR_ADDRESSES"`
+	PythonExecutorPool               []string      `mapstructure:"PYTHON_EXECUTOR_POOL"`
+	MainLLMHost                      string        `mapstructure:"MAIN_LLM_HOST"`
+	EmbeddingLLMHost                 string        `mapstructure:"EMBEDDING_LLM_HOST"`
+	SummarizationLLMHost             string        `mapstructure:"SUMMARIZATION_LLM_HOST"`
+	MaxTurns                         int           `mapstructure:"MAX_TURNS"`
+	RAGResults                       int           `mapstructure:"RAG_RESULTS"`
+	ContextLength                    int           `mapstructure:"CONTEXT_LENGTH"`
+	ContextSoftLimitRatio            float64       `mapstructure:"CONTEXT_SOFT_LIMIT_RATIO"`
+	MaxRetries                       int           `mapstructure:"MAX_RETRIES"`
+	RetryDelaySeconds                time.Duration `mapstructure:"RETRY_DELAY_SECONDS"`
+	ConsecutiveErrors                int           `mapstructure:"CONSECUTIVE_ERRORS"`
+	LLMRequestTimeout                time.Duration `mapstructure:"LLM_REQUEST_TIMEOUT"`
+	CleanupEnabled                   bool          `mapstructure:"CLEANUP_ENABLED"`
+	CleanupInterval                  time.Duration `mapstructure:"CLEANUP_INTERVAL"`
+	SessionRetentionAge              time.Duration `mapstructure:"SESSION_RETENTION_AGE"`
+	RateLimitMessagesPerMin          int           `mapstructure:"RATE_LIMIT_MESSAGES_PER_MIN"`
+	RateLimitFilesPerHour            int           `mapstructure:"RATE_LIMIT_FILES_PER_HOUR"`
+	RateLimitBurstSize               int           `mapstructure:"RATE_LIMIT_BURST_SIZE"`
+	SemanticSimilarityThreshold      float64       `mapstructure:"SEMANTIC_SIMILARITY_THRESHOLD"`
+	BM25ScoreThreshold               float64       `mapstructure:"BM25_SCORE_THRESHOLD"`
+	EnableMetadataFallback           bool          `mapstructure:"ENABLE_METADATA_FALLBACK"`
+	MetadataFallbackMaxFilters       int           `mapstructure:"METADATA_FALLBACK_MAX_FILTERS"`
+	PythonExecutorCooldownSeconds    time.Duration `mapstructure:"PYTHON_EXECUTOR_COOLDOWN_SECONDS"`
+	PythonExecutorDialTimeoutSeconds time.Duration `mapstructure:"PYTHON_EXECUTOR_DIAL_TIMEOUT_SECONDS"`
+	PythonExecutorIOTimeoutSeconds   time.Duration `mapstructure:"PYTHON_EXECUTOR_IO_TIMEOUT_SECONDS"`
+	PythonExecutorMaxConnections     int           `mapstructure:"PYTHON_EXECUTOR_MAX_CONNECTIONS"`
+	MaxEmbeddingChars                int           `mapstructure:"MAX_EMBEDDING_CHARS"`
+	MaxEmbeddingTokens               int           `mapstructure:"MAX_EMBEDDING_TOKENS"`
+	EmbeddingTokenSoftLimit          int           `mapstructure:"EMBEDDING_TOKEN_SOFT_LIMIT"`
+	EmbeddingTokenTarget             int           `mapstructure:"EMBEDDING_TOKEN_TARGET"`
+	MinTokenCheckCharThreshold       int           `mapstructure:"MIN_TOKEN_CHECK_CHAR_THRESHOLD"`
+	MaxHybridCandidates              int           `mapstructure:"MAX_HYBRID_CANDIDATES"`
 }
 
 func Load(logger *zap.Logger) *Config {
@@ -53,6 +78,7 @@ func Load(logger *zap.Logger) *Config {
 	viper.SetDefault("EMBEDDING_LLM_HOST", "http://localhost:8081")
 	viper.SetDefault("SUMMARIZATION_LLM_HOST", "http://localhost:8082")
 	viper.SetDefault("CONTEXT_LENGTH", 4096)
+	viper.SetDefault("CONTEXT_SOFT_LIMIT_RATIO", defaultContextSoftLimitRatio)
 	viper.SetDefault("MAX_RETRIES", 5)
 	viper.SetDefault("RETRY_DELAY_SECONDS", 2)
 	viper.SetDefault("CONSECUTIVE_ERRORS", 3)
@@ -67,6 +93,16 @@ func Load(logger *zap.Logger) *Config {
 	viper.SetDefault("BM25_SCORE_THRESHOLD", 0.15)
 	viper.SetDefault("ENABLE_METADATA_FALLBACK", false)
 	viper.SetDefault("METADATA_FALLBACK_MAX_FILTERS", 3)
+	viper.SetDefault("PYTHON_EXECUTOR_COOLDOWN_SECONDS", 5)
+	viper.SetDefault("PYTHON_EXECUTOR_DIAL_TIMEOUT_SECONDS", 3)
+	viper.SetDefault("PYTHON_EXECUTOR_IO_TIMEOUT_SECONDS", 60)
+	viper.SetDefault("PYTHON_EXECUTOR_MAX_CONNECTIONS", 4)
+	viper.SetDefault("MAX_EMBEDDING_CHARS", 1000)
+	viper.SetDefault("MAX_EMBEDDING_TOKENS", 250)
+	viper.SetDefault("EMBEDDING_TOKEN_SOFT_LIMIT", 450)
+	viper.SetDefault("EMBEDDING_TOKEN_TARGET", 400)
+	viper.SetDefault("MIN_TOKEN_CHECK_CHAR_THRESHOLD", 100)
+	viper.SetDefault("MAX_HYBRID_CANDIDATES", 100)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if logger != nil {
@@ -107,11 +143,63 @@ func Load(logger *zap.Logger) *Config {
 	}
 	config.PythonExecutorPool = config.PythonExecutorAddresses
 
+	if config.ContextSoftLimitRatio <= 0 || config.ContextSoftLimitRatio >= 1 {
+		if logger != nil {
+			logger.Warn("Invalid context soft limit ratio; using default",
+				zap.Float64("ratio", config.ContextSoftLimitRatio),
+				zap.Float64("default", defaultContextSoftLimitRatio))
+		}
+		config.ContextSoftLimitRatio = defaultContextSoftLimitRatio
+	}
+
 	// Convert seconds/hours to proper time.Duration
 	config.RetryDelaySeconds = config.RetryDelaySeconds * time.Second
 	config.LLMRequestTimeout = config.LLMRequestTimeout * time.Second
 	config.CleanupInterval = config.CleanupInterval * time.Hour
 	config.SessionRetentionAge = config.SessionRetentionAge * time.Hour
+	config.PythonExecutorCooldownSeconds = config.PythonExecutorCooldownSeconds * time.Second
+	config.PythonExecutorDialTimeoutSeconds = config.PythonExecutorDialTimeoutSeconds * time.Second
+	config.PythonExecutorIOTimeoutSeconds = config.PythonExecutorIOTimeoutSeconds * time.Second
+
+	if config.PythonExecutorCooldownSeconds <= 0 {
+		config.PythonExecutorCooldownSeconds = defaultPythonExecutorCooldownSeconds
+	}
+	if config.PythonExecutorDialTimeoutSeconds <= 0 {
+		config.PythonExecutorDialTimeoutSeconds = defaultPythonExecutorDialTimeoutSeconds
+	}
+	if config.PythonExecutorIOTimeoutSeconds <= 0 {
+		config.PythonExecutorIOTimeoutSeconds = defaultPythonExecutorIOTimeoutSeconds
+	}
+	if config.PythonExecutorMaxConnections <= 0 {
+		config.PythonExecutorMaxConnections = defaultPythonExecutorMaxConnections
+	}
+	if config.MaxEmbeddingChars <= 0 {
+		config.MaxEmbeddingChars = defaultMaxEmbeddingChars
+	}
+	if config.MaxEmbeddingTokens <= 0 {
+		config.MaxEmbeddingTokens = defaultMaxEmbeddingTokens
+	}
+	if config.EmbeddingTokenSoftLimit <= 0 {
+		config.EmbeddingTokenSoftLimit = defaultEmbeddingTokenSoftLimit
+	}
+	if config.EmbeddingTokenTarget <= 0 {
+		config.EmbeddingTokenTarget = defaultEmbeddingTokenTarget
+	}
+	if config.MinTokenCheckCharThreshold <= 0 {
+		config.MinTokenCheckCharThreshold = defaultMinTokenCheckCharThreshold
+	}
+	if config.MaxHybridCandidates <= 0 {
+		config.MaxHybridCandidates = defaultMaxHybridCandidates
+	}
 
 	return &config
+}
+
+// ContextSoftLimitTokens returns the token count threshold that triggers memory compression.
+func (c *Config) ContextSoftLimitTokens() int {
+	ratio := c.ContextSoftLimitRatio
+	if ratio <= 0 || ratio >= 1 {
+		ratio = defaultContextSoftLimitRatio
+	}
+	return int(float64(c.ContextLength) * ratio)
 }

@@ -84,7 +84,8 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 	// Proactively check if long-term context itself is too large
 	if longTermContext != "" {
 		contextTokens, err := a.memoryManager.CountTokens(ctx, longTermContext)
-		if err == nil && contextTokens > int(float64(a.cfg.ContextLength)*0.75) {
+		softLimitTokens := a.cfg.ContextSoftLimitTokens()
+		if err == nil && contextTokens > softLimitTokens {
 			a.logger.Info("Proactive check: RAG context is too large, summarizing", zap.Int("context_tokens", contextTokens))
 			_ = stream.Status("Compressing memory....")
 			summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(ctx, longTermContext, input)

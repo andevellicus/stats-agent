@@ -101,6 +101,9 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_documents_document_id ON rag_documents(document_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_rag_documents_content_hash ON rag_documents(content_hash)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_documents_session_role_hash ON rag_documents (content_hash, COALESCE(metadata ->> 'session_id', ''), COALESCE(metadata ->> 'role', '')) WHERE content_hash IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_rag_documents_metadata_dataset ON rag_documents ((metadata ->> 'dataset'))`,
+		`CREATE INDEX IF NOT EXISTS idx_rag_documents_metadata_primary_test ON rag_documents ((metadata ->> 'primary_test'))`,
+		`CREATE INDEX IF NOT EXISTS idx_rag_documents_metadata_role ON rag_documents ((metadata ->> 'role'))`,
 	}
 
 	for _, stmt := range indexStmts {

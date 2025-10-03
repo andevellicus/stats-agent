@@ -11,12 +11,16 @@ import (
 	"sync"
 	"time"
 
+	"stats-agent/config"
+
 	"go.uber.org/zap"
 )
 
 const (
 	EOM_TOKEN                        = "<|EOM|>"
 	defaultExecutorCooldown          = 5 * time.Second
+	defaultDialTimeout               = 3 * time.Second
+	defaultIOTImeout                 = 60 * time.Second
 	defaultMaxConnectionsPerExecutor = 4
 )
 
@@ -219,19 +223,39 @@ type StatefulPythonTool struct {
 }
 
 // NewStatefulPythonTool no longer creates a session ID.
-func NewStatefulPythonTool(ctx context.Context, addresses []string, logger *zap.Logger) (*StatefulPythonTool, error) {
-	pool, err := newExecutorPool(addresses, defaultExecutorCooldown)
+func NewStatefulPythonTool(ctx context.Context, cfg *config.Config, logger *zap.Logger) (*StatefulPythonTool, error) {
+	if cfg == nil {
+		return nil, errors.New("config is required")
+	}
+	addresses := cfg.PythonExecutorAddresses
+	cooldown := cfg.PythonExecutorCooldownSeconds
+	if cooldown <= 0 {
+		cooldown = defaultExecutorCooldown
+	}
+	pool, err := newExecutorPool(addresses, cooldown)
 	if err != nil {
 		return nil, err
+	}
+	dialTimeout := cfg.PythonExecutorDialTimeoutSeconds
+	if dialTimeout <= 0 {
+		dialTimeout = defaultDialTimeout
+	}
+	ioTimeout := cfg.PythonExecutorIOTimeoutSeconds
+	if ioTimeout <= 0 {
+		ioTimeout = defaultIOTImeout
+	}
+	maxConnections := cfg.PythonExecutorMaxConnections
+	if maxConnections <= 0 {
+		maxConnections = defaultMaxConnectionsPerExecutor
 	}
 	tool := &StatefulPythonTool{
 		pool:                      pool,
 		logger:                    logger,
-		dialTimeout:               3 * time.Second,
-		ioTimeout:                 60 * time.Second,
+		dialTimeout:               dialTimeout,
+		ioTimeout:                 ioTimeout,
 		sessionAddr:               make(map[string]string),
 		connPools:                 make(map[string]*connPool),
-		maxConnectionsPerExecutor: defaultMaxConnectionsPerExecutor,
+		maxConnectionsPerExecutor: maxConnections,
 	}
 	if err := tool.ensureInitialConnectivity(ctx); err != nil {
 		return nil, err

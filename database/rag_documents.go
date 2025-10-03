@@ -188,22 +188,24 @@ func (s *PostgresStore) SearchRAGDocumentsBM25(ctx context.Context, query string
 		return nil, nil
 	}
 
-	const rankExpr = "ts_rank_cd(to_tsvector('simple', COALESCE(embedding_content, content)), websearch_to_tsquery('simple', $1))"
-	const positionExpr = "position(lower($1) in lower(COALESCE(embedding_content, content)))"
+	const searchableTextExpr = "COALESCE(rd.embedding_content, rd.content) || ' ' || COALESCE(meta.metadata_text, '')"
+	const rankExpr = "ts_rank_cd(to_tsvector('english', " + searchableTextExpr + "), websearch_to_tsquery('english', $1))"
+	const positionExpr = "position(lower($1) in lower(" + searchableTextExpr + "))"
 	const bonusExpr = "CASE WHEN " + positionExpr + " > 0 THEN 0.2 ELSE 0 END"
 
 	var builder strings.Builder
 	args := []any{trimmed}
 
-	builder.WriteString("SELECT document_id, metadata, content, embedding_content, ")
+	builder.WriteString("SELECT rd.document_id, rd.metadata, rd.content, rd.embedding_content, ")
 	builder.WriteString(rankExpr)
 	builder.WriteString(" AS rank, ")
 	builder.WriteString(bonusExpr)
-	builder.WriteString(" AS exact_bonus FROM rag_documents")
+	builder.WriteString(" AS exact_bonus FROM rag_documents rd")
+	builder.WriteString(" LEFT JOIN LATERAL (SELECT string_agg(replace(j.key, '_', ' ') || ' ' || j.value || ' ' || replace(j.value, '_', ' '), ' ') AS metadata_text FROM jsonb_each_text(rd.metadata) AS j(key, value)) AS meta ON TRUE")
 
 	// Apply session-specific filtering when provided.
 	if sessionID != "" {
-		builder.WriteString(" WHERE COALESCE(metadata ->> 'session_id', '') = $")
+		builder.WriteString(" WHERE COALESCE(rd.metadata ->> 'session_id', '') = $")
 		builder.WriteString(strconv.Itoa(len(args) + 1))
 		args = append(args, sessionID)
 		builder.WriteString(" AND (" + rankExpr + " > 0 OR " + positionExpr + " > 0)")
