@@ -1,6 +1,8 @@
 package format
 
-import "strings"
+import (
+	"strings"
+)
 
 // Tag definitions - single source of truth for all custom XML tags
 const (
@@ -89,6 +91,56 @@ func StripAllTags(text string) string {
 		text = StripTag(text, tag)
 	}
 	return text
+}
+
+// CloseUnbalancedTags appends missing closing tags for any tags left open in the text.
+// It returns the balanced text along with the list of tags that were closed (in the order they were appended).
+func CloseUnbalancedTags(text string) (string, []Tag) {
+	type stackEntry struct {
+		tag Tag
+	}
+
+	stack := make([]stackEntry, 0)
+
+	for i := 0; i < len(text); {
+		matched := false
+		for _, tag := range AllTags {
+			if strings.HasPrefix(text[i:], tag.OpenTag) {
+				stack = append(stack, stackEntry{tag: tag})
+				i += len(tag.OpenTag)
+				matched = true
+				break
+			}
+			if strings.HasPrefix(text[i:], tag.CloseTag) {
+				if len(stack) > 0 && stack[len(stack)-1].tag.Name == tag.Name {
+					stack = stack[:len(stack)-1]
+				}
+				i += len(tag.CloseTag)
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			i++
+		}
+	}
+
+	if len(stack) == 0 {
+		return text, nil
+	}
+
+	var builder strings.Builder
+	builder.Grow(len(text) + len(stack)*8)
+	builder.WriteString(text)
+
+	closers := make([]Tag, 0, len(stack))
+	for i := len(stack) - 1; i >= 0; i-- {
+		tag := stack[i].tag
+		builder.WriteString(tag.CloseTag)
+		closers = append(closers, tag)
+	}
+
+	return builder.String(), closers
 }
 
 // StreamTransform defines how a tag should be transformed for SSE streaming.

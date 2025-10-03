@@ -1,6 +1,7 @@
 package rag
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -8,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"regexp"
 	"sort"
 	"strconv"
@@ -68,6 +71,12 @@ type ragDocumentData struct {
 	ContentHash   string
 	SummaryDoc    *chromem.Document
 }
+
+const (
+	embeddingTokenSoftLimit    = 450
+	embeddingTokenTarget       = 400
+	minTokenCheckCharThreshold = 100
+)
 
 func New(cfg *config.Config, store *database.PostgresStore, logger *zap.Logger) (*RAG, error) {
 	if store == nil {
@@ -311,14 +320,15 @@ func (r *RAG) persistPreparedDocument(ctx context.Context, data *ragDocumentData
 		return nil
 	}
 
-	embeddingVector, embedErr := r.embedder(ctx, data.EmbedContent)
+	embedContent := r.ensureEmbeddingTokenLimit(ctx, data.EmbedContent)
+	embeddingVector, embedErr := r.embedder(ctx, embedContent)
 	if embedErr != nil {
 		r.logger.Warn("Failed to create embedding for RAG persistence",
 			zap.Error(embedErr),
 			zap.String("document_id", data.Metadata["document_id"]))
 	}
 
-	if err := r.store.UpsertRAGDocument(ctx, data.ID, data.StoredContent, data.EmbedContent, data.Metadata, data.ContentHash, embeddingVector); err != nil {
+	if err := r.store.UpsertRAGDocument(ctx, data.ID, data.StoredContent, embedContent, data.Metadata, data.ContentHash, embeddingVector); err != nil {
 		r.logger.Warn("Failed to persist RAG document", zap.Error(err), zap.String("document_id", data.Metadata["document_id"]))
 	}
 
@@ -331,7 +341,7 @@ func (r *RAG) persistPreparedDocument(ctx context.Context, data *ragDocumentData
 	} else {
 		doc := chromem.Document{
 			ID:       uuid.New().String(),
-			Content:  data.EmbedContent,
+			Content:  embedContent,
 			Metadata: cloneMetadata(data.Metadata),
 		}
 		if embedErr == nil && len(embeddingVector) > 0 {
@@ -378,7 +388,8 @@ func (r *RAG) persistChunks(ctx context.Context, baseMetadata map[string]string,
 			chunkMetadata["content_hash"] = chunkHash
 		}
 
-		chunkEmbedding, chunkEmbedErr := r.embedder(ctx, chunkContent)
+		chunkEmbeddingContent := r.ensureEmbeddingTokenLimit(ctx, chunkContent)
+		chunkEmbedding, chunkEmbedErr := r.embedder(ctx, chunkEmbeddingContent)
 		if chunkEmbedErr != nil {
 			r.logger.Warn("Failed to create embedding for chunk",
 				zap.Error(chunkEmbedErr),
@@ -386,7 +397,7 @@ func (r *RAG) persistChunks(ctx context.Context, baseMetadata map[string]string,
 				zap.Int("chunk_index", chunkIndex))
 		}
 
-		if err := r.store.UpsertRAGDocument(ctx, chunkDocID, chunkContent, chunkContent, chunkMetadata, chunkHash, chunkEmbedding); err != nil {
+		if err := r.store.UpsertRAGDocument(ctx, chunkDocID, chunkContent, chunkEmbeddingContent, chunkMetadata, chunkHash, chunkEmbedding); err != nil {
 			r.logger.Warn("Failed to persist chunked RAG document",
 				zap.Error(err),
 				zap.String("document_id", chunkDocID.String()),
@@ -395,7 +406,7 @@ func (r *RAG) persistChunks(ctx context.Context, baseMetadata map[string]string,
 
 		chunkDoc := chromem.Document{
 			ID:       uuid.New().String(),
-			Content:  chunkContent,
+			Content:  chunkEmbeddingContent,
 			Metadata: cloneMetadata(chunkMetadata),
 		}
 		if chunkEmbedErr == nil && len(chunkEmbedding) > 0 {
@@ -428,19 +439,20 @@ func (r *RAG) persistSummaryDocument(ctx context.Context, summaryDoc *chromem.Do
 	}
 
 	summaryContent := summaryDoc.Content
+	summaryEmbeddingContent := r.ensureEmbeddingTokenLimit(ctx, summaryContent)
 	summaryHash := hashContent(normalizeForHash(summaryContent))
 	if summaryHash != "" {
 		summaryMetadata["content_hash"] = summaryHash
 	}
 
-	summaryEmbedding, summaryErr := r.embedder(ctx, summaryContent)
+	summaryEmbedding, summaryErr := r.embedder(ctx, summaryEmbeddingContent)
 	if summaryErr != nil {
 		r.logger.Warn("Failed to create embedding for summary document",
 			zap.Error(summaryErr),
 			zap.String("document_id", summaryIDStr))
 	}
 
-	if err := r.store.UpsertRAGDocument(ctx, summaryID, summaryContent, summaryContent, summaryMetadata, summaryHash, summaryEmbedding); err != nil {
+	if err := r.store.UpsertRAGDocument(ctx, summaryID, summaryContent, summaryEmbeddingContent, summaryMetadata, summaryHash, summaryEmbedding); err != nil {
 		r.logger.Warn("Failed to persist summary RAG document",
 			zap.Error(err),
 			zap.String("document_id", summaryIDStr))
@@ -449,8 +461,116 @@ func (r *RAG) persistSummaryDocument(ctx context.Context, summaryDoc *chromem.Do
 	if summaryErr == nil && len(summaryEmbedding) > 0 {
 		summaryDoc.Embedding = summaryEmbedding
 	}
+	summaryDoc.Content = summaryEmbeddingContent
 
 	return summaryDoc
+}
+
+type ragTokenizeRequest struct {
+	Content string `json:"content"`
+}
+
+type ragTokenizeResponse struct {
+	Tokens []int `json:"tokens"`
+}
+
+func (r *RAG) ensureEmbeddingTokenLimit(ctx context.Context, content string) string {
+	trimmed := strings.TrimSpace(content)
+	if len(trimmed) <= minTokenCheckCharThreshold {
+		return content
+	}
+
+	tokenCount, err := r.countTokensForEmbedding(ctx, trimmed)
+	if err != nil {
+		if r.logger != nil {
+			r.logger.Debug("Token counting failed for embedding content", zap.Error(err))
+		}
+		return content
+	}
+
+	if tokenCount <= embeddingTokenSoftLimit {
+		return content
+	}
+
+	runes := []rune(content)
+	safeLen := len(runes) * embeddingTokenTarget / tokenCount
+	if safeLen <= 0 {
+		safeLen = len(runes)
+	}
+	if safeLen >= len(runes) {
+		return content
+	}
+
+	truncated := string(runes[:safeLen])
+	balanced, _ := format.CloseUnbalancedTags(truncated)
+	if r.logger != nil {
+		r.logger.Debug("Truncated embedding content to respect token limit",
+			zap.Int("original_tokens", tokenCount),
+			zap.Int("target_tokens", embeddingTokenTarget),
+			zap.Int("original_length", len(runes)),
+			zap.Int("truncated_length", len([]rune(balanced))))
+	}
+	return balanced
+}
+
+func (r *RAG) countTokensForEmbedding(ctx context.Context, text string) (int, error) {
+	if r.cfg == nil || strings.TrimSpace(r.cfg.MainLLMHost) == "" {
+		return 0, fmt.Errorf("main LLM host not configured")
+	}
+
+	payload, err := json.Marshal(ragTokenizeRequest{Content: text})
+	if err != nil {
+		return 0, fmt.Errorf("marshal tokenize request: %w", err)
+	}
+
+	client := &http.Client{Timeout: r.cfg.LLMRequestTimeout}
+	url := fmt.Sprintf("%s/tokenize", strings.TrimRight(r.cfg.MainLLMHost, "/"))
+
+	for attempt := 0; attempt < 3; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+		if err != nil {
+			return 0, fmt.Errorf("create tokenize request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return 0, ctx.Err()
+			}
+			if attempt == 2 {
+				return 0, fmt.Errorf("tokenize request failed: %w", err)
+			}
+			time.Sleep(200 * time.Millisecond * time.Duration(attempt+1))
+			continue
+		}
+
+		bodyCloser := resp.Body
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			bodyCloser.Close()
+			if attempt < 2 {
+				time.Sleep(200 * time.Millisecond * time.Duration(attempt+1))
+			}
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			defer bodyCloser.Close()
+			responseBody, _ := io.ReadAll(bodyCloser)
+			return 0, fmt.Errorf("tokenize status %s: %s", resp.Status, strings.TrimSpace(string(responseBody)))
+		}
+
+		var tokenizeResp ragTokenizeResponse
+		decodeErr := json.NewDecoder(bodyCloser).Decode(&tokenizeResp)
+		bodyCloser.Close()
+		if decodeErr != nil {
+			return 0, fmt.Errorf("decode tokenize response: %w", decodeErr)
+		}
+
+		return len(tokenizeResp.Tokens), nil
+	}
+
+	return 0, fmt.Errorf("failed to tokenize content after retries")
 }
 
 func cloneMetadata(src map[string]string) map[string]string {

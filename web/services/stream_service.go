@@ -62,6 +62,7 @@ func (ss *StreamService) WriteSSEData(ctx context.Context, w http.ResponseWriter
 func (ss *StreamService) ProcessStreamByWord(ctx context.Context, r io.Reader, writeFunc func(StreamData) error) {
 	reader := bufio.NewReader(r)
 	var currentWord strings.Builder
+	var openTagStack []format.Tag
 
 	var processToken func(string)
 	processToken = func(token string) {
@@ -76,6 +77,7 @@ func (ss *StreamService) ProcessStreamByWord(ctx context.Context, r io.Reader, w
 				transform := format.GetStreamTransform(tag)
 				writeFunc(StreamData{Type: "chunk", Content: parts[0]})
 				writeFunc(StreamData{Type: "chunk", Content: transform.OpenReplace})
+				openTagStack = append(openTagStack, tag)
 				processToken(parts[1])
 				return
 			}
@@ -88,6 +90,9 @@ func (ss *StreamService) ProcessStreamByWord(ctx context.Context, r io.Reader, w
 				transform := format.GetStreamTransform(tag)
 				writeFunc(StreamData{Type: "chunk", Content: parts[0]})
 				writeFunc(StreamData{Type: "chunk", Content: transform.CloseReplace})
+				if len(openTagStack) > 0 && openTagStack[len(openTagStack)-1].Name == tag.Name {
+					openTagStack = openTagStack[:len(openTagStack)-1]
+				}
 				processToken(parts[1])
 				return
 			}
@@ -106,6 +111,11 @@ func (ss *StreamService) ProcessStreamByWord(ctx context.Context, r io.Reader, w
 			if err != nil {
 				if currentWord.Len() > 0 {
 					processToken(currentWord.String())
+				}
+				for i := len(openTagStack) - 1; i >= 0; i-- {
+					tag := openTagStack[i]
+					transform := format.GetStreamTransform(tag)
+					writeFunc(StreamData{Type: "chunk", Content: transform.CloseReplace})
 				}
 				return
 			}

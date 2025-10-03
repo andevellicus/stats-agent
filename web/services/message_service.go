@@ -30,6 +30,7 @@ func (ms *MessageService) SaveAssistantAndTool(ctx context.Context, sessionID st
 	var assistantID string
 
 	if assistant != "" {
+		assistant, _ = format.CloseUnbalancedTags(assistant)
 		rendered, err := ms.processContentForDB(ctx, assistant)
 		if err != nil {
 			return "", fmt.Errorf("process assistant content: %w", err)
