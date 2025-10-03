@@ -9,8 +9,8 @@ EMBEDDING_LLM_HOST: "http://localhost:8081"
 SUMMARIZATION_LLM_HOST: "http://localhost:8082"
 MAX_TURNS: 30
 RAG_RESULTS: 3
-CONTEXT_LENGTH: 16384
-#CONTEXT_LENGTH: 2048
+#CONTEXT_LENGTH: 16384
+CONTEXT_LENGTH: 2048
 CONSECUTIVE_ERRORS: 5
 LLM_REQUEST_TIMEOUT: 300
 
@@ -27,3 +27,9 @@ SESSION_RETENTION_AGE: 168  # Delete sessions older than 7 days (168 hours)
 RATE_LIMIT_MESSAGES_PER_MIN: 20  # Max messages per session per minute
 RATE_LIMIT_FILES_PER_HOUR: 10    # Max file uploads per session per hour
 RATE_LIMIT_BURST_SIZE: 5         # Allow burst of N requests
+
+# --- Retrieval Tuning ---
+SEMANTIC_SIMILARITY_THRESHOLD: 0.7  # Minimum cosine similarity for vector hits
+BM25_SCORE_THRESHOLD: 0.05           # Minimum BM25+bonus score for text hits
+ENABLE_METADATA_FALLBACK: true      # Enable metadata-based fallback search when hybrid results are empty
+METADATA_FALLBACK_MAX_FILTERS: 3     # Limit number of auto-derived metadata filters

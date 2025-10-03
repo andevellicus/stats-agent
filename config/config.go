@@ -12,25 +12,29 @@ import (
 
 // Config holds the application's configuration
 type Config struct {
-	PythonExecutorAddress   string        `mapstructure:"PYTHON_EXECUTOR_ADDRESS"`
-	PythonExecutorAddresses []string      `mapstructure:"PYTHON_EXECUTOR_ADDRESSES"`
-	PythonExecutorPool      []string      `mapstructure:"PYTHON_EXECUTOR_POOL"`
-	MainLLMHost             string        `mapstructure:"MAIN_LLM_HOST"`
-	EmbeddingLLMHost        string        `mapstructure:"EMBEDDING_LLM_HOST"`
-	SummarizationLLMHost    string        `mapstructure:"SUMMARIZATION_LLM_HOST"`
-	MaxTurns                int           `mapstructure:"MAX_TURNS"`
-	RAGResults              int           `mapstructure:"RAG_RESULTS"`
-	ContextLength           int           `mapstructure:"CONTEXT_LENGTH"`
-	MaxRetries              int           `mapstructure:"MAX_RETRIES"`
-	RetryDelaySeconds       time.Duration `mapstructure:"RETRY_DELAY_SECONDS"`
-	ConsecutiveErrors       int           `mapstructure:"CONSECUTIVE_ERRORS"`
-	LLMRequestTimeout       time.Duration `mapstructure:"LLM_REQUEST_TIMEOUT"`
-	CleanupEnabled          bool          `mapstructure:"CLEANUP_ENABLED"`
-	CleanupInterval         time.Duration `mapstructure:"CLEANUP_INTERVAL"`
-	SessionRetentionAge     time.Duration `mapstructure:"SESSION_RETENTION_AGE"`
-	RateLimitMessagesPerMin int           `mapstructure:"RATE_LIMIT_MESSAGES_PER_MIN"`
-	RateLimitFilesPerHour   int           `mapstructure:"RATE_LIMIT_FILES_PER_HOUR"`
-	RateLimitBurstSize      int           `mapstructure:"RATE_LIMIT_BURST_SIZE"`
+	PythonExecutorAddress       string        `mapstructure:"PYTHON_EXECUTOR_ADDRESS"`
+	PythonExecutorAddresses     []string      `mapstructure:"PYTHON_EXECUTOR_ADDRESSES"`
+	PythonExecutorPool          []string      `mapstructure:"PYTHON_EXECUTOR_POOL"`
+	MainLLMHost                 string        `mapstructure:"MAIN_LLM_HOST"`
+	EmbeddingLLMHost            string        `mapstructure:"EMBEDDING_LLM_HOST"`
+	SummarizationLLMHost        string        `mapstructure:"SUMMARIZATION_LLM_HOST"`
+	MaxTurns                    int           `mapstructure:"MAX_TURNS"`
+	RAGResults                  int           `mapstructure:"RAG_RESULTS"`
+	ContextLength               int           `mapstructure:"CONTEXT_LENGTH"`
+	MaxRetries                  int           `mapstructure:"MAX_RETRIES"`
+	RetryDelaySeconds           time.Duration `mapstructure:"RETRY_DELAY_SECONDS"`
+	ConsecutiveErrors           int           `mapstructure:"CONSECUTIVE_ERRORS"`
+	LLMRequestTimeout           time.Duration `mapstructure:"LLM_REQUEST_TIMEOUT"`
+	CleanupEnabled              bool          `mapstructure:"CLEANUP_ENABLED"`
+	CleanupInterval             time.Duration `mapstructure:"CLEANUP_INTERVAL"`
+	SessionRetentionAge         time.Duration `mapstructure:"SESSION_RETENTION_AGE"`
+	RateLimitMessagesPerMin     int           `mapstructure:"RATE_LIMIT_MESSAGES_PER_MIN"`
+	RateLimitFilesPerHour       int           `mapstructure:"RATE_LIMIT_FILES_PER_HOUR"`
+	RateLimitBurstSize          int           `mapstructure:"RATE_LIMIT_BURST_SIZE"`
+	SemanticSimilarityThreshold float64       `mapstructure:"SEMANTIC_SIMILARITY_THRESHOLD"`
+	BM25ScoreThreshold          float64       `mapstructure:"BM25_SCORE_THRESHOLD"`
+	EnableMetadataFallback      bool          `mapstructure:"ENABLE_METADATA_FALLBACK"`
+	MetadataFallbackMaxFilters  int           `mapstructure:"METADATA_FALLBACK_MAX_FILTERS"`
 }
 
 func Load(logger *zap.Logger) *Config {
@@ -59,6 +63,10 @@ func Load(logger *zap.Logger) *Config {
 	viper.SetDefault("RATE_LIMIT_MESSAGES_PER_MIN", 20)
 	viper.SetDefault("RATE_LIMIT_FILES_PER_HOUR", 10)
 	viper.SetDefault("RATE_LIMIT_BURST_SIZE", 5)
+	viper.SetDefault("SEMANTIC_SIMILARITY_THRESHOLD", 0.7)
+	viper.SetDefault("BM25_SCORE_THRESHOLD", 0.15)
+	viper.SetDefault("ENABLE_METADATA_FALLBACK", false)
+	viper.SetDefault("METADATA_FALLBACK_MAX_FILTERS", 3)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if logger != nil {
