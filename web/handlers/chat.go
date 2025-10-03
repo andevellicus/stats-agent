@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -182,10 +184,24 @@ func (h *ChatHandler) LoadSession(c *gin.Context) {
 	// Verify the session belongs to this user
 	session, err := h.store.GetSessionByID(c.Request.Context(), sessionID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			h.logger.Info("Requested session not found, creating new one",
+				zap.String("requested_session_id", sessionID.String()))
+			newSessionID, createErr := h.store.CreateSession(c.Request.Context(), userUUIDPtr)
+			if createErr != nil {
+				h.logger.Error("Failed to create replacement session",
+					zap.Error(createErr))
+				c.String(http.StatusInternalServerError, "Could not create new session")
+				return
+			}
+			c.SetCookie(middleware.SessionCookieName, newSessionID.String(), middleware.CookieMaxAge, "/", "", false, true)
+			c.Redirect(http.StatusFound, fmt.Sprintf("/chat/%s", newSessionID.String()))
+			return
+		}
 		h.logger.Error("Failed to get session",
 			zap.Error(err),
 			zap.String("session_id", sessionID.String()))
-		c.String(http.StatusNotFound, "Session not found")
+		c.String(http.StatusInternalServerError, "Could not load session")
 		return
 	}
 

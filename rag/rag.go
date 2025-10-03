@@ -60,6 +60,15 @@ type hybridCandidate struct {
 
 // Embedding request/response types moved to llmclient
 
+type ragDocumentData struct {
+	ID            uuid.UUID
+	Metadata      map[string]string
+	StoredContent string
+	EmbedContent  string
+	ContentHash   string
+	SummaryDoc    *chromem.Document
+}
+
 func New(cfg *config.Config, store *database.PostgresStore, logger *zap.Logger) (*RAG, error) {
 	if store == nil {
 		return nil, fmt.Errorf("postgres store is required for RAG persistence")
@@ -97,21 +106,12 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, sessionID string, messages
 		return fmt.Errorf("long-term memory collection not found")
 	}
 
-	var documentsToEmbed []chromem.Document
 	processedIndices := make(map[int]bool)
+	var documentsToEmbed []chromem.Document
+
 	var sessionFilter map[string]string
 	if sessionID != "" {
 		sessionFilter = map[string]string{"session_id": sessionID}
-	}
-	copyMetadata := func(src map[string]string) map[string]string {
-		if src == nil {
-			return nil
-		}
-		cp := make(map[string]string, len(src))
-		for k, v := range src {
-			cp[k] = v
-		}
-		return cp
 	}
 
 	for i := range messages {
@@ -119,262 +119,345 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, sessionID string, messages
 			continue
 		}
 
-		message := messages[i]
-		documentUUID := uuid.New()
-		documentID := documentUUID.String()
-		metadata := map[string]string{
-			"document_id": documentID,
-		}
-		if sessionID != "" {
-			metadata["session_id"] = sessionID
-		}
-
-		var contentToEmbed string
-		var storedContent string
-		var summaryDoc *chromem.Document
-
-		if message.Role == "assistant" && i+1 < len(messages) && messages[i+1].Role == "tool" {
-			toolMessage := messages[i+1]
-			processedIndices[i] = true
-			processedIndices[i+1] = true
-			metadata["role"] = "fact"
-
-			assistantContent := canonicalizeFactText(message.Content)
-			toolContent := canonicalizeFactText(toolMessage.Content)
-
-			userContent := ""
-			for prev := i - 1; prev >= 0; prev-- {
-				if messages[prev].Role == "user" {
-					userContent = canonicalizeFactText(messages[prev].Content)
-					break
-				}
-			}
-
-			factPayload := factStoredContent{
-				Assistant: assistantContent,
-				Tool:      toolContent,
-			}
-			if userContent != "" {
-				factPayload.User = userContent
-			}
-
-			factJSON, marshalErr := json.Marshal(factPayload)
-			if marshalErr != nil {
-				r.logger.Warn("Failed to marshal fact payload, falling back to concatenated format", zap.Error(marshalErr))
-				storedContent = fmt.Sprintf("%s\n\n%s", assistantContent, toolContent)
-			} else {
-				storedContent = string(factJSON)
-			}
-
-			re := regexp.MustCompile(`(?s)<python>(.*)</python>`)
-			matches := re.FindStringSubmatch(message.Content)
-			if len(matches) > 1 {
-				code := strings.TrimSpace(matches[1])
-				result := strings.TrimSpace(toolMessage.Content)
-				summary, err := r.generateFactSummary(ctx, code, result)
-				if err != nil {
-					r.logger.Warn("LLM fact summarization failed, using fallback summary",
-						zap.Error(err),
-						zap.Int("code_length", len(code)),
-						zap.Int("result_length", len(result)))
-					contentToEmbed = "Fact: A code execution event occurred but could not be summarized."
-				} else {
-					contentToEmbed = strings.TrimSpace(summary)
-				}
-			} else {
-				contentToEmbed = "Fact: An assistant action with a tool execution occurred."
-			}
-		} else {
-			if message.Role == "assistant" {
-				trimmed := strings.TrimSpace(message.Content)
-				if strings.HasPrefix(trimmed, "Fact:") && !format.HasTag(message.Content, format.PythonTag) {
-					processedIndices[i] = true
-					continue
-				}
-			}
-
-			storedContent = canonicalizeFactText(message.Content)
-			metadata["role"] = message.Role
-			contentToEmbed = storedContent
-
-			contentToEmbed = canonicalizeFactText(contentToEmbed)
-			if collection.Count() > 0 {
-				results, err := collection.Query(ctx, contentToEmbed, 1, sessionFilter, nil)
-				if err != nil {
-					r.logger.Warn("Deduplication query failed, proceeding to add document anyway", zap.Error(err))
-				} else if len(results) > 0 && results[0].Similarity > 0.98 && results[0].Metadata["role"] == message.Role {
-					r.logger.Debug("Skipping duplicate content", zap.Float32("similarity", results[0].Similarity), zap.String("role", message.Role))
-					continue
-				}
-			}
-		}
-
-		if storedContent == "" {
-			storedContent = contentToEmbed
-		}
-
-		role := metadata["role"]
-		normalizedContent := normalizeForHash(storedContent)
-		contentHash := hashContent(normalizedContent)
-		if contentHash != "" {
-			metadata["content_hash"] = contentHash
-			existingDocID, err := r.store.FindRAGDocumentByHash(ctx, sessionID, role, contentHash)
-			if err != nil {
-				r.logger.Warn("Failed to check for existing RAG document",
-					zap.Error(err),
-					zap.String("session_id", sessionID))
-				continue
-			}
-			if existingDocID != uuid.Nil {
-				r.logger.Debug("Skipping duplicate RAG document",
-					zap.String("existing_document_id", existingDocID.String()),
-					zap.String("session_id", sessionID),
-					zap.String("role", role))
-				continue
-			}
-		}
-
-		if role != "fact" && len(message.Content) > 500 {
-			summary, err := r.generateSearchableSummary(ctx, message.Content)
-			if err != nil {
-				r.logger.Warn("Failed to create searchable summary for long message, will use full content",
-					zap.Error(err),
-					zap.Int("content_length", len(message.Content)))
-			} else {
-				summaryID := uuid.New()
-				summaryMetadata := map[string]string{
-					"role":                 message.Role,
-					"document_id":          summaryID.String(),
-					"type":                 "summary",
-					"parent_document_id":   documentID,
-					"parent_document_role": role,
-				}
-				if sessionID != "" {
-					summaryMetadata["session_id"] = sessionID
-				}
-				summaryDoc = &chromem.Document{
-					ID:       uuid.New().String(),
-					Content:  summary,
-					Metadata: summaryMetadata,
-				}
-			}
-		}
-
-		embeddingVector, embedErr := r.embedder(ctx, contentToEmbed)
-		if embedErr != nil {
-			r.logger.Warn("Failed to create embedding for RAG persistence",
-				zap.Error(embedErr),
-				zap.String("document_id", documentID))
-		}
-
-		if err := r.store.UpsertRAGDocument(ctx, documentUUID, storedContent, contentToEmbed, metadata, contentHash, embeddingVector); err != nil {
-			r.logger.Warn("Failed to persist RAG document", zap.Error(err), zap.String("document_id", documentID))
-		}
-
-		if len(contentToEmbed) > maxEmbeddingChars {
-			r.logger.Info("Chunking oversized message for embedding",
-				zap.String("role", metadata["role"]),
-				zap.Int("length", len(contentToEmbed)))
-			parentDocumentID := metadata["document_id"]
-			chunkIndex := 0
-			for j := 0; j < len(contentToEmbed); j += maxEmbeddingChars {
-				end := min(j+maxEmbeddingChars, len(contentToEmbed))
-				chunkContent := contentToEmbed[j:end]
-				if int(float64(len(chunkContent))/3.5) > maxEmbeddingTokens {
-					end = j + (maxEmbeddingChars * 3 / 4)
-					chunkContent = contentToEmbed[j:end]
-				}
-				chunkDocID := uuid.New()
-				chunkMetadata := copyMetadata(metadata)
-				chunkMetadata["type"] = "chunk"
-				chunkMetadata["chunk_index"] = strconv.Itoa(chunkIndex)
-				chunkMetadata["parent_document_id"] = parentDocumentID
-				chunkMetadata["parent_document_role"] = role
-				chunkMetadata["document_id"] = chunkDocID.String()
-				chunkHash := hashContent(normalizeForHash(chunkContent))
-				if chunkHash != "" {
-					chunkMetadata["content_hash"] = chunkHash
-				}
-				chunkEmbedding, chunkEmbedErr := r.embedder(ctx, chunkContent)
-				if chunkEmbedErr != nil {
-					r.logger.Warn("Failed to create embedding for chunk",
-						zap.Error(chunkEmbedErr),
-						zap.String("document_id", chunkDocID.String()),
-						zap.Int("chunk_index", chunkIndex))
-				}
-				if err := r.store.UpsertRAGDocument(ctx, chunkDocID, chunkContent, chunkContent, chunkMetadata, chunkHash, chunkEmbedding); err != nil {
-					r.logger.Warn("Failed to persist chunked RAG document",
-						zap.Error(err),
-						zap.String("document_id", chunkDocID.String()),
-						zap.Int("chunk_index", chunkIndex))
-				}
-				chunkDoc := chromem.Document{
-					ID:       uuid.New().String(),
-					Content:  chunkContent,
-					Metadata: copyMetadata(chunkMetadata),
-				}
-				if chunkEmbedErr == nil && len(chunkEmbedding) > 0 {
-					chunkDoc.Embedding = chunkEmbedding
-				}
-				documentsToEmbed = append(documentsToEmbed, chunkDoc)
-				chunkIndex++
-			}
-		} else {
-			doc := chromem.Document{
-				ID:       uuid.New().String(),
-				Content:  contentToEmbed,
-				Metadata: copyMetadata(metadata),
-			}
-			if embedErr == nil && len(embeddingVector) > 0 {
-				doc.Embedding = embeddingVector
-			}
-			documentsToEmbed = append(documentsToEmbed, doc)
-		}
-
-		if summaryDoc != nil {
-			summaryMetadata := copyMetadata(summaryDoc.Metadata)
-			summaryDoc.Metadata = summaryMetadata
-			summaryIDStr, ok := summaryMetadata["document_id"]
-			if !ok {
-				r.logger.Warn("Summary document missing document_id, skipping persistence")
-			} else {
-				summaryID, err := uuid.Parse(summaryIDStr)
-				if err != nil {
-					r.logger.Warn("Summary document has invalid document_id", zap.String("document_id", summaryIDStr), zap.Error(err))
-				} else {
-					summaryContent := summaryDoc.Content
-					summaryHash := hashContent(normalizeForHash(summaryContent))
-					if summaryHash != "" {
-						summaryMetadata["content_hash"] = summaryHash
-					}
-					summaryEmbedding, summaryErr := r.embedder(ctx, summaryContent)
-					if summaryErr != nil {
-						r.logger.Warn("Failed to create embedding for summary document",
-							zap.Error(summaryErr),
-							zap.String("document_id", summaryIDStr))
-					}
-					if err := r.store.UpsertRAGDocument(ctx, summaryID, summaryContent, summaryContent, summaryMetadata, summaryHash, summaryEmbedding); err != nil {
-						r.logger.Warn("Failed to persist summary RAG document",
-							zap.Error(err),
-							zap.String("document_id", summaryIDStr))
-					}
-					if summaryErr == nil && len(summaryEmbedding) > 0 {
-						summaryDoc.Embedding = summaryEmbedding
-					}
-					documentsToEmbed = append(documentsToEmbed, *summaryDoc)
-				}
-			}
-		}
-	}
-
-	if len(documentsToEmbed) > 0 {
-		err := collection.AddDocuments(ctx, documentsToEmbed, 4)
+		docData, skip, err := r.prepareDocumentForMessage(ctx, sessionID, messages, i, collection, sessionFilter, processedIndices)
 		if err != nil {
-			return fmt.Errorf("failed to add documents to collection: %w", err)
+			r.logger.Warn("Failed to prepare RAG document", zap.Error(err))
+			continue
 		}
-		r.logger.Info("Added document chunks to long-term RAG memory", zap.Int("chunks_added", len(documentsToEmbed)))
+		if skip || docData == nil {
+			continue
+		}
+
+		embeddableDocs := r.persistPreparedDocument(ctx, docData)
+		documentsToEmbed = append(documentsToEmbed, embeddableDocs...)
 	}
+
+	if len(documentsToEmbed) == 0 {
+		return nil
+	}
+
+	if err := collection.AddDocuments(ctx, documentsToEmbed, 4); err != nil {
+		return fmt.Errorf("failed to add documents to collection: %w", err)
+	}
+
+	r.logger.Info("Added document chunks to long-term RAG memory", zap.Int("chunks_added", len(documentsToEmbed)))
 	return nil
+}
+
+func (r *RAG) prepareDocumentForMessage(
+	ctx context.Context,
+	sessionID string,
+	messages []types.AgentMessage,
+	index int,
+	collection *chromem.Collection,
+	sessionFilter map[string]string,
+	processed map[int]bool,
+) (*ragDocumentData, bool, error) {
+	processed[index] = true
+	message := messages[index]
+
+	documentUUID := uuid.New()
+	documentID := documentUUID.String()
+	metadata := map[string]string{"document_id": documentID}
+	if sessionID != "" {
+		metadata["session_id"] = sessionID
+	}
+
+	var storedContent string
+	var contentToEmbed string
+	var summaryDoc *chromem.Document
+
+	if message.Role == "assistant" && index+1 < len(messages) && messages[index+1].Role == "tool" {
+		toolMessage := messages[index+1]
+		processed[index+1] = true
+		metadata["role"] = "fact"
+
+		assistantContent := canonicalizeFactText(message.Content)
+		toolContent := canonicalizeFactText(toolMessage.Content)
+
+		userContent := ""
+		for prev := index - 1; prev >= 0; prev-- {
+			if messages[prev].Role == "user" {
+				userContent = canonicalizeFactText(messages[prev].Content)
+				break
+			}
+		}
+
+		factPayload := factStoredContent{
+			Assistant: assistantContent,
+			Tool:      toolContent,
+		}
+		if userContent != "" {
+			factPayload.User = userContent
+		}
+
+		factJSON, marshalErr := json.Marshal(factPayload)
+		if marshalErr != nil {
+			r.logger.Warn("Failed to marshal fact payload, falling back to concatenated format", zap.Error(marshalErr))
+			storedContent = fmt.Sprintf("%s\n\n%s", assistantContent, toolContent)
+		} else {
+			storedContent = string(factJSON)
+		}
+
+		re := regexp.MustCompile(`(?s)<python>(.*)</python>`)
+		matches := re.FindStringSubmatch(message.Content)
+		if len(matches) > 1 {
+			code := strings.TrimSpace(matches[1])
+			result := strings.TrimSpace(toolMessage.Content)
+			summary, err := r.generateFactSummary(ctx, code, result)
+			if err != nil {
+				r.logger.Warn("LLM fact summarization failed, using fallback summary",
+					zap.Error(err),
+					zap.Int("code_length", len(code)),
+					zap.Int("result_length", len(result)))
+				contentToEmbed = "Fact: A code execution event occurred but could not be summarized."
+			} else {
+				contentToEmbed = strings.TrimSpace(summary)
+			}
+		} else {
+			contentToEmbed = "Fact: An assistant action with a tool execution occurred."
+		}
+	} else {
+		if message.Role == "assistant" {
+			trimmed := strings.TrimSpace(message.Content)
+			if strings.HasPrefix(trimmed, "Fact:") && !format.HasTag(message.Content, format.PythonTag) {
+				return nil, true, nil
+			}
+		}
+
+		storedContent = canonicalizeFactText(message.Content)
+		metadata["role"] = message.Role
+		contentToEmbed = canonicalizeFactText(storedContent)
+
+		if collection != nil && collection.Count() > 0 {
+			results, err := collection.Query(ctx, contentToEmbed, 1, sessionFilter, nil)
+			if err != nil {
+				r.logger.Warn("Deduplication query failed, proceeding to add document anyway", zap.Error(err))
+			} else if len(results) > 0 && results[0].Similarity > 0.98 && results[0].Metadata["role"] == message.Role {
+				r.logger.Debug("Skipping duplicate content", zap.Float32("similarity", results[0].Similarity), zap.String("role", message.Role))
+				return nil, true, nil
+			}
+		}
+	}
+
+	if storedContent == "" {
+		storedContent = contentToEmbed
+	}
+
+	role := metadata["role"]
+	normalizedContent := normalizeForHash(storedContent)
+	contentHash := hashContent(normalizedContent)
+	if contentHash != "" {
+		metadata["content_hash"] = contentHash
+		existingDocID, err := r.store.FindRAGDocumentByHash(ctx, sessionID, role, contentHash)
+		if err != nil {
+			r.logger.Warn("Failed to check for existing RAG document",
+				zap.Error(err),
+				zap.String("session_id", sessionID))
+			return nil, true, nil
+		}
+		if existingDocID != uuid.Nil {
+			r.logger.Debug("Skipping duplicate RAG document",
+				zap.String("existing_document_id", existingDocID.String()),
+				zap.String("session_id", sessionID),
+				zap.String("role", role))
+			return nil, true, nil
+		}
+	}
+
+	if role != "fact" && len(message.Content) > 500 {
+		summary, err := r.generateSearchableSummary(ctx, message.Content)
+		if err != nil {
+			r.logger.Warn("Failed to create searchable summary for long message, will use full content",
+				zap.Error(err),
+				zap.Int("content_length", len(message.Content)))
+		} else {
+			summaryDoc = r.buildSummaryDocument(summary, metadata, sessionID, message.Role)
+		}
+	}
+
+	return &ragDocumentData{
+		ID:            documentUUID,
+		Metadata:      metadata,
+		StoredContent: storedContent,
+		EmbedContent:  contentToEmbed,
+		ContentHash:   contentHash,
+		SummaryDoc:    summaryDoc,
+	}, false, nil
+}
+
+func (r *RAG) buildSummaryDocument(summary string, parentMetadata map[string]string, sessionID, messageRole string) *chromem.Document {
+	summaryID := uuid.New()
+	metadata := map[string]string{
+		"role":                 messageRole,
+		"document_id":          summaryID.String(),
+		"type":                 "summary",
+		"parent_document_id":   parentMetadata["document_id"],
+		"parent_document_role": parentMetadata["role"],
+	}
+	if sessionID != "" {
+		metadata["session_id"] = sessionID
+	}
+
+	return &chromem.Document{
+		ID:       uuid.New().String(),
+		Content:  summary,
+		Metadata: metadata,
+	}
+}
+
+func (r *RAG) persistPreparedDocument(ctx context.Context, data *ragDocumentData) []chromem.Document {
+	if data == nil {
+		return nil
+	}
+
+	embeddingVector, embedErr := r.embedder(ctx, data.EmbedContent)
+	if embedErr != nil {
+		r.logger.Warn("Failed to create embedding for RAG persistence",
+			zap.Error(embedErr),
+			zap.String("document_id", data.Metadata["document_id"]))
+	}
+
+	if err := r.store.UpsertRAGDocument(ctx, data.ID, data.StoredContent, data.EmbedContent, data.Metadata, data.ContentHash, embeddingVector); err != nil {
+		r.logger.Warn("Failed to persist RAG document", zap.Error(err), zap.String("document_id", data.Metadata["document_id"]))
+	}
+
+	var documents []chromem.Document
+	if len(data.EmbedContent) > maxEmbeddingChars {
+		r.logger.Info("Chunking oversized message for embedding",
+			zap.String("role", data.Metadata["role"]),
+			zap.Int("length", len(data.EmbedContent)))
+		documents = append(documents, r.persistChunks(ctx, data.Metadata, data.EmbedContent)...)
+	} else {
+		doc := chromem.Document{
+			ID:       uuid.New().String(),
+			Content:  data.EmbedContent,
+			Metadata: cloneMetadata(data.Metadata),
+		}
+		if embedErr == nil && len(embeddingVector) > 0 {
+			doc.Embedding = embeddingVector
+		}
+		documents = append(documents, doc)
+	}
+
+	if summaryDoc := r.persistSummaryDocument(ctx, data.SummaryDoc); summaryDoc != nil {
+		documents = append(documents, *summaryDoc)
+	}
+
+	return documents
+}
+
+func (r *RAG) persistChunks(ctx context.Context, baseMetadata map[string]string, content string) []chromem.Document {
+	if len(content) == 0 {
+		return nil
+	}
+
+	parentDocumentID := baseMetadata["document_id"]
+	role := baseMetadata["role"]
+	var documents []chromem.Document
+	chunkIndex := 0
+
+	for j := 0; j < len(content); j += maxEmbeddingChars {
+		end := min(j+maxEmbeddingChars, len(content))
+		chunkContent := content[j:end]
+		if int(float64(len(chunkContent))/3.5) > maxEmbeddingTokens {
+			end = j + (maxEmbeddingChars * 3 / 4)
+			chunkContent = content[j:end]
+		}
+
+		chunkDocID := uuid.New()
+		chunkMetadata := cloneMetadata(baseMetadata)
+		chunkMetadata["type"] = "chunk"
+		chunkMetadata["chunk_index"] = strconv.Itoa(chunkIndex)
+		chunkMetadata["parent_document_id"] = parentDocumentID
+		chunkMetadata["parent_document_role"] = role
+		chunkMetadata["document_id"] = chunkDocID.String()
+
+		chunkHash := hashContent(normalizeForHash(chunkContent))
+		if chunkHash != "" {
+			chunkMetadata["content_hash"] = chunkHash
+		}
+
+		chunkEmbedding, chunkEmbedErr := r.embedder(ctx, chunkContent)
+		if chunkEmbedErr != nil {
+			r.logger.Warn("Failed to create embedding for chunk",
+				zap.Error(chunkEmbedErr),
+				zap.String("document_id", chunkDocID.String()),
+				zap.Int("chunk_index", chunkIndex))
+		}
+
+		if err := r.store.UpsertRAGDocument(ctx, chunkDocID, chunkContent, chunkContent, chunkMetadata, chunkHash, chunkEmbedding); err != nil {
+			r.logger.Warn("Failed to persist chunked RAG document",
+				zap.Error(err),
+				zap.String("document_id", chunkDocID.String()),
+				zap.Int("chunk_index", chunkIndex))
+		}
+
+		chunkDoc := chromem.Document{
+			ID:       uuid.New().String(),
+			Content:  chunkContent,
+			Metadata: cloneMetadata(chunkMetadata),
+		}
+		if chunkEmbedErr == nil && len(chunkEmbedding) > 0 {
+			chunkDoc.Embedding = chunkEmbedding
+		}
+		documents = append(documents, chunkDoc)
+		chunkIndex++
+	}
+
+	return documents
+}
+
+func (r *RAG) persistSummaryDocument(ctx context.Context, summaryDoc *chromem.Document) *chromem.Document {
+	if summaryDoc == nil {
+		return nil
+	}
+
+	summaryMetadata := cloneMetadata(summaryDoc.Metadata)
+	summaryDoc.Metadata = summaryMetadata
+	summaryIDStr, ok := summaryMetadata["document_id"]
+	if !ok {
+		r.logger.Warn("Summary document missing document_id, skipping persistence")
+		return nil
+	}
+
+	summaryID, err := uuid.Parse(summaryIDStr)
+	if err != nil {
+		r.logger.Warn("Summary document has invalid document_id", zap.String("document_id", summaryIDStr), zap.Error(err))
+		return nil
+	}
+
+	summaryContent := summaryDoc.Content
+	summaryHash := hashContent(normalizeForHash(summaryContent))
+	if summaryHash != "" {
+		summaryMetadata["content_hash"] = summaryHash
+	}
+
+	summaryEmbedding, summaryErr := r.embedder(ctx, summaryContent)
+	if summaryErr != nil {
+		r.logger.Warn("Failed to create embedding for summary document",
+			zap.Error(summaryErr),
+			zap.String("document_id", summaryIDStr))
+	}
+
+	if err := r.store.UpsertRAGDocument(ctx, summaryID, summaryContent, summaryContent, summaryMetadata, summaryHash, summaryEmbedding); err != nil {
+		r.logger.Warn("Failed to persist summary RAG document",
+			zap.Error(err),
+			zap.String("document_id", summaryIDStr))
+	}
+
+	if summaryErr == nil && len(summaryEmbedding) > 0 {
+		summaryDoc.Embedding = summaryEmbedding
+	}
+
+	return summaryDoc
+}
+
+func cloneMetadata(src map[string]string) map[string]string {
+	if src == nil {
+		return nil
+	}
+	return cloneStringMap(src)
 }
 
 // LoadPersistedDocuments rebuilds the in-memory vector store using documents stored in Postgres.
@@ -539,6 +622,42 @@ func (r *RAG) Query(ctx context.Context, sessionID string, query string, nResult
 		return "", nil
 	}
 
+	docContents := make(map[string]string)
+
+	for _, cand := range candidates {
+		lookupID := resolveLookupID(cand.Metadata)
+		if lookupID == "" || lookupID == cand.DocumentID {
+			continue
+		}
+
+		if content, ok := docContents[lookupID]; ok {
+			cand.Content = content
+			continue
+		}
+
+		lookupUUID, err := uuid.Parse(lookupID)
+		if err != nil {
+			r.logger.Warn("Invalid lookup identifier for scoring",
+				zap.String("lookup_id", lookupID),
+				zap.String("document_id", cand.DocumentID))
+			continue
+		}
+
+		content, err := r.store.GetRAGDocumentContent(ctx, lookupUUID)
+		if err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				r.logger.Warn("Failed to load parent content for scoring",
+					zap.Error(err),
+					zap.String("lookup_id", lookupID),
+					zap.String("document_id", cand.DocumentID))
+			}
+			continue
+		}
+
+		docContents[lookupID] = content
+		cand.Content = content
+	}
+
 	var maxSemantic float64
 	var maxBM float64
 	for _, cand := range candidates {
@@ -569,7 +688,8 @@ func (r *RAG) Query(ctx context.Context, sessionID string, query string, nResult
 		}
 
 		role := cand.Metadata["role"]
-		if role == "fact" {
+		docType := cand.Metadata["type"]
+		if role == "fact" && docType != "chunk" {
 			combined *= 1.3
 		}
 		if cand.Metadata["type"] == "summary" {
@@ -589,8 +709,6 @@ func (r *RAG) Query(ctx context.Context, sessionID string, query string, nResult
 		}
 		return candidateList[i].Score > candidateList[j].Score
 	})
-
-	docContents := make(map[string]string)
 
 	var contextBuilder strings.Builder
 	contextBuilder.WriteString("<memory>\n")
@@ -871,33 +989,68 @@ func (r *RAG) generateFactSummary(ctx context.Context, code, result string) (str
 		finalResult = compressMiddle(result, 800, 200, 200)
 	}
 
-	// System prompt defines the expert persona and the core task.
-	systemPrompt := `You are an expert at creating concise, searchable facts from code and its output. Your task is to generate a single, descriptive sentence that captures the key finding, action, or error.`
+	// System prompt defines the expert persona and the detailed summarization guidelines.
+	systemPrompt := `You are an expert at extracting statistical facts from code execution results. Your task is to create searchable, information-dense summaries that preserve methodological details and numerical results. Focus on what was done, what was found, and what it means statistically.
 
-	// User prompt provides the specific rules, an example, and the data to process.
-	userPrompt := fmt.Sprintf(`Generate a summary for the following code and output, following these rules:
-1. The summary MUST be a single sentence.
-2. The summary MUST start with "Fact:".
-3. The summary MUST be less than 100 words.
+Extract a statistical fact from the following code and output. Follow these rules:
 
-Here is an example:
----
-**Input:**
+RULES:
+1. Start with "Fact:"
+2. Maximum 200 words (be concise but complete)
+3. Include specific names (test names, variable names, column names)
+4. Preserve key numbers (p-values, effect sizes, R², coefficients, sample sizes)
+5. State statistical conclusions when present (e.g., "significant at α=0.05", "violates normality assumption")
+6. If multiple steps, use 2-3 sentences maximum
+7. For errors, state what failed and why
+
+WHAT TO CAPTURE:
+- Statistical test names (Shapiro-Wilk, t-test, ANOVA, etc.)
+- Variables/columns analyzed
+- Key parameters (significance levels, degrees of freedom)
+- Numerical results with context
+- Data characteristics (sample size, distributions, missing values)
+- Transformations or preprocessing applied
+- Assumption check results
+- Model performance metrics
+
+EXAMPLES:
+
+Example 1 - Normality Test:
+Code: from scipy import stats; stat, p = stats.shapiro(df['residuals']); print(f"Shapiro-Wilk: W={stat:.4f}, p={p:.4f}")
+Output: Shapiro-Wilk: W=0.9234, p=0.0156
+Good Fact: Fact: Shapiro-Wilk normality test on residuals yielded W=0.9234, p=0.0156, indicating violation of normality assumption at α=0.05.
+Bad Fact: Fact: A normality test was performed on the data.
+
+Example 2 - Descriptive Statistics:
+Code: print(df[['age', 'income', 'score']].describe())
+Output: age: count=150, mean=34.23, std=8.91, min=18, max=65; income: mean=52340.12, std=12450.67; score: mean=78.45, std=12.34
+Good Fact: Fact: Dataset contains 150 observations with variables age (M=34.23, SD=8.91, range 18-65), income (M=52340.12, SD=12450.67), and score (M=78.45, SD=12.34).
+Bad Fact: Fact: Descriptive statistics were calculated for the dataframe.
+
+Example 3 - Regression Model:
+Code: model = LinearRegression(); model.fit(X_train, y_train); r2 = model.score(X_test, y_test); print(f"R²={r2:.3f}, Coefficients: {model.coef_}")
+Output: R²=0.734, Coefficients: [2.34, -1.56, 0.89]
+Good Fact: Fact: Linear regression model trained with R²=0.734 on test set, yielding coefficients [2.34, -1.56, 0.89] for predictor variables.
+Bad Fact: Fact: A regression model was fitted to the training data.
+
+Example 4 - Data Transformation:
+Code: df['log_income'] = np.log(df['income'])
+Output: Success: Code executed with no output.
+Good Fact: Fact: Created log-transformed variable log_income from income column for normalization.
+Bad Fact: Fact: A transformation was applied to the income variable.
+
+Now extract the fact from this code and output:
+
 Code:
-df.head(3)
+{code}
 
 Output:
-   age gender  side
-0   55      M  left
-1   60      F  right
-2   65      M  left
----
-**Your Output:**
-Fact: The dataframe contains columns for age, gender, and side.
----
+{output}
 
-**Input:**
-Code:
+Respond with only the fact, starting with "Fact:"`
+
+	// User prompt injects the specific code and output into the template.
+	userPrompt := fmt.Sprintf(`Code:
 %s
 
 Output:

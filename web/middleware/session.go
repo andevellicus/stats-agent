@@ -94,8 +94,13 @@ func SessionMiddleware(store *database.PostgresStore) gin.HandlerFunc {
 					if dbErr == sql.ErrNoRows {
 						createNewSession = true
 					} else {
-						c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify session"})
-						return
+						if zapLogger != nil {
+							zapLogger.Warn("Failed to verify session, creating new session",
+								zap.Error(dbErr),
+								zap.String("session_id", parsedID.String()),
+								zap.String("user_id", userID.String()))
+						}
+						createNewSession = true
 					}
 				} else {
 					// Verify session belongs to this user

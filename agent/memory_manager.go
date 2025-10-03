@@ -185,18 +185,33 @@ func (m *MemoryManager) ManageHistory(ctx context.Context, sessionID string, his
 
 	messagesToStore := (*history)[:cutoff]
 
-	// Archive to RAG - non-critical, log warning if fails but continue
-	if err := m.rag.AddMessagesToStore(ctx, sessionID, messagesToStore); err != nil {
-		m.logger.Warn("Failed to archive messages to RAG, they will be lost from long-term memory",
-			zap.Error(err),
-			zap.Int("messages_count", len(messagesToStore)))
-		// Don't return error - continue with memory management to prevent context overflow
-	} else {
-		m.logger.Info("Archived messages to long-term RAG store",
-			zap.Int("messages_moved", len(messagesToStore)))
-	}
+	// Async archive - fire and forget
+	go func(sessionID string, messages []types.AgentMessage) {
+		const maxAttempts = 3
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			err := m.rag.AddMessagesToStore(ctx, sessionID, messages)
+			cancel()
 
-	// Remove archived messages from history
+			if err == nil {
+				m.logger.Info("Archived messages to long-term RAG store",
+					zap.Int("messages_moved", len(messages)))
+				return
+			}
+
+			if attempt < maxAttempts-1 {
+				time.Sleep(time.Second * time.Duration(attempt+1))
+				continue
+			}
+
+			m.logger.Error("RAG storage failed after retries - messages lost",
+				zap.Error(err),
+				zap.String("session_id", sessionID),
+				zap.Int("messages_count", len(messages)))
+		}
+	}(sessionID, messagesToStore)
+
+	// Remove archived messages from history immediately
 	*history = (*history)[cutoff:]
 
 	m.logger.Info("Memory management complete",
