@@ -7,7 +7,8 @@ import (
 )
 
 func (r *RAG) Query(ctx context.Context, sessionID string, query string, nResults int) (string, error) {
-	context, hits, err := r.queryHybrid(ctx, sessionID, query, nResults)
+	expandedQuery := r.expandQuery(query)
+	context, hits, err := r.queryHybrid(ctx, sessionID, expandedQuery, nResults)
 	if err != nil {
 		return "", err
 	}
@@ -16,7 +17,7 @@ func (r *RAG) Query(ctx context.Context, sessionID string, query string, nResult
 		return context, nil
 	}
 
-	filters := extractSimpleMetadata(query, r.cfg.MetadataFallbackMaxFilters)
+	filters := extractSimpleMetadata(expandedQuery, r.cfg.MetadataFallbackMaxFilters)
 	if len(filters) == 0 {
 		return context, nil
 	}

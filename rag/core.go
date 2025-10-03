@@ -59,6 +59,7 @@ type RAG struct {
 	datasetMu                  sync.RWMutex
 	sessionDatasets            map[string]string
 	sentenceSplitter           SentenceSplitter
+	contextMaxChars            int
 }
 
 type factStoredContent struct {
@@ -114,6 +115,14 @@ func New(cfg *config.Config, store *database.PostgresStore, logger *zap.Logger) 
 	minTokenThreshold := cfg.MinTokenCheckCharThreshold
 	hybridCandidates := cfg.MaxHybridCandidates
 
+	contextMax := cfg.RAGContextMaxChars
+	if contextMax <= 0 {
+		contextMax = cfg.ContextLength * 4
+		if contextMax <= 0 {
+			contextMax = 12000
+		}
+	}
+
 	r := &RAG{
 		cfg:                        cfg,
 		db:                         db,
@@ -128,6 +137,7 @@ func New(cfg *config.Config, store *database.PostgresStore, logger *zap.Logger) 
 		maxHybridCandidates:        hybridCandidates,
 		sessionDatasets:            make(map[string]string),
 		sentenceSplitter:           NewRegexSentenceSplitter(),
+		contextMaxChars:            contextMax,
 	}
 
 	return r, nil

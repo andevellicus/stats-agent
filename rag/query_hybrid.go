@@ -205,8 +205,7 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		bm25Weight = 0
 	}
 	if semanticWeight == 0 && bm25Weight == 0 {
-		semanticWeight = 0.7
-		bm25Weight = 0.3
+		semanticWeight = 1
 	}
 
 	candidateList := make([]*hybridCandidate, 0, len(candidates))
@@ -229,13 +228,13 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		role := cand.Metadata["role"]
 		docType := cand.Metadata["type"]
 		if role == "fact" && docType != "chunk" {
-			combined *= 1.3
+			combined *= r.cfg.HybridFactBoost
 		}
 		if cand.Metadata["type"] == "summary" {
-			combined *= 1.2
+			combined *= r.cfg.HybridSummaryBoost
 		}
 		if cand.Content != "" && strings.Contains(cand.Content, "Error:") && !isQueryForError {
-			combined *= 0.8
+			combined *= r.cfg.HybridErrorPenalty
 		}
 
 		if len(metadataHints) > 0 && cand.Metadata != nil {
@@ -287,6 +286,8 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 
 	var contextBuilder strings.Builder
 	contextBuilder.WriteString("<memory>\n")
+	contextChars := len("<memory>\n")
+	contextLimit := r.contextMaxChars
 
 	processedDocIDs := make(map[string]bool)
 	lastEmittedUser := ""
@@ -343,19 +344,29 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 
 		role := resolveRole(cand.Metadata)
 
+		var lines []string
 		if role == "fact" {
 			var fact factStoredContent
 			if err := json.Unmarshal([]byte(content), &fact); err == nil && (fact.User != "" || fact.Assistant != "" || fact.Tool != "") {
 				userTrimmed := canonicalizeFactText(fact.User)
 				if userTrimmed != "" && userTrimmed != lastEmittedUser {
-					contextBuilder.WriteString(fmt.Sprintf("- user: %s\n", userTrimmed))
+					lines = append(lines, fmt.Sprintf("- user: %s\n", userTrimmed))
 					lastEmittedUser = userTrimmed
 				}
 				if fact.Assistant != "" {
-					contextBuilder.WriteString(fmt.Sprintf("- assistant: %s\n", canonicalizeFactText(fact.Assistant)))
+					lines = append(lines, fmt.Sprintf("- assistant: %s\n", canonicalizeFactText(fact.Assistant)))
 				}
 				if fact.Tool != "" {
-					contextBuilder.WriteString(fmt.Sprintf("- tool: %s\n", canonicalizeFactText(fact.Tool)))
+					lines = append(lines, fmt.Sprintf("- tool: %s\n", canonicalizeFactText(fact.Tool)))
+				}
+
+				entryLen := totalLength(lines)
+				if contextLimit > 0 && contextChars+entryLen > contextLimit {
+					continue
+				}
+				for _, line := range lines {
+					contextBuilder.WriteString(line)
+					contextChars += len(line)
 				}
 
 				processedDocIDs[lookupID] = true
@@ -365,10 +376,19 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 
 			assistantContent := canonicalizeFactText(content)
 			if assistantContent != "" {
-				contextBuilder.WriteString(fmt.Sprintf("- assistant: %s\n", assistantContent))
+				lines = append(lines, fmt.Sprintf("- assistant: %s\n", assistantContent))
 			}
 		} else {
-			contextBuilder.WriteString(fmt.Sprintf("- %s: %s\n", role, content))
+			lines = append(lines, fmt.Sprintf("- %s: %s\n", role, content))
+		}
+
+		entryLen := totalLength(lines)
+		if contextLimit > 0 && contextChars+entryLen > contextLimit {
+			continue
+		}
+		for _, line := range lines {
+			contextBuilder.WriteString(line)
+			contextChars += len(line)
 		}
 
 		processedDocIDs[lookupID] = true
@@ -380,6 +400,9 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 	}
 
 	contextBuilder.WriteString("</memory>\n")
+	if contextLimit > 0 && contextChars+len("</memory>\n") > contextLimit {
+		return contextBuilder.String(), addedDocs, nil
+	}
 	return contextBuilder.String(), addedDocs, nil
 }
 
@@ -406,4 +429,12 @@ func ensureCandidate(candidates map[string]*hybridCandidate, docID string, metad
 	}
 	candidates[docID] = cand
 	return cand
+}
+
+func totalLength(lines []string) int {
+	total := 0
+	for _, line := range lines {
+		total += len(line)
+	}
+	return total
 }

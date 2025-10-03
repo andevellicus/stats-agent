@@ -1,40 +1,67 @@
 package rag
 
-import (
-	"regexp"
-	"strings"
-)
+import "strings"
 
 type SentenceSplitter interface {
 	Split(text string) []string
 }
 
-type RegexSentenceSplitter struct {
-	pattern *regexp.Regexp
-}
+type RegexSentenceSplitter struct{}
 
 func NewRegexSentenceSplitter() RegexSentenceSplitter {
-	// Splits on sentence end punctuation followed by whitespace/newline
-	pattern := regexp.MustCompile(`(?m)(?<=[.!?])\s+`)
-	return RegexSentenceSplitter{pattern: pattern}
+	return RegexSentenceSplitter{}
 }
 
-func (s RegexSentenceSplitter) Split(text string) []string {
+func (RegexSentenceSplitter) Split(text string) []string {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
 		return nil
 	}
 
-	sentences := s.pattern.Split(trimmed, -1)
-	result := make([]string, 0, len(sentences))
-	for _, sentence := range sentences {
-		sent := strings.TrimSpace(sentence)
-		if sent != "" {
-			result = append(result, sent)
+	runes := []rune(trimmed)
+	var sentences []string
+	var builder strings.Builder
+
+	isBoundary := func(r rune) bool {
+		switch r {
+		case '.', '!', '?':
+			return true
+		default:
+			return false
 		}
 	}
-	if len(result) == 0 {
+
+	flush := func() {
+		if builder.Len() == 0 {
+			return
+		}
+		sentence := strings.TrimSpace(builder.String())
+		if sentence != "" {
+			sentences = append(sentences, sentence)
+		}
+		builder.Reset()
+	}
+
+	for idx, r := range runes {
+		builder.WriteRune(r)
+		if !isBoundary(r) {
+			continue
+		}
+		// Look ahead to determine if this is end of sentence
+		next := idx + 1
+		for next < len(runes) && (runes[next] == ' ' || runes[next] == '\n' || runes[next] == '\t') {
+			next++
+		}
+		if next >= len(runes) || isBoundary(runes[next]) {
+			continue
+		}
+		flush()
+	}
+
+	flush()
+
+	if len(sentences) == 0 {
 		return []string{trimmed}
 	}
-	return result
+	return sentences
 }

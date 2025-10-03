@@ -130,6 +130,8 @@ func (r *RAG) renderRecordsToMemory(ctx context.Context, records []documentRecor
 	processedDocIDs := make(map[string]bool)
 	var contextBuilder strings.Builder
 	contextBuilder.WriteString("<memory>\n")
+	contextChars := len("<memory>\n")
+	contextLimit := r.contextMaxChars
 
 	lastEmittedUser := ""
 	addedDocs := 0
@@ -190,19 +192,29 @@ func (r *RAG) renderRecordsToMemory(ctx context.Context, records []documentRecor
 
 		role := resolveRole(record.metadata)
 
+		var lines []string
 		if role == "fact" {
 			var fact factStoredContent
 			if err := json.Unmarshal([]byte(content), &fact); err == nil && (fact.User != "" || fact.Assistant != "" || fact.Tool != "") {
 				userTrimmed := canonicalizeFactText(fact.User)
 				if userTrimmed != "" && userTrimmed != lastEmittedUser {
-					contextBuilder.WriteString(fmt.Sprintf("- user: %s\n", userTrimmed))
+					lines = append(lines, fmt.Sprintf("- user: %s\n", userTrimmed))
 					lastEmittedUser = userTrimmed
 				}
 				if fact.Assistant != "" {
-					contextBuilder.WriteString(fmt.Sprintf("- assistant: %s\n", canonicalizeFactText(fact.Assistant)))
+					lines = append(lines, fmt.Sprintf("- assistant: %s\n", canonicalizeFactText(fact.Assistant)))
 				}
 				if fact.Tool != "" {
-					contextBuilder.WriteString(fmt.Sprintf("- tool: %s\n", canonicalizeFactText(fact.Tool)))
+					lines = append(lines, fmt.Sprintf("- tool: %s\n", canonicalizeFactText(fact.Tool)))
+				}
+
+				entryLen := totalLength(lines)
+				if contextLimit > 0 && contextChars+entryLen > contextLimit {
+					continue
+				}
+				for _, line := range lines {
+					contextBuilder.WriteString(line)
+					contextChars += len(line)
 				}
 
 				processedDocIDs[lookupID] = true
@@ -212,10 +224,19 @@ func (r *RAG) renderRecordsToMemory(ctx context.Context, records []documentRecor
 
 			assistantContent := canonicalizeFactText(content)
 			if assistantContent != "" {
-				contextBuilder.WriteString(fmt.Sprintf("- assistant: %s\n", assistantContent))
+				lines = append(lines, fmt.Sprintf("- assistant: %s\n", assistantContent))
 			}
 		} else {
-			contextBuilder.WriteString(fmt.Sprintf("- %s: %s\n", role, content))
+			lines = append(lines, fmt.Sprintf("- %s: %s\n", role, content))
+		}
+
+		entryLen := totalLength(lines)
+		if contextLimit > 0 && contextChars+entryLen > contextLimit {
+			continue
+		}
+		for _, line := range lines {
+			contextBuilder.WriteString(line)
+			contextChars += len(line)
 		}
 
 		processedDocIDs[lookupID] = true
