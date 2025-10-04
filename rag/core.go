@@ -24,26 +24,6 @@ const (
 	defaultMaxEmbeddingTokens = 250
 )
 
-var metadataEmbeddingOrder = []string{
-	"dataset",
-	"primary_test",
-	"analysis_stage",
-	"role",
-	"variables",
-	"test_types",
-	"p_value",
-}
-
-var metadataEmbeddingLabels = map[string][]string{
-	"dataset":        {"dataset"},
-	"primary_test":   {"primary test"},
-	"analysis_stage": {"analysis stage"},
-	"role":           {"conversation role"},
-	"variables":      {"variables"},
-	"test_types":     {"test types"},
-	"p_value":        {"p value"},
-}
-
 type RAG struct {
 	cfg                        *config.Config
 	db                         *chromem.DB
@@ -186,44 +166,41 @@ func cloneStringMap(src map[string]string) map[string]string {
 	return dst
 }
 
-func metadataEmbeddingText(metadata map[string]string) string {
+// filterStructuralMetadata keeps only structural fields for JSONB storage.
+// Statistical metadata is now embedded in the fact text itself.
+// Exception: dataset is kept for query boosting and session tracking.
+func filterStructuralMetadata(metadata map[string]string) map[string]string {
 	if len(metadata) == 0 {
-		return ""
+		return metadata
 	}
 
-	var parts []string
-	for _, key := range metadataEmbeddingOrder {
-		value := strings.TrimSpace(metadata[key])
-		if value == "" {
-			continue
-		}
-		labels := metadataEmbeddingLabels[key]
-		if len(labels) == 0 {
-			labels = []string{strings.ReplaceAll(key, "_", " ")}
-		}
-		for _, label := range labels {
-			parts = append(parts, fmt.Sprintf("%s: %s", label, value))
+	structural := make(map[string]string)
+
+	// Keep only these structural fields
+	structuralKeys := map[string]bool{
+		"session_id":           true,
+		"role":                 true,
+		"document_id":          true,
+		"type":                 true,
+		"content_hash":         true,
+		"parent_document_id":   true,
+		"parent_document_role": true,
+		"chunk_index":          true,
+		"dataset":              true, // Keep for query boosting and metadata filtering
+	}
+
+	for key, value := range metadata {
+		if structuralKeys[key] {
+			structural[key] = value
 		}
 	}
 
-	if len(parts) == 0 {
-		return ""
-	}
-
-	return "metadata capsule: " + strings.Join(parts, "; ")
+	return structural
 }
 
-func (r *RAG) augmentEmbeddingContent(base string, metadata map[string]string) string {
-	base = strings.TrimSpace(base)
-	metaText := metadataEmbeddingText(metadata)
-	if metaText == "" {
-		return base
-	}
-	if base == "" {
-		return metaText
-	}
-	return base + "\n\n" + metaText
-}
+// Note: augmentEmbeddingContent has been removed.
+// Statistical metadata is now embedded inline in fact text during generation.
+// Only structural metadata (session_id, role, document_id, etc.) is stored in JSONB.
 
 func (r *RAG) rememberSessionDataset(sessionID, dataset string) {
 	if sessionID == "" {

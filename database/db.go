@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"stats-agent/web/types"
@@ -70,6 +72,17 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
             embedding REAL[],
             created_at TIMESTAMPTZ DEFAULT NOW()
         )`,
+		`CREATE TABLE IF NOT EXISTS files (
+            id UUID PRIMARY KEY,
+            session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            filename TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            file_type TEXT,
+            file_size BIGINT,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            message_id UUID REFERENCES messages(id) ON DELETE SET NULL,
+            CONSTRAINT unique_session_filename UNIQUE(session_id, filename)
+        )`,
 	}
 
 	for _, stmt := range stmts {
@@ -104,12 +117,22 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_rag_documents_metadata_dataset ON rag_documents ((metadata ->> 'dataset'))`,
 		`CREATE INDEX IF NOT EXISTS idx_rag_documents_metadata_primary_test ON rag_documents ((metadata ->> 'primary_test'))`,
 		`CREATE INDEX IF NOT EXISTS idx_rag_documents_metadata_role ON rag_documents ((metadata ->> 'role'))`,
+		`CREATE INDEX IF NOT EXISTS idx_files_session_id ON files(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_files_message_id ON files(message_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_files_created_at ON files(created_at)`,
 	}
 
 	for _, stmt := range indexStmts {
 		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("failed to ensure rag_documents index: %w", err)
 		}
+	}
+
+	// Migrate existing rendered_files to files table (one-time migration)
+	if err := s.migrateRenderedFilesToFilesTable(ctx); err != nil {
+		// Log but don't fail - migration is non-critical
+		// Continue startup even if migration fails
+		return fmt.Errorf("rendered_files migration failed (non-critical): %w", err)
 	}
 
 	return nil
@@ -413,5 +436,135 @@ func (s *PostgresStore) DeleteSession(ctx context.Context, sessionID uuid.UUID) 
 		return errors.New("session not found")
 	}
 
+	return nil
+}
+
+func (s *PostgresStore) DeleteUser(ctx context.Context, userID uuid.UUID) error {
+	// Get all sessions for this user
+	sessions, err := s.GetSessions(ctx, &userID)
+	if err != nil {
+		return fmt.Errorf("failed to get user sessions: %w", err)
+	}
+
+	// Delete RAG documents for each session
+	// Continue even if some deletions fail to ensure we clean up as much as possible
+	for _, session := range sessions {
+		if _, err := s.DeleteRAGDocumentsBySession(ctx, session.ID); err != nil {
+			// Log-worthy but don't fail the entire deletion
+			// Caller can log if needed, we just skip and continue
+		}
+	}
+
+	// Delete user (CASCADE deletes sessions → messages)
+	query := `DELETE FROM users WHERE id = $1`
+	result, err := s.DB.ExecContext(ctx, query, userID)
+	if err != nil {
+		return fmt.Errorf("failed to delete user: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return errors.New("user not found")
+	}
+
+	return nil
+}
+
+// migrateRenderedFilesToFilesTable migrates data from sessions.rendered_files array to the files table
+// This is a one-time migration that runs on startup and is idempotent
+func (s *PostgresStore) migrateRenderedFilesToFilesTable(ctx context.Context) error {
+	// Check if migration has already run by checking if any files table records exist
+	var fileCount int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM files`).Scan(&fileCount); err != nil {
+		return fmt.Errorf("failed to check files table: %w", err)
+	}
+
+	// If files already exist, assume migration already ran
+	if fileCount > 0 {
+		return nil
+	}
+
+	// Get all sessions with rendered_files
+	query := `
+		SELECT id, rendered_files, workspace_path
+		FROM sessions
+		WHERE rendered_files IS NOT NULL AND array_length(rendered_files, 1) > 0
+	`
+	rows, err := s.DB.QueryContext(ctx, query)
+	if err != nil {
+		return fmt.Errorf("failed to query sessions: %w", err)
+	}
+	defer rows.Close()
+
+	migratedCount := 0
+	for rows.Next() {
+		var sessionID uuid.UUID
+		var workspacePath string
+		var renderedFiles pq.StringArray
+
+		if err := rows.Scan(&sessionID, &renderedFiles, &workspacePath); err != nil {
+			// Log but continue with other sessions
+			continue
+		}
+
+		// Create file records for each rendered file
+		for _, filename := range renderedFiles {
+			if filename == "" {
+				continue
+			}
+
+			// Determine file type from extension
+			ext := strings.ToLower(filepath.Ext(filename))
+			fileType := "other"
+			switch ext {
+			case ".png", ".jpg", ".jpeg", ".gif":
+				fileType = "image"
+			case ".csv", ".xls", ".xlsx":
+				fileType = "csv"
+			}
+
+			// Build web path
+			sessionIDStr := sessionID.String()
+			webPath := filepath.ToSlash(filepath.Join("/workspaces", sessionIDStr, filename))
+
+			// Try to get file size if file still exists
+			var fileSize int64
+			fullPath := filepath.Join(workspacePath, filename)
+			if info, err := os.Stat(fullPath); err == nil {
+				fileSize = info.Size()
+			}
+
+			// Insert file record - use ON CONFLICT to handle duplicates
+			insertQuery := `
+				INSERT INTO files (id, session_id, filename, file_path, file_type, file_size, created_at, message_id)
+				VALUES ($1, $2, $3, $4, $5, $6, NOW(), NULL)
+				ON CONFLICT (session_id, filename) DO NOTHING
+			`
+			_, err := s.DB.ExecContext(ctx, insertQuery,
+				uuid.New(),
+				sessionID,
+				filename,
+				webPath,
+				fileType,
+				fileSize,
+			)
+			if err != nil {
+				// Log but continue with other files
+				continue
+			}
+			migratedCount++
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating sessions: %w", err)
+	}
+
+	// Migration successful - optionally log the count
+	// The rendered_files column is kept for backward compatibility but not actively used
 	return nil
 }

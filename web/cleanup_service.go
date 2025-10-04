@@ -118,3 +118,51 @@ func (cs *CleanupService) DeleteSessionAndWorkspace(ctx context.Context, session
 
 	return nil
 }
+
+// DeleteUserAndWorkspaces encapsulates the full deletion logic for a user
+// This includes deleting all sessions (with RAG docs and workspaces), then deleting the user
+func (cs *CleanupService) DeleteUserAndWorkspaces(ctx context.Context, userID uuid.UUID) error {
+	userIDStr := userID.String()
+
+	cs.logger.Info("Starting user deletion with all associated data",
+		zap.String("user_id", userIDStr))
+
+	// Get all sessions for this user before deletion
+	sessions, err := cs.store.GetSessions(ctx, &userID)
+	if err != nil {
+		return fmt.Errorf("failed to get user sessions: %w", err)
+	}
+
+	cs.logger.Debug("Found user sessions to delete",
+		zap.String("user_id", userIDStr),
+		zap.Int("session_count", len(sessions)))
+
+	// Delete each session with full cleanup (RAG docs, Python bindings, workspaces)
+	deletedSessions := 0
+	for _, session := range sessions {
+		if err := cs.DeleteSessionAndWorkspace(ctx, session.ID); err != nil {
+			cs.logger.Error("Failed to delete user session",
+				zap.Error(err),
+				zap.String("user_id", userIDStr),
+				zap.String("session_id", session.ID.String()))
+			// Continue with other sessions even if one fails
+			continue
+		}
+		deletedSessions++
+	}
+
+	cs.logger.Info("Deleted user sessions",
+		zap.String("user_id", userIDStr),
+		zap.Int("sessions_deleted", deletedSessions),
+		zap.Int("sessions_failed", len(sessions)-deletedSessions))
+
+	// Delete user from database (CASCADE deletes any remaining sessions/messages)
+	if err := cs.store.DeleteUser(ctx, userID); err != nil {
+		return fmt.Errorf("failed to delete user: %w", err)
+	}
+
+	cs.logger.Info("User deletion completed",
+		zap.String("user_id", userIDStr))
+
+	return nil
+}

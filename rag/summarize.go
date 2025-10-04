@@ -11,6 +11,42 @@ import (
 	"go.uber.org/zap"
 )
 
+func buildMetadataTagsForPrompt(metadata map[string]string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+
+	var tags []string
+
+	// Priority order for tag inclusion
+	if test := metadata["primary_test"]; test != "" {
+		tags = append(tags, fmt.Sprintf("test:%s", test))
+	}
+	if metadata["sig_at_05"] == "true" {
+		tags = append(tags, "p<0.05:yes")
+	} else if metadata["sig_at_05"] == "false" {
+		tags = append(tags, "p<0.05:no")
+	}
+	if metadata["sig_at_01"] == "true" {
+		tags = append(tags, "p<0.01:yes")
+	}
+	if stage := metadata["analysis_stage"]; stage != "" {
+		tags = append(tags, fmt.Sprintf("stage:%s", stage))
+	}
+	if vars := metadata["variables"]; vars != "" {
+		tags = append(tags, fmt.Sprintf("variables:%s", vars))
+	}
+	if dataset := metadata["dataset"]; dataset != "" {
+		tags = append(tags, fmt.Sprintf("dataset:%s", dataset))
+	}
+
+	if len(tags) == 0 {
+		return ""
+	}
+
+	return fmt.Sprintf("Based on the extracted metadata, include these tags in your response: [%s]", strings.Join(tags, " | "))
+}
+
 func (r *RAG) SummarizeLongTermMemory(ctx context.Context, context, latestUserMessage string) (string, error) {
 	latestUserMessage = strings.TrimSpace(latestUserMessage)
 
@@ -98,13 +134,17 @@ Extract relevant facts following the rules and examples above:`, latestUserMessa
 	return fmt.Sprintf("<memory>\n%s\n</memory>", summary), nil
 }
 
-func (r *RAG) generateFactSummary(ctx context.Context, code, result string) (string, error) {
+func (r *RAG) generateFactSummary(ctx context.Context, code, result string, metadata map[string]string) (string, error) {
 	finalResult := result
 	if strings.Contains(result, "Error:") {
 		finalResult = compressMiddle(result, 800, 200, 200)
 	}
 
 	systemPrompt := `You are an expert at extracting statistical facts from code execution results. Your task is to create searchable, information-dense summaries that preserve methodological details and numerical results. Focus on what was done, what was found, and what it means statistically.`
+
+	// Build metadata tags string for the prompt
+	metadataTags := buildMetadataTagsForPrompt(metadata)
+
 	userPrompt := fmt.Sprintf(`
 Extract a statistical fact from the following code and output. Follow these rules:
 
@@ -116,6 +156,17 @@ RULES:
 5. State statistical conclusions when present (e.g., "significant at α=0.05", "violates normality assumption")
 6. If multiple steps, use 2-3 sentences maximum
 7. For errors, state what failed and why
+8. END your fact with inline metadata tags in square brackets
+
+METADATA TAGS FORMAT:
+End your fact with relevant metadata in this format: [key1:value1 | key2:value2 | ...]
+Only include tags that are relevant to the analysis. Common tags:
+- test: test name (e.g., shapiro-wilk, t-test, anova, pearson-correlation)
+- p<0.05: yes/no (significance at α=0.05)
+- p<0.01: yes/no (significance at α=0.01)
+- stage: assumption_check, hypothesis_test, modeling, descriptive, post_hoc
+- variables: comma-separated variable names
+- dataset: filename being analyzed
 
 WHAT TO CAPTURE:
 - Statistical test names (Shapiro-Wilk, t-test, ANOVA, etc.)
@@ -132,26 +183,28 @@ EXAMPLES:
 Example 1 - Normality Test:
 Code: from scipy import stats; stat, p = stats.shapiro(df['residuals']); print(f"Shapiro-Wilk: W={stat:.4f}, p={p:.4f}")
 Output: Shapiro-Wilk: W=0.9234, p=0.0156
-Good Fact: Fact: Shapiro-Wilk normality test on residuals yielded W=0.9234, p=0.0156, indicating violation of normality assumption at α=0.05.
+Good Fact: Fact: Shapiro-Wilk normality test on residuals yielded W=0.9234, p=0.0156, violating normality assumption at α=0.05 [test:shapiro-wilk | p<0.05:yes | stage:assumption_check | variables:residuals]
 Bad Fact: Fact: A normality test was performed on the data.
 
 Example 2 - Descriptive Statistics:
 Code: print(df[['age', 'income', 'score']].describe())
 Output: age: count=150, mean=34.23, std=8.91, min=18, max=65; income: mean=52340.12, std=12450.67; score: mean=78.45, std=12.34
-Good Fact: Fact: Dataset contains 150 observations with variables age (M=34.23, SD=8.91, range 18-65), income (M=52340.12, SD=12450.67), and score (M=78.45, SD=12.34).
+Good Fact: Fact: Dataset contains 150 observations with variables age (M=34.23, SD=8.91, range 18-65), income (M=52340.12, SD=12450.67), and score (M=78.45, SD=12.34) [stage:descriptive | variables:age,income,score]
 Bad Fact: Fact: Descriptive statistics were calculated for the dataframe.
 
 Example 3 - Regression Model:
 Code: model = LinearRegression(); model.fit(X_train, y_train); r2 = model.score(X_test, y_test); print(f"R²={r2:.3f}, Coefficients: {model.coef_}")
 Output: R²=0.734, Coefficients: [2.34, -1.56, 0.89]
-Good Fact: Fact: Linear regression model trained with R²=0.734 on test set, yielding coefficients [2.34, -1.56, 0.89] for predictor variables.
+Good Fact: Fact: Linear regression model trained with R²=0.734 on test set, yielding coefficients [2.34, -1.56, 0.89] for predictor variables [test:linear-regression | stage:modeling]
 Bad Fact: Fact: A regression model was fitted to the training data.
 
 Example 4 - Data Transformation:
 Code: df['log_income'] = np.log(df['income'])
 Output: Success: Code executed with no output.
-Good Fact: Fact: Created log-transformed variable log_income from income column for normalization.
+Good Fact: Fact: Created log-transformed variable log_income from income column for normalization [variables:income,log_income]
 Bad Fact: Fact: A transformation was applied to the income variable.
+
+%s
 
 Now extract the fact from this code and output:
 
@@ -161,8 +214,8 @@ Code:
 Output:
 %s
 
-Respond with only the fact, starting with "Fact:"
-`, code, finalResult)
+Respond with only the fact, starting with "Fact:" and ending with metadata tags in square brackets.
+`, metadataTags, code, finalResult)
 
 	messages := []types.AgentMessage{
 		{Role: "system", Content: systemPrompt},

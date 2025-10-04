@@ -17,6 +17,7 @@ import (
 	"stats-agent/web/types"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -296,9 +297,20 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 			req.Message = fmt.Sprintf("[📎 File uploaded: %s]\n\n%s", file.Filename, req.Message)
 		}
 
-		// Mark file as rendered - non-critical, log if fails
-		if err := h.store.AddRenderedFile(c.Request.Context(), sessionID, sanitizedFilename); err != nil {
-			h.logger.Warn("Failed to mark file as rendered",
+		// Track uploaded file in database - non-critical, log if fails
+		webPath := filepath.ToSlash(filepath.Join("/workspaces", req.SessionID, sanitizedFilename))
+		fileRecord := database.FileRecord{
+			ID:        uuid.New(),
+			SessionID: sessionID,
+			Filename:  sanitizedFilename,
+			FilePath:  webPath,
+			FileType:  "csv", // Validated as CSV/Excel above
+			FileSize:  file.Size,
+			CreatedAt: time.Now(),
+			MessageID: nil, // Will be associated with user message later if needed
+		}
+		if _, err := h.store.CreateFile(c.Request.Context(), fileRecord); err != nil {
+			h.logger.Warn("Failed to track uploaded file in database",
 				zap.Error(err),
 				zap.String("filename", sanitizedFilename),
 				zap.String("session_id", req.SessionID))

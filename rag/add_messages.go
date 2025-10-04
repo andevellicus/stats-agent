@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"regexp"
 	"strconv"
 	"strings"
@@ -127,10 +126,11 @@ func (r *RAG) prepareDocumentForMessage(
 		assistantContent := canonicalizeFactText(message.Content)
 		toolContent := canonicalizeFactText(toolMessage.Content)
 
+		// Extract statistical metadata FIRST (before fact generation)
+		var statMeta map[string]string
 		if format.HasTag(message.Content, format.PythonTag) {
 			code, _ := format.ExtractTagContent(message.Content, format.PythonTag)
-			statMeta := ExtractStatisticalMetadata(code, toolContent)
-			maps.Copy(metadata, statMeta)
+			statMeta = ExtractStatisticalMetadata(code, toolContent)
 			r.ensureDatasetMetadata(sessionID, metadata, code, toolContent)
 		}
 
@@ -163,7 +163,8 @@ func (r *RAG) prepareDocumentForMessage(
 		if len(matches) > 1 {
 			code := strings.TrimSpace(matches[1])
 			result := strings.TrimSpace(toolMessage.Content)
-			summary, err := r.generateFactSummary(ctx, code, result)
+			// Pass statistical metadata to fact generator
+			summary, err := r.generateFactSummary(ctx, code, result, statMeta)
 			if err != nil {
 				r.logger.Warn("LLM fact summarization failed, using fallback summary",
 					zap.Error(err),
@@ -275,8 +276,8 @@ func (r *RAG) persistPreparedDocument(ctx context.Context, data *ragDocumentData
 		return nil
 	}
 
-	embeddingSource := r.augmentEmbeddingContent(data.EmbedContent, data.Metadata)
-	embedContent := r.ensureEmbeddingTokenLimit(ctx, embeddingSource)
+	// Embed content directly (no augmentation - metadata is already inline in fact text)
+	embedContent := r.ensureEmbeddingTokenLimit(ctx, data.EmbedContent)
 	embeddingVector, embedErr := r.embedder(ctx, embedContent)
 	if embedErr != nil {
 		r.logger.Warn("Failed to create embedding for RAG persistence",
@@ -284,7 +285,10 @@ func (r *RAG) persistPreparedDocument(ctx context.Context, data *ragDocumentData
 			zap.String("document_id", data.Metadata["document_id"]))
 	}
 
-	if err := r.store.UpsertRAGDocument(ctx, data.ID, data.StoredContent, embedContent, data.Metadata, data.ContentHash, embeddingVector); err != nil {
+	// Filter metadata to keep only structural fields for JSONB storage
+	structuralMetadata := filterStructuralMetadata(data.Metadata)
+
+	if err := r.store.UpsertRAGDocument(ctx, data.ID, data.StoredContent, embedContent, structuralMetadata, data.ContentHash, embeddingVector); err != nil {
 		r.logger.Warn("Failed to persist RAG document", zap.Error(err), zap.String("document_id", data.Metadata["document_id"]))
 	}
 
@@ -293,12 +297,12 @@ func (r *RAG) persistPreparedDocument(ctx context.Context, data *ragDocumentData
 		r.logger.Info("Chunking oversized message for embedding",
 			zap.String("role", data.Metadata["role"]),
 			zap.Int("length", len(data.EmbedContent)))
-		documents = append(documents, r.persistChunks(ctx, data.Metadata, data.EmbedContent)...)
+		documents = append(documents, r.persistChunks(ctx, structuralMetadata, data.EmbedContent)...)
 	} else {
 		doc := chromem.Document{
 			ID:       uuid.New().String(),
 			Content:  embedContent,
-			Metadata: cloneStringMap(data.Metadata),
+			Metadata: cloneStringMap(structuralMetadata),
 		}
 		if embedErr == nil && len(embeddingVector) > 0 {
 			doc.Embedding = embeddingVector
@@ -453,8 +457,11 @@ func (r *RAG) persistChunks(ctx context.Context, baseMetadata map[string]string,
 			chunkMetadata["content_hash"] = chunkHash
 		}
 
-		chunkEmbeddingSource := r.augmentEmbeddingContent(chunkContent, chunkMetadata)
-		chunkEmbeddingContent := r.ensureEmbeddingTokenLimit(ctx, chunkEmbeddingSource)
+		// Filter chunk metadata to structural fields only
+		structuralChunkMetadata := filterStructuralMetadata(chunkMetadata)
+
+		// Embed content directly (no augmentation)
+		chunkEmbeddingContent := r.ensureEmbeddingTokenLimit(ctx, chunkContent)
 		chunkEmbedding, chunkEmbedErr := r.embedder(ctx, chunkEmbeddingContent)
 		if chunkEmbedErr != nil {
 			r.logger.Warn("Failed to create embedding for chunk",
@@ -463,7 +470,7 @@ func (r *RAG) persistChunks(ctx context.Context, baseMetadata map[string]string,
 				zap.Int("chunk_index", chunkIndex))
 		}
 
-		if err := r.store.UpsertRAGDocument(ctx, chunkDocID, chunkContent, chunkEmbeddingContent, chunkMetadata, chunkHash, chunkEmbedding); err != nil {
+		if err := r.store.UpsertRAGDocument(ctx, chunkDocID, chunkContent, chunkEmbeddingContent, structuralChunkMetadata, chunkHash, chunkEmbedding); err != nil {
 			r.logger.Warn("Failed to persist chunked RAG document",
 				zap.Error(err),
 				zap.String("document_id", chunkDocID.String()),
@@ -473,7 +480,7 @@ func (r *RAG) persistChunks(ctx context.Context, baseMetadata map[string]string,
 		chunkDoc := chromem.Document{
 			ID:       uuid.New().String(),
 			Content:  chunkEmbeddingContent,
-			Metadata: cloneStringMap(chunkMetadata),
+			Metadata: cloneStringMap(structuralChunkMetadata),
 		}
 		if chunkEmbedErr == nil && len(chunkEmbedding) > 0 {
 			chunkDoc.Embedding = chunkEmbedding
@@ -505,13 +512,16 @@ func (r *RAG) persistSummaryDocument(ctx context.Context, summaryDoc *chromem.Do
 	}
 
 	summaryContent := summaryDoc.Content
-	summaryEmbeddingSource := r.augmentEmbeddingContent(summaryContent, summaryMetadata)
-	summaryEmbeddingContent := r.ensureEmbeddingTokenLimit(ctx, summaryEmbeddingSource)
 	summaryHash := hashContent(normalizeForHash(summaryContent))
 	if summaryHash != "" {
 		summaryMetadata["content_hash"] = summaryHash
 	}
 
+	// Filter summary metadata to structural fields only
+	structuralSummaryMetadata := filterStructuralMetadata(summaryMetadata)
+
+	// Embed content directly (no augmentation)
+	summaryEmbeddingContent := r.ensureEmbeddingTokenLimit(ctx, summaryContent)
 	summaryEmbedding, summaryErr := r.embedder(ctx, summaryEmbeddingContent)
 	if summaryErr != nil {
 		r.logger.Warn("Failed to create embedding for summary document",
@@ -519,7 +529,7 @@ func (r *RAG) persistSummaryDocument(ctx context.Context, summaryDoc *chromem.Do
 			zap.String("document_id", summaryIDStr))
 	}
 
-	if err := r.store.UpsertRAGDocument(ctx, summaryID, summaryContent, summaryEmbeddingContent, summaryMetadata, summaryHash, summaryEmbedding); err != nil {
+	if err := r.store.UpsertRAGDocument(ctx, summaryID, summaryContent, summaryEmbeddingContent, structuralSummaryMetadata, summaryHash, summaryEmbedding); err != nil {
 		r.logger.Warn("Failed to persist summary RAG document",
 			zap.Error(err),
 			zap.String("document_id", summaryIDStr))

@@ -9,6 +9,7 @@ import (
 	"stats-agent/database"
 	"stats-agent/web/templates/components"
 	"strings"
+	"time"
 
 	"github.com/a-h/templ"
 	"github.com/google/uuid"
@@ -27,7 +28,8 @@ func NewFileService(store *database.PostgresStore, logger *zap.Logger) *FileServ
 	}
 }
 
-// GetAndMarkNewFiles finds new files in the workspace, marks them as rendered in the DB, and returns their web paths.
+// GetAndMarkNewFiles finds new files in the workspace, marks them as tracked in the DB, and returns their web paths.
+// Uses the new files table for efficient tracking with proper metadata.
 func (fs *FileService) GetAndMarkNewFiles(ctx context.Context, sessionID string) ([]string, error) {
 	sessionUUID, err := uuid.Parse(sessionID)
 	if err != nil {
@@ -35,7 +37,7 @@ func (fs *FileService) GetAndMarkNewFiles(ctx context.Context, sessionID string)
 	}
 
 	workspaceDir := filepath.Join("workspaces", sessionID)
-	files, err := os.ReadDir(workspaceDir)
+	filesInDir, err := os.ReadDir(workspaceDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil // No workspace is not an error
@@ -43,22 +45,61 @@ func (fs *FileService) GetAndMarkNewFiles(ctx context.Context, sessionID string)
 		return nil, fmt.Errorf("could not read workspace directory: %w", err)
 	}
 
-	renderedFiles, err := fs.store.GetRenderedFiles(ctx, sessionUUID)
+	// Get already tracked filenames for efficient lookup
+	trackedFiles, err := fs.store.GetTrackedFilenames(ctx, sessionUUID)
 	if err != nil {
-		return nil, fmt.Errorf("could not get rendered files: %w", err)
+		return nil, fmt.Errorf("could not get tracked files: %w", err)
 	}
 
 	var newFilePaths []string
-	for _, file := range files {
-		if !file.IsDir() {
-			fileName := file.Name()
-			if _, rendered := renderedFiles[fileName]; !rendered {
-				webPath := filepath.ToSlash(filepath.Join("/workspaces", sessionID, fileName))
-				newFilePaths = append(newFilePaths, webPath)
-				if err := fs.store.AddRenderedFile(ctx, sessionUUID, fileName); err != nil {
-					fs.logger.Warn("Failed to mark file as rendered in DB", zap.Error(err), zap.String("filename", fileName))
-				}
+	for _, fileEntry := range filesInDir {
+		if !fileEntry.IsDir() {
+			fileName := fileEntry.Name()
+
+			// Skip if already tracked
+			if trackedFiles[fileName] {
+				continue
 			}
+
+			// Get file info for metadata
+			fullPath := filepath.Join(workspaceDir, fileName)
+			fileInfo, err := os.Stat(fullPath)
+			if err != nil {
+				fs.logger.Warn("Failed to stat file", zap.Error(err), zap.String("filename", fileName))
+				continue
+			}
+
+			// Determine file type
+			ext := strings.ToLower(filepath.Ext(fileName))
+			fileType := "other"
+			switch ext {
+			case ".png", ".jpg", ".jpeg", ".gif":
+				fileType = "image"
+			case ".csv", ".xls", ".xlsx":
+				fileType = "csv"
+			}
+
+			// Create file record in database
+			webPath := filepath.ToSlash(filepath.Join("/workspaces", sessionID, fileName))
+			fileRecord := database.FileRecord{
+				ID:        uuid.New(),
+				SessionID: sessionUUID,
+				Filename:  fileName,
+				FilePath:  webPath,
+				FileType:  fileType,
+				FileSize:  fileInfo.Size(),
+				CreatedAt: time.Now(),
+				MessageID: nil, // Will be set later if associated with a message
+			}
+
+			if _, err := fs.store.CreateFile(ctx, fileRecord); err != nil {
+				fs.logger.Warn("Failed to create file record in DB",
+					zap.Error(err),
+					zap.String("filename", fileName))
+				// Continue - file might have been created by concurrent request
+			}
+
+			newFilePaths = append(newFilePaths, webPath)
 		}
 	}
 	return newFilePaths, nil
