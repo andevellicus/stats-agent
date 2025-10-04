@@ -36,6 +36,28 @@
     border: 3px solid transparent;
     background-clip: content-box;
   }
+
+  /* Sidebar slide-in animation */
+  @media (max-width: 767px) {
+    #sidebar {
+      transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    #sidebar-backdrop {
+      transition: opacity 0.3s ease-in-out;
+    }
+    #sidebar-backdrop:not(.hidden) {
+      animation: fadeIn 0.3s ease-in-out;
+    }
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
 }
 
   /* Python blocks followed by execution blocks should dock together */

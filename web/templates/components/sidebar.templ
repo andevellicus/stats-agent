@@ -27,9 +27,21 @@ templ SessionLinkOOB(session types.Session) {
 templ SessionList(sessions []types.Session, activeSessionID uuid.UUID) {
 	<div class="flex flex-col h-full bg-slate-50 border-r border-slate-200/80 overflow-hidden">
 		<div class="flex-shrink-0 p-4 border-b border-slate-200/80">
-			<a href="/chat/new" hx-boost="true" class="flex items-center justify-between text-sm font-bold text-slate-700 hover:bg-slate-200/70 p-2 rounded-lg">
-				<span>+ New Chat</span>
-			</a>
+			<div class="flex items-center justify-between mb-2">
+				<a href="/chat/new" hx-boost="true" class="flex-1 flex items-center justify-between text-sm font-bold text-slate-700 hover:bg-slate-200/70 p-2 rounded-lg">
+					<span>+ New Chat</span>
+				</a>
+				// Close button - only visible on mobile
+				<button
+					onclick="toggleSidebar()"
+					class="md:hidden ml-2 p-2 text-slate-600 hover:bg-slate-200/70 rounded-lg"
+					aria-label="Close sidebar"
+				>
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+					</svg>
+				</button>
+			</div>
 		</div>
 		<div class="flex-1 overflow-y-auto p-2 scrollbar-thin scrollbar-thumb-slate-300 scrollbar-track-slate-100">
 			<span class="text-xs font-semibold text-slate-500 uppercase px-2 tracking-wider">Recent</span>

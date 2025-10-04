@@ -8,17 +8,27 @@ import "github.com/google/uuid"
 // Update the signature to accept the new MessageGroup slice
 templ ChatPage(activeSessionID uuid.UUID, sessions []types.Session, messageGroups []types.MessageGroup) {
 	@layout.Base("Chat") {
-		<div class="flex h-full overflow-hidden">
-			// Sidebar - fixed width with internal scrolling
-			<div class="w-72 flex-shrink-0 overflow-hidden">
+		<div class="flex h-full overflow-hidden relative">
+			// Mobile backdrop - only visible when sidebar is open on mobile
+			<div
+				id="sidebar-backdrop"
+				class="fixed inset-0 bg-black/50 z-40 hidden md:hidden"
+				onclick="toggleSidebar()"
+			></div>
+
+			// Sidebar - responsive: overlay on mobile, fixed on desktop
+			<div
+				id="sidebar"
+				class="fixed md:relative inset-y-0 left-0 z-50 w-72 transform -translate-x-full md:translate-x-0 transition-transform duration-300 ease-in-out md:flex-shrink-0 overflow-hidden"
+			>
 				@components.SessionList(sessions, activeSessionID)
 			</div>
 
 			// Main Chat Area - scrollable
-			<div class="flex-1 flex flex-col items-center p-4 overflow-hidden">
-				<div class="w-[80%] h-full flex flex-col overflow-hidden">
+			<div class="flex-1 flex flex-col items-center p-2 md:p-4 overflow-hidden">
+				<div class="w-full md:w-[80%] h-full flex flex-col overflow-hidden">
 					// Messages container - scrollable with autoscroll
-					<div id="messages" class="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin" hx-on::after-swap="this.scrollTop = this.scrollHeight">
+					<div id="messages" class="flex-1 overflow-y-auto p-3 md:p-6 space-y-6 scrollbar-thin" hx-on::after-swap="this.scrollTop = this.scrollHeight">
 						if len(messageGroups) == 0 {
 							@components.WelcomeMessage()
 						} else {
@@ -34,7 +44,7 @@ templ ChatPage(activeSessionID uuid.UUID, sessions []types.Session, messageGroup
 						}
 					</div>
 					// Form container - sticky at bottom
-					<div class="flex-shrink-0 p-6 border-t border-gray-200/50 bg-gradient-to-br from-slate-50 to-blue-50">
+					<div class="flex-shrink-0 p-3 md:p-6 border-t border-gray-200/50 bg-gradient-to-br from-slate-50 to-blue-50">
 						@components.ChatForm(activeSessionID.String())
 					</div>
 				</div>

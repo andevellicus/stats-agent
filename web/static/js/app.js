@@ -1,6 +1,30 @@
 let activeEventSource = null;
 let autoScrollEnabled = true;
 
+// Toggle sidebar visibility on mobile
+function toggleSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    const backdrop = document.getElementById('sidebar-backdrop');
+
+    if (!sidebar || !backdrop) return;
+
+    const isOpen = sidebar.classList.contains('translate-x-0');
+
+    if (isOpen) {
+        // Close sidebar
+        sidebar.classList.remove('translate-x-0');
+        sidebar.classList.add('-translate-x-full');
+        backdrop.classList.add('hidden');
+        document.body.style.overflow = ''; // Re-enable body scroll
+    } else {
+        // Open sidebar
+        sidebar.classList.remove('-translate-x-full');
+        sidebar.classList.add('translate-x-0');
+        backdrop.classList.remove('hidden');
+        document.body.style.overflow = 'hidden'; // Prevent body scroll on mobile when sidebar is open
+    }
+}
+
 function applySyntaxHighlighting() {
     if (typeof hljs !== 'undefined') {
         document.querySelectorAll('pre code.language-python:not(.hljs)').forEach((block) => {
@@ -246,6 +270,16 @@ document.body.addEventListener('htmx:afterSwap', function(event) {
     const messageInput = document.getElementById('message-input');
     if (messageInput) {
         messageInput.addEventListener('input', () => autoExpand(messageInput));
+    }
+
+    // Close sidebar on mobile after navigation
+    const sidebar = document.getElementById('sidebar');
+    const backdrop = document.getElementById('sidebar-backdrop');
+    if (sidebar && backdrop && window.innerWidth < 768) {
+        sidebar.classList.remove('translate-x-0');
+        sidebar.classList.add('-translate-x-full');
+        backdrop.classList.add('hidden');
+        document.body.style.overflow = '';
     }
 });
 
