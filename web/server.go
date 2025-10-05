@@ -62,6 +62,13 @@ func (s *Server) setupRoutes() {
 	fileService := services.NewFileService(s.store, s.logger)
 	messageService := services.NewMessageService(s.store, s.logger)
 	streamService := services.NewStreamService(s.logger)
+	pdfConfig := &services.PDFConfig{
+		TokenThreshold:           s.config.PDFTokenThreshold,
+		FirstPagesPriority:       s.config.PDFFirstPagesPriority,
+		EnableTableDetection:     s.config.PDFEnableTableDetection,
+		SentenceBoundaryTruncate: s.config.PDFSentenceBoundaryTruncate,
+	}
+	pdfService := services.NewPDFService(s.logger, pdfConfig)
 	chatService := services.NewChatService(s.agent, s.store, s.logger, fileService, messageService, streamService)
 
 	// Initialize rate limiter
@@ -74,7 +81,7 @@ func (s *Server) setupRoutes() {
 	rateLimiter := middleware.NewSessionRateLimiter(rateLimiterConfig, s.logger)
 
 	// Initialize handlers with services
-	chatHandler := handlers.NewChatHandler(chatService, streamService, s.logger, s.store)
+	chatHandler := handlers.NewChatHandler(chatService, streamService, pdfService, s.agent, s.config, s.logger, s.store)
 
 	s.router.GET("/", chatHandler.Index)
 	s.router.POST("/chat", middleware.RateLimitMiddleware(rateLimiter, "message"), chatHandler.SendMessage)

@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"stats-agent/agent"
+	"stats-agent/config"
 	"stats-agent/database"
 	"stats-agent/web/middleware"
 	"stats-agent/web/services"
@@ -27,8 +29,16 @@ import (
 type ChatHandler struct {
 	chatService   *services.ChatService
 	streamService *services.StreamService
+	pdfService    *services.PDFService
+	agent         AgentInterface
+	cfg           *config.Config
 	logger        *zap.Logger
 	store         *database.PostgresStore
+}
+
+// AgentInterface defines the subset of agent methods we need
+type AgentInterface interface {
+	GetMemoryManager() *agent.MemoryManager
 }
 
 type ChatRequest struct {
@@ -39,12 +49,18 @@ type ChatRequest struct {
 func NewChatHandler(
 	chatService *services.ChatService,
 	streamService *services.StreamService,
+	pdfService *services.PDFService,
+	agent AgentInterface,
+	cfg *config.Config,
 	logger *zap.Logger,
 	store *database.PostgresStore,
 ) *ChatHandler {
 	return &ChatHandler{
 		chatService:   chatService,
 		streamService: streamService,
+		pdfService:    pdfService,
+		agent:         agent,
+		cfg:           cfg,
 		logger:        logger,
 		store:         store,
 	}
@@ -267,8 +283,14 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 		}
 
 		ext := strings.ToLower(filepath.Ext(file.Filename))
-		if ext != ".csv" && ext != ".xlsx" && ext != ".xls" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file type. Please upload a CSV or Excel file."})
+		if ext != ".csv" && ext != ".xlsx" && ext != ".xls" && ext != ".pdf" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file type. Please upload CSV, Excel, or PDF files."})
+			return
+		}
+
+		// Limit PDF size to 10MB
+		if ext == ".pdf" && file.Size > 10*1024*1024 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "PDF file too large. Maximum size is 10MB."})
 			return
 		}
 
@@ -291,20 +313,60 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 			return
 		}
 
-		if strings.TrimSpace(req.Message) == "" {
-			req.Message = fmt.Sprintf("I've uploaded %s. Please analyze this dataset and provide statistical insights.", file.Filename)
+		// Extract text from PDF and prepend to message
+		if ext == ".pdf" {
+			// Build TruncationConfig from config values
+			truncConfig := services.TruncationConfig{
+				MaxTokens:                h.cfg.ContextLength,
+				TokenThreshold:           h.cfg.PDFTokenThreshold,
+				FirstPagesPrio:           h.cfg.PDFFirstPagesPriority,
+				EnableTableDetection:     h.cfg.PDFEnableTableDetection,
+				SentenceBoundaryTruncate: h.cfg.PDFSentenceBoundaryTruncate,
+			}
+			memManager := h.agent.GetMemoryManager()
+
+			pdfText, err := h.pdfService.ExtractTextSmart(c.Request.Context(), dst, truncConfig, memManager)
+			if err != nil {
+				h.logger.Error("Failed to extract PDF text",
+					zap.Error(err),
+					zap.String("filename", sanitizedFilename))
+				// Continue - user can still reference the file
+			} else {
+				// Prepend PDF content to user message
+				pdfContent := fmt.Sprintf("[PDF Content from %s]\n\n%s\n\n---\n\n",
+					file.Filename, pdfText)
+
+				// Prepend PDF content to user's message
+				if strings.TrimSpace(req.Message) == "" {
+					req.Message = pdfContent + "Please analyze the content from this PDF and provide statistical insights."
+				} else {
+					req.Message = pdfContent + req.Message
+				}
+			}
 		} else {
-			req.Message = fmt.Sprintf("[📎 File uploaded: %s]\n\n%s", file.Filename, req.Message)
+			// For non-PDF files, use existing message logic
+			if strings.TrimSpace(req.Message) == "" {
+				req.Message = fmt.Sprintf("I've uploaded %s. Please analyze this dataset and provide statistical insights.", file.Filename)
+			} else {
+				req.Message = fmt.Sprintf("[📎 File uploaded: %s]\n\n%s", file.Filename, req.Message)
+			}
 		}
 
 		// Track uploaded file in database - non-critical, log if fails
 		webPath := filepath.ToSlash(filepath.Join("/workspaces", req.SessionID, sanitizedFilename))
+
+		// Determine file type
+		fileType := "csv"
+		if ext == ".pdf" {
+			fileType = "pdf"
+		}
+
 		fileRecord := database.FileRecord{
 			ID:        uuid.New(),
 			SessionID: sessionID,
 			Filename:  sanitizedFilename,
 			FilePath:  webPath,
-			FileType:  "csv", // Validated as CSV/Excel above
+			FileType:  fileType,
 			FileSize:  file.Size,
 			CreatedAt: time.Now(),
 			MessageID: nil, // Will be associated with user message later if needed
@@ -367,8 +429,14 @@ func (h *ChatHandler) UploadFile(c *gin.Context) {
 	}
 
 	ext := strings.ToLower(filepath.Ext(file.Filename))
-	if ext != ".csv" && ext != ".xlsx" && ext != ".xls" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file type. Please upload a CSV or Excel file."})
+	if ext != ".csv" && ext != ".xlsx" && ext != ".xls" && ext != ".pdf" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file type. Please upload CSV, Excel, or PDF files."})
+		return
+	}
+
+	// Limit PDF size to 10MB
+	if ext == ".pdf" && file.Size > 10*1024*1024 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "PDF file too large. Maximum size is 10MB."})
 		return
 	}
 

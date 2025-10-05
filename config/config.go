@@ -28,10 +28,15 @@ const (
 	defaultHybridFactBoost                  = 1.3
 	defaultHybridSummaryBoost               = 1.2
 	defaultHybridErrorPenalty               = 0.8
+	defaultPDFTokenThreshold                = 0.75
+	defaultPDFFirstPagesPriority            = 3
+	defaultPDFEnableTableDetection          = true
+	defaultPDFSentenceBoundaryTruncate      = true
 )
 
 // Config holds the application's configuration
 type Config struct {
+	WebPort                          int           `mapstructure:"WEB_PORT"`
 	PythonExecutorAddress            string        `mapstructure:"PYTHON_EXECUTOR_ADDRESS"`
 	PythonExecutorAddresses          []string      `mapstructure:"PYTHON_EXECUTOR_ADDRESSES"`
 	PythonExecutorPool               []string      `mapstructure:"PYTHON_EXECUTOR_POOL"`
@@ -72,6 +77,10 @@ type Config struct {
 	HybridFactBoost                  float64       `mapstructure:"HYBRID_FACT_BOOST"`
 	HybridSummaryBoost               float64       `mapstructure:"HYBRID_SUMMARY_BOOST"`
 	HybridErrorPenalty               float64       `mapstructure:"HYBRID_ERROR_PENALTY"`
+	PDFTokenThreshold                float64       `mapstructure:"PDF_TOKEN_THRESHOLD"`
+	PDFFirstPagesPriority            int           `mapstructure:"PDF_FIRST_PAGES_PRIORITY"`
+	PDFEnableTableDetection          bool          `mapstructure:"PDF_ENABLE_TABLE_DETECTION"`
+	PDFSentenceBoundaryTruncate      bool          `mapstructure:"PDF_SENTENCE_BOUNDARY_TRUNCATE"`
 }
 
 func Load(logger *zap.Logger) *Config {
@@ -84,6 +93,7 @@ func Load(logger *zap.Logger) *Config {
 	viper.AutomaticEnv()
 
 	// Set default values
+	viper.SetDefault("WEB_PORT", 8080)
 	viper.SetDefault("PYTHON_EXECUTOR_ADDRESSES", []string{})
 	viper.SetDefault("PYTHON_EXECUTOR_POOL", []string{})
 	viper.SetDefault("MAIN_LLM_HOST", "http://localhost:8080")
@@ -121,6 +131,10 @@ func Load(logger *zap.Logger) *Config {
 	viper.SetDefault("HYBRID_FACT_BOOST", defaultHybridFactBoost)
 	viper.SetDefault("HYBRID_SUMMARY_BOOST", defaultHybridSummaryBoost)
 	viper.SetDefault("HYBRID_ERROR_PENALTY", defaultHybridErrorPenalty)
+	viper.SetDefault("PDF_TOKEN_THRESHOLD", defaultPDFTokenThreshold)
+	viper.SetDefault("PDF_FIRST_PAGES_PRIORITY", defaultPDFFirstPagesPriority)
+	viper.SetDefault("PDF_ENABLE_TABLE_DETECTION", defaultPDFEnableTableDetection)
+	viper.SetDefault("PDF_SENTENCE_BOUNDARY_TRUNCATE", defaultPDFSentenceBoundaryTruncate)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if logger != nil {
@@ -234,6 +248,25 @@ func Load(logger *zap.Logger) *Config {
 	}
 	if config.HybridErrorPenalty <= 0 || config.HybridErrorPenalty >= 1 {
 		config.HybridErrorPenalty = defaultHybridErrorPenalty
+	}
+	if config.PDFTokenThreshold <= 0 || config.PDFTokenThreshold > 1 {
+		if logger != nil {
+			logger.Warn("Invalid PDF token threshold; using default",
+				zap.Float64("threshold", config.PDFTokenThreshold),
+				zap.Float64("default", defaultPDFTokenThreshold))
+		}
+		config.PDFTokenThreshold = defaultPDFTokenThreshold
+	}
+	if config.PDFFirstPagesPriority < 0 {
+		config.PDFFirstPagesPriority = defaultPDFFirstPagesPriority
+	}
+	if config.WebPort <= 0 || config.WebPort > 65535 {
+		if logger != nil {
+			logger.Warn("Invalid web port; using default",
+				zap.Int("port", config.WebPort),
+				zap.Int("default", 8080))
+		}
+		config.WebPort = 8080
 	}
 
 	return &config

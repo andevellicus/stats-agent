@@ -525,6 +525,8 @@ func (s *PostgresStore) migrateRenderedFilesToFilesTable(ctx context.Context) er
 				fileType = "image"
 			case ".csv", ".xls", ".xlsx":
 				fileType = "csv"
+			case ".pdf":
+				fileType = "pdf"
 			}
 
 			// Build web path

@@ -1,3 +1,7 @@
+# --- Web Server Configuration ---
+WEB_PORT: 8080  # Port for web server (default: 8080)
+
+# --- Python Executor Configuration ---
 PYTHON_EXECUTOR_ADDRESSES:
   - "localhost:9999"
   - "localhost:9998"
@@ -8,6 +12,8 @@ PYTHON_EXECUTOR_COOLDOWN_SECONDS: 5      # Seconds to wait before retrying a fai
 PYTHON_EXECUTOR_DIAL_TIMEOUT_SECONDS: 3  # TCP dial timeout to python executors
 PYTHON_EXECUTOR_IO_TIMEOUT_SECONDS: 60   # Read/write timeout per execution
 PYTHON_EXECUTOR_MAX_CONNECTIONS: 4       # Max simultaneous connections per executor
+
+# --- LLM Server Configuration ---
 MAIN_LLM_HOST: "http://localhost:8080"
 EMBEDDING_LLM_HOST: "http://localhost:8081"
 SUMMARIZATION_LLM_HOST: "http://localhost:8082"
@@ -50,3 +56,9 @@ SEMANTIC_SIMILARITY_THRESHOLD: 0.7  # Minimum cosine similarity for vector hits
 BM25_SCORE_THRESHOLD: 0.10           # Minimum BM25+bonus score for text hits
 ENABLE_METADATA_FALLBACK: true      # Enable metadata-based fallback search when hybrid results are empty
 METADATA_FALLBACK_MAX_FILTERS: 3     # Limit number of auto-derived metadata filters
+
+# --- PDF Processing Configuration ---
+PDF_TOKEN_THRESHOLD: 0.75                 # Use 75% of context window for PDF content
+PDF_FIRST_PAGES_PRIORITY: 3               # Keep first N pages if possible
+PDF_ENABLE_TABLE_DETECTION: true          # Detect and mark tables in extracted text
+PDF_SENTENCE_BOUNDARY_TRUNCATE: true      # Truncate at sentence boundaries for better context

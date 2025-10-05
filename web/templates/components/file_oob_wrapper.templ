@@ -33,7 +33,7 @@ func isImage(path string) bool {
 func isRenderable(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
-	case ".png", ".jpg", ".jpeg", ".gif", ".csv", ".xls", ".xlsx":
+	case ".png", ".jpg", ".jpeg", ".gif", ".csv", ".xls", ".xlsx", ".pdf":
 		return true
 	default:
 		return false

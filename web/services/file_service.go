@@ -77,6 +77,8 @@ func (fs *FileService) GetAndMarkNewFiles(ctx context.Context, sessionID string)
 				fileType = "image"
 			case ".csv", ".xls", ".xlsx":
 				fileType = "csv"
+			case ".pdf":
+				fileType = "pdf"
 			}
 
 			// Create file record in database
@@ -119,7 +121,7 @@ func (fs *FileService) RenderFileBlocksForDB(ctx context.Context, filePaths []st
 		switch ext {
 		case ".png", ".jpg", ".jpeg", ".gif":
 			component = components.ImageBlock(path)
-		case ".csv", ".xls", ".xlsx":
+		case ".csv", ".xls", ".xlsx", ".pdf":
 			component = components.FileBlock(path)
 		default:
 			component = nil // Ignore other file types
