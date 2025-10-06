@@ -191,7 +191,8 @@ func (m *MemoryManager) ManageHistory(ctx context.Context, sessionID string, his
 	go func(baseCtx context.Context, sessionID string, messages []types.AgentMessage) {
 		const maxAttempts = 3
 		for attempt := 0; attempt < maxAttempts; attempt++ {
-			archiveCtx, cancel := context.WithTimeout(baseCtx, 2*time.Minute)
+			// Increased from 2min to 5min to allow time for summarization and embedding
+			archiveCtx, cancel := context.WithTimeout(baseCtx, 5*time.Minute)
 			err := m.rag.AddMessagesToStore(archiveCtx, sessionID, messages)
 			cancel()
 

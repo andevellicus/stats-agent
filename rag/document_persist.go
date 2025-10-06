@@ -117,10 +117,21 @@ func (r *RAG) preparePersistenceData(ctx context.Context, data *ragDocumentData)
 
 	// Embed content directly (no augmentation - metadata is already inline in fact text)
 	embedContent := r.ensureEmbeddingTokenLimit(ctx, data.EmbedContent)
+
+	embedStart := time.Now()
 	embeddingVector, embedErr := r.embedder(ctx, embedContent)
+	embedElapsed := time.Since(embedStart)
+
 	if embedErr != nil {
-		r.logger.Warn("Failed to create embedding for RAG persistence",
+		r.logger.Error("Failed to create embedding for RAG persistence",
 			zap.Error(embedErr),
+			zap.String("document_id", data.Metadata["document_id"]),
+			zap.Duration("elapsed", embedElapsed),
+			zap.Duration("timeout", r.cfg.EmbeddingTimeout))
+	} else if embedElapsed > r.cfg.EmbeddingTimeout/2 {
+		r.logger.Warn("Embedding generation took longer than expected",
+			zap.Duration("elapsed", embedElapsed),
+			zap.Duration("timeout", r.cfg.EmbeddingTimeout),
 			zap.String("document_id", data.Metadata["document_id"]))
 	}
 
@@ -207,10 +218,21 @@ func (r *RAG) prepareSummaryDocument(ctx context.Context, summaryDoc *chromem.Do
 
 	// Embed content directly (no augmentation)
 	summaryEmbeddingContent := r.ensureEmbeddingTokenLimit(ctx, summaryContent)
+
+	embedStart := time.Now()
 	summaryEmbedding, summaryErr := r.embedder(ctx, summaryEmbeddingContent)
+	embedElapsed := time.Since(embedStart)
+
 	if summaryErr != nil {
-		r.logger.Warn("Failed to create embedding for summary document",
+		r.logger.Error("Failed to create embedding for summary document",
 			zap.Error(summaryErr),
+			zap.String("document_id", summaryIDStr),
+			zap.Duration("elapsed", embedElapsed),
+			zap.Duration("timeout", r.cfg.EmbeddingTimeout))
+	} else if embedElapsed > r.cfg.EmbeddingTimeout/2 {
+		r.logger.Warn("Summary embedding took longer than expected",
+			zap.Duration("elapsed", embedElapsed),
+			zap.Duration("timeout", r.cfg.EmbeddingTimeout),
 			zap.String("document_id", summaryIDStr))
 	}
 

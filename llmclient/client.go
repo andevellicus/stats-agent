@@ -61,9 +61,20 @@ type Client struct {
 func New(cfg *config.Config, logger *zap.Logger) *Client {
 	// Use a client with the configured timeout; streaming requests rely on context
 	// cancellation or server closing the stream.
+	// Note: This default timeout is used for main LLM requests. Embedding and summarization
+	// use operation-specific timeouts passed via context.
 	return &Client{
 		cfg:        cfg,
 		httpClient: &http.Client{Timeout: cfg.LLMRequestTimeout},
+		logger:     logger,
+	}
+}
+
+// NewWithTimeout creates a client with a custom timeout for specific operations.
+func NewWithTimeout(cfg *config.Config, logger *zap.Logger, timeout time.Duration) *Client {
+	return &Client{
+		cfg:        cfg,
+		httpClient: &http.Client{Timeout: timeout},
 		logger:     logger,
 	}
 }

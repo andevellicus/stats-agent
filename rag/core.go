@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"stats-agent/config"
 	"stats-agent/database"
 	"stats-agent/llmclient"
+	"stats-agent/web/types"
 
 	"github.com/google/uuid"
 	"github.com/philippgille/chromem-go"
@@ -259,8 +261,89 @@ func resolveRole(metadata map[string]string) string {
 }
 
 func createLlamaCppEmbedding(cfg *config.Config, logger *zap.Logger) chromem.EmbeddingFunc {
-	client := llmclient.New(cfg, logger)
+	client := llmclient.NewWithTimeout(cfg, logger, cfg.EmbeddingTimeout)
 	return func(ctx context.Context, doc string) ([]float32, error) {
 		return client.Embed(ctx, cfg.EmbeddingLLMHost, doc)
 	}
+}
+
+// ProcessRecentTurn proactively generates and stores facts for a recent assistant+tool message pair.
+// This runs asynchronously and fires-and-forgets - errors are logged but don't affect agent execution.
+// Deduplication via content hash prevents duplicate processing if memory management later archives the same pair.
+func (r *RAG) ProcessRecentTurn(ctx context.Context, sessionID string, assistantMsg, toolMsg types.AgentMessage) {
+	// Safety: Only process if feature is enabled
+	if !r.cfg.RAGProactiveProcessing {
+		return
+	}
+
+	// Safety: Only process assistant+tool pairs
+	if assistantMsg.Role != "assistant" || toolMsg.Role != "tool" {
+		r.logger.Warn("ProcessRecentTurn called with invalid message roles",
+			zap.String("assistant_role", assistantMsg.Role),
+			zap.String("tool_role", toolMsg.Role))
+		return
+	}
+
+	// Use background context to avoid cancellation when HTTP request ends
+	// Timeout ensures we don't leak goroutines
+	bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	collection := r.db.GetCollection("long-term-memory", r.embedder)
+	if collection == nil {
+		r.logger.Error("ProcessRecentTurn: long-term memory collection not found")
+		return
+	}
+
+	// Build message pair for processing
+	messages := []types.AgentMessage{assistantMsg, toolMsg}
+	processedIndices := make(map[int]bool)
+
+	var sessionFilter map[string]string
+	if sessionID != "" {
+		sessionFilter = map[string]string{"session_id": sessionID}
+	}
+
+	// Prepare the document (this handles fact generation, deduplication, etc.)
+	docData, skip, err := r.prepareDocumentForMessage(bgCtx, sessionID, messages, 0, collection, sessionFilter, processedIndices)
+	if err != nil {
+		r.logger.Warn("ProcessRecentTurn: failed to prepare document",
+			zap.Error(err),
+			zap.String("session_id", sessionID))
+		return
+	}
+	if skip || docData == nil {
+		r.logger.Debug("ProcessRecentTurn: document skipped (likely duplicate)",
+			zap.String("session_id", sessionID))
+		return
+	}
+
+	// Prepare persistence data (embedding + DB documents)
+	chromemDocs, dbDocs := r.preparePersistenceData(bgCtx, docData)
+
+	// Persist to PostgreSQL first
+	if len(dbDocs) > 0 {
+		for _, doc := range dbDocs {
+			if err := r.store.UpsertRAGDocument(bgCtx, doc.DocumentID, doc.Content, doc.EmbeddingContent, doc.Metadata, doc.ContentHash, doc.Embedding); err != nil {
+				r.logger.Warn("ProcessRecentTurn: failed to persist document to database",
+					zap.Error(err),
+					zap.String("session_id", sessionID),
+					zap.String("document_id", doc.DocumentID.String()))
+			}
+		}
+	}
+
+	// Add to vector store
+	if len(chromemDocs) > 0 {
+		if err := collection.AddDocuments(bgCtx, chromemDocs, 1); err != nil {
+			r.logger.Warn("ProcessRecentTurn: failed to add documents to vector store",
+				zap.Error(err),
+				zap.String("session_id", sessionID))
+			return
+		}
+	}
+
+	r.logger.Info("Proactively processed recent turn into RAG",
+		zap.String("session_id", sessionID),
+		zap.Int("documents_added", len(chromemDocs)))
 }

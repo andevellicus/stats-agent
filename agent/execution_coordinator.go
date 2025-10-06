@@ -41,6 +41,14 @@ func (e *ExecutionCoordinator) ProcessResponse(ctx context.Context, llmResponse,
 	// Convert markdown code blocks to XML tags first
 	processedResponse := e.ConvertMarkdownToXML(sanitizedResponse)
 
+	// Close any unclosed tags BEFORE attempting execution
+	processedResponse, closedTags := format.CloseUnbalancedTags(processedResponse)
+	if len(closedTags) > 0 {
+		e.logger.Warn("Closed unclosed tags before execution",
+			zap.Int("tags_closed", len(closedTags)),
+			zap.String("session_id", sessionID))
+	}
+
 	// Try to execute Python code if present
 	code, result, wasExecuted := e.pythonTool.ExecutePythonCode(ctx, processedResponse, sessionID, nil)
 

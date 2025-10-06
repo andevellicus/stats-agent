@@ -26,7 +26,9 @@ CONTEXT_LENGTH: 16384
 #CONTEXT_LENGTH: 2048
 CONTEXT_SOFT_LIMIT_RATIO: 0.5
 CONSECUTIVE_ERRORS: 5
-LLM_REQUEST_TIMEOUT: 300
+LLM_REQUEST_TIMEOUT: 300           # Timeout for main LLM requests (seconds)
+SUMMARIZATION_TIMEOUT: 60          # Timeout for summarization LLM requests (seconds)
+EMBEDDING_TIMEOUT: 30              # Timeout for embedding requests (seconds)
 
 # --- Retry Logic For Connecting to Llama.CPP ---
 MAX_RETRIES: 5
@@ -61,7 +63,10 @@ ENABLE_METADATA_FALLBACK: true      # Enable metadata-based fallback search when
 METADATA_FALLBACK_MAX_FILTERS: 3     # Limit number of auto-derived metadata filters
 
 # --- PDF Processing Configuration ---
-PDF_TOKEN_THRESHOLD: 0.75                 # Use 75% of context window for PDF content
+PDF_TOKEN_THRESHOLD: 0.5                  # Use same as context window for PDF content
 PDF_FIRST_PAGES_PRIORITY: 3               # Keep first N pages if possible
 PDF_ENABLE_TABLE_DETECTION: true          # Detect and mark tables in extracted text
 PDF_SENTENCE_BOUNDARY_TRUNCATE: true      # Truncate at sentence boundaries for better context
+
+# --- RAG Processing Configuration ---
+RAG_PROACTIVE_PROCESSING: true            # Generate facts immediately after code execution (default: true)

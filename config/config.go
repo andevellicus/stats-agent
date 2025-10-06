@@ -52,6 +52,8 @@ type Config struct {
 	RetryDelaySeconds                time.Duration `mapstructure:"RETRY_DELAY_SECONDS"`
 	ConsecutiveErrors                int           `mapstructure:"CONSECUTIVE_ERRORS"`
 	LLMRequestTimeout                time.Duration `mapstructure:"LLM_REQUEST_TIMEOUT"`
+	SummarizationTimeout             time.Duration `mapstructure:"SUMMARIZATION_TIMEOUT"`
+	EmbeddingTimeout                 time.Duration `mapstructure:"EMBEDDING_TIMEOUT"`
 	CleanupEnabled                   bool          `mapstructure:"CLEANUP_ENABLED"`
 	CleanupInterval                  time.Duration `mapstructure:"CLEANUP_INTERVAL"`
 	SessionRetentionAge              time.Duration `mapstructure:"SESSION_RETENTION_AGE"`
@@ -82,6 +84,7 @@ type Config struct {
 	PDFFirstPagesPriority            int           `mapstructure:"PDF_FIRST_PAGES_PRIORITY"`
 	PDFEnableTableDetection          bool          `mapstructure:"PDF_ENABLE_TABLE_DETECTION"`
 	PDFSentenceBoundaryTruncate      bool          `mapstructure:"PDF_SENTENCE_BOUNDARY_TRUNCATE"`
+	RAGProactiveProcessing           bool          `mapstructure:"RAG_PROACTIVE_PROCESSING"`
 }
 
 func Load(logger *zap.Logger) *Config {
@@ -107,6 +110,8 @@ func Load(logger *zap.Logger) *Config {
 	viper.SetDefault("RETRY_DELAY_SECONDS", 2)
 	viper.SetDefault("CONSECUTIVE_ERRORS", 3)
 	viper.SetDefault("LLM_REQUEST_TIMEOUT", 300)
+	viper.SetDefault("SUMMARIZATION_TIMEOUT", 60)
+	viper.SetDefault("EMBEDDING_TIMEOUT", 30)
 	viper.SetDefault("CLEANUP_ENABLED", true)
 	viper.SetDefault("CLEANUP_INTERVAL", 24)
 	viper.SetDefault("SESSION_RETENTION_AGE", 168)
@@ -137,6 +142,7 @@ func Load(logger *zap.Logger) *Config {
 	viper.SetDefault("PDF_FIRST_PAGES_PRIORITY", defaultPDFFirstPagesPriority)
 	viper.SetDefault("PDF_ENABLE_TABLE_DETECTION", defaultPDFEnableTableDetection)
 	viper.SetDefault("PDF_SENTENCE_BOUNDARY_TRUNCATE", defaultPDFSentenceBoundaryTruncate)
+	viper.SetDefault("RAG_PROACTIVE_PROCESSING", true)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if logger != nil {
@@ -189,6 +195,8 @@ func Load(logger *zap.Logger) *Config {
 	// Convert seconds/hours to proper time.Duration
 	config.RetryDelaySeconds = config.RetryDelaySeconds * time.Second
 	config.LLMRequestTimeout = config.LLMRequestTimeout * time.Second
+	config.SummarizationTimeout = config.SummarizationTimeout * time.Second
+	config.EmbeddingTimeout = config.EmbeddingTimeout * time.Second
 	config.CleanupInterval = config.CleanupInterval * time.Hour
 	config.SessionRetentionAge = config.SessionRetentionAge * time.Hour
 	config.PythonExecutorCooldownSeconds = config.PythonExecutorCooldownSeconds * time.Second

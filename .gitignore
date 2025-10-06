@@ -16,3 +16,4 @@ web/static/css/output.css
 *.swo
 *~
 .DS_Store
+docs/proactive-rag-processing.md

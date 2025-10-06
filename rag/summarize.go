@@ -3,7 +3,9 @@ package rag
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
+	"time"
 
 	"stats-agent/llmclient"
 	"stats-agent/web/types"
@@ -11,109 +13,52 @@ import (
 	"go.uber.org/zap"
 )
 
-func buildMetadataTagsForPrompt(metadata map[string]string) string {
-	if len(metadata) == 0 {
-		return ""
-	}
-
-	var tags []string
-
-	// Priority order for tag inclusion
-	if test := metadata["primary_test"]; test != "" {
-		tags = append(tags, fmt.Sprintf("test:%s", test))
-	}
-	if metadata["sig_at_05"] == "true" {
-		tags = append(tags, "p<0.05:yes")
-	} else if metadata["sig_at_05"] == "false" {
-		tags = append(tags, "p<0.05:no")
-	}
-	if metadata["sig_at_01"] == "true" {
-		tags = append(tags, "p<0.01:yes")
-	}
-	if stage := metadata["analysis_stage"]; stage != "" {
-		tags = append(tags, fmt.Sprintf("stage:%s", stage))
-	}
-	if vars := metadata["variables"]; vars != "" {
-		tags = append(tags, fmt.Sprintf("variables:%s", vars))
-	}
-	if dataset := metadata["dataset"]; dataset != "" {
-		tags = append(tags, fmt.Sprintf("dataset:%s", dataset))
-	}
-
-	if len(tags) == 0 {
-		return ""
-	}
-
-	return fmt.Sprintf("Based on the extracted metadata, include these tags in your response: [%s]", strings.Join(tags, " | "))
-}
-
 func (r *RAG) SummarizeLongTermMemory(ctx context.Context, context, latestUserMessage string) (string, error) {
 	latestUserMessage = strings.TrimSpace(latestUserMessage)
 
-	systemPrompt := `You are a technical summarization expert specializing in data analysis and statistics.
+	// Extremely simple, constrained prompt for fast models like Mistral
+	systemPrompt := `Extract 1-3 key facts from conversation history relevant to the user's question. Each fact must be ONE sentence starting with "Fact:".
 
-Your task: Extract key facts from conversation history that are relevant to the user's current question.
+Rules:
+- ONE sentence per fact
+- Include numbers, variable names, test results
+- NO explanations, NO commentary
+- If no relevant facts exist: "Fact: No prior analysis found."
 
-CRITICAL RULES:
-1. Focus on DATA FINDINGS, not process descriptions
-2. ALWAYS preserve: numbers, statistical measures, column names, file names, variable names
-3. Extract MULTIPLE facts if relevant (1-3 facts maximum)
-4. Each fact should be ONE concise sentence
-5. Start each fact with "Fact:" on its own line
-6. Ignore: instructions, system messages, casual chat, failed attempts
-7. If no relevant facts exist, output: "Fact: No relevant prior analysis found."
+Example:
+Fact: Dataset has 150 rows with Age, Gender, and Score columns.
+Fact: Independent t-test found p=0.023, Cohen's d=0.42 between groups.`
 
-WHAT TO EXTRACT:
-- Statistical results (correlations, p-values, test results, effect sizes)
-- Data characteristics (sample size, distributions, outliers)
-- Analysis decisions (which test used, which variables, transformations applied)
-- Key findings (patterns discovered, significant differences, trends)
-- File/dataset information (which data was analyzed)
+	userPrompt := fmt.Sprintf(`Question: %s
 
-DON'T EXTRACT:
-- How-to instructions or explanations
-- Error messages or debugging steps
-- Casual conversation or greetings
-- Process descriptions ("I used pandas to...")
-
-EXAMPLES:
-
-Example 1:
-Memory: "Let me help you analyze that. First, I loaded the data. Then I checked for missing values - found 23 missing values in the income column. I dropped those rows and proceeded with the t-test. Independent samples t-test comparing male vs female salaries showed t=2.34, df=198, p=0.021, Cohen's d=0.33."
-User question: "What were the results of the gender salary comparison?"
-Output:
-Fact: Dataset had 23 missing values in income column which were removed.
-Fact: Independent t-test found statistically significant salary difference between genders (t=2.34, df=198, p=0.021) with small effect size (d=0.33).
-
-Example 2:
-Memory: "Hi! How can I help you today? What kind of analysis would you like to perform?"
-User question: "What did we discuss about regression?"
-Output:
-Fact: No relevant prior analysis found.
-
-Remember: Be SPECIFIC. Include actual numbers, variable names, and technical details. Vague summaries are useless.`
-
-	if latestUserMessage == "" {
-		latestUserMessage = "(no specific question provided)"
-	}
-
-	userPrompt := fmt.Sprintf(`User's current question:
-"%s"
-
-Conversation history to extract from:
+History:
 %s
 
-Extract relevant facts following the rules and examples above:`, latestUserMessage, context)
+Extract 1-3 relevant facts (one sentence each):`, latestUserMessage, context)
 
 	messages := []types.AgentMessage{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userPrompt},
 	}
 
-	// Non-streaming summarization
-	summary, err := llmclient.New(r.cfg, r.logger).Chat(ctx, r.cfg.SummarizationLLMHost, messages)
+	// Non-streaming summarization with operation-specific timeout
+	start := time.Now()
+	client := llmclient.NewWithTimeout(r.cfg, r.logger, r.cfg.SummarizationTimeout)
+	summary, err := client.Chat(ctx, r.cfg.SummarizationLLMHost, messages)
+	elapsed := time.Since(start)
+
 	if err != nil {
+		r.logger.Error("LLM chat call failed for memory summary",
+			zap.Error(err),
+			zap.Duration("elapsed", elapsed),
+			zap.Duration("timeout", r.cfg.SummarizationTimeout))
 		return "", fmt.Errorf("llm chat call failed for memory summary: %w", err)
+	}
+
+	if elapsed > r.cfg.SummarizationTimeout/2 {
+		r.logger.Warn("Memory summarization took longer than expected",
+			zap.Duration("elapsed", elapsed),
+			zap.Duration("timeout", r.cfg.SummarizationTimeout))
 	}
 
 	summary = strings.TrimSpace(summary)
@@ -134,33 +79,71 @@ Extract relevant facts following the rules and examples above:`, latestUserMessa
 	return fmt.Sprintf("<memory>\n%s\n</memory>", summary), nil
 }
 
-func (r *RAG) generateFactSummary(ctx context.Context, code, result string, metadata map[string]string) (string, error) {
-	finalResult := result
-	if strings.Contains(result, "Error:") {
-		finalResult = compressMiddle(result, 800, 200, 200)
+func (r *RAG) generateFactSummary(ctx context.Context, result string, metadata map[string]string) (string, error) {
+	// Build structured context from metadata
+	var context []string
+
+	if test := metadata["primary_test"]; test != "" {
+		context = append(context, "Test: "+test)
+	}
+	if vars := metadata["variables"]; vars != "" {
+		context = append(context, "Variables: "+vars)
+	}
+	if dataset := metadata["dataset"]; dataset != "" {
+		context = append(context, "Dataset: "+dataset)
 	}
 
-	systemPrompt := `You are an expert at summarizing statistical analysis. Create one concise fact from code and output.`
+	contextStr := ""
+	if len(context) > 0 {
+		contextStr = "\nContext: " + strings.Join(context, ", ")
+	}
 
-	// Build metadata tags string for the prompt
-	metadataTags := buildMetadataTagsForPrompt(metadata)
+	resultPreview := truncateResult(result, 800)
 
-	userPrompt := fmt.Sprintf(`Create a 1-2 sentence fact that captures what was done and what was found. Start with "Fact:" and preserve all numbers, variable names, and test results.
+	systemPrompt := `Create a one-sentence fact from analysis output. Include all numbers and variable names.
 
-Example:
-Code: from scipy import stats; stat, p = stats.shapiro(df['residuals']); print(f"W={stat:.4f}, p={p:.4f}")
-Output: W=0.9234, p=0.0156
-Fact: Shapiro-Wilk test on residuals yielded W=0.9234, p=0.0156, indicating violation of normality (p<0.05).
+Format: "Fact: [concise finding with numbers]"
 
-%s
+Good: "Fact: Shapiro-Wilk test on residuals showed W=0.923, p=0.016, violating normality."
+Good: "Fact: Dataset has 12 columns matching 'age'; Days_relative_to_drainage mean=-28.2, SD=25.1."
 
-Code:
-%s
+Extract the finding:`
+
+	userPrompt := fmt.Sprintf(`%s
 
 Output:
 %s
 
-Fact:`, metadataTags, code, finalResult)
+Fact:`, contextStr, resultPreview)
+
+	// Check token count BEFORE sending
+	fullPrompt := systemPrompt + "\n\n" + userPrompt
+	tokenCount, err := r.countTokensForEmbedding(ctx, fullPrompt)
+
+	// Leave 500 tokens for generation, so max input = 3500 tokens
+	const maxInputTokens = 3500
+
+	if err == nil && tokenCount > maxInputTokens {
+		r.logger.Warn("Prompt too large, truncating more aggressively",
+			zap.Int("tokens", tokenCount),
+			zap.Int("max", maxInputTokens))
+
+		// Calculate safe result length
+		overageTokens := tokenCount - maxInputTokens
+		overageChars := overageTokens * 4                        // rough estimate
+		safeResultLen := len(resultPreview) - overageChars - 100 // safety margin
+
+		if safeResultLen > 200 {
+			resultPreview = resultPreview[:safeResultLen] + "..."
+			userPrompt = fmt.Sprintf(`%sOutput:
+%s
+
+Fact:`, contextStr, resultPreview)
+		} else {
+			// Result is fundamentally too large, use fallback
+			return r.generateFallbackFact(metadata, result), nil
+		}
+	}
 
 	messages := []types.AgentMessage{
 		{Role: "system", Content: systemPrompt},
@@ -171,10 +154,73 @@ Fact:`, metadataTags, code, finalResult)
 	if err != nil {
 		return "", fmt.Errorf("llm chat call failed for summary: %w", err)
 	}
+
+	summary = strings.TrimSpace(summary)
 	if summary == "" {
-		return "", fmt.Errorf("llm returned an empty summary")
+		return "", fmt.Errorf("llm returned empty summary")
 	}
-	return strings.TrimSpace(summary), nil
+
+	// Validation for small models
+	if !strings.HasPrefix(summary, "Fact:") {
+		summary = "Fact: " + summary
+	}
+
+	// Detect and fix hallucinated repetition
+	if strings.Count(summary, "Fact:") > 1 {
+		r.logger.Warn("Multiple 'Fact:' prefixes detected, cleaning",
+			zap.String("original", summary))
+		parts := strings.Split(summary, "Fact:")
+		for _, part := range parts {
+			trimmed := strings.TrimSpace(part)
+			if trimmed != "" {
+				summary = "Fact: " + trimmed
+				break
+			}
+		}
+	}
+
+	// Length guard
+	if len(summary) > 500 {
+		r.logger.Warn("Fact too long, truncating",
+			zap.Int("length", len(summary)))
+		summary = summary[:497] + "..."
+	}
+
+	// Word count check (small models sometimes ramble)
+	words := strings.Fields(strings.TrimPrefix(summary, "Fact:"))
+	if len(words) > 60 {
+		r.logger.Warn("Fact exceeds word limit, truncating",
+			zap.Int("word_count", len(words)))
+		summary = "Fact: " + strings.Join(words[:60], " ") + "..."
+	}
+
+	return summary, nil
+}
+
+func (r *RAG) generateFallbackFact(metadata map[string]string, result string) string {
+	// Extract key numbers from result with regex
+	// Build template-based fact without LLM
+
+	fact := "Fact: "
+	if test := metadata["primary_test"]; test != "" {
+		fact += strings.Title(test) + " "
+	}
+
+	// Extract first number (often a test statistic)
+	if match := regexp.MustCompile(`[\d.]+`).FindString(result); match != "" {
+		fact += "result=" + match
+	}
+
+	// Extract p-value
+	if pval := metadata["p_value"]; pval != "" {
+		fact += ", p=" + pval
+	}
+
+	if fact == "Fact: " {
+		fact = "Fact: Analysis completed on " + metadata["dataset"]
+	}
+
+	return fact + "."
 }
 
 func (r *RAG) generateSearchableSummary(ctx context.Context, content string) (string, error) {
@@ -193,9 +239,23 @@ func (r *RAG) generateSearchableSummary(ctx context.Context, content string) (st
 		{Role: "user", Content: userPrompt},
 	}
 
-	summary, err := llmclient.New(r.cfg, r.logger).Chat(ctx, r.cfg.SummarizationLLMHost, messages)
+	start := time.Now()
+	client := llmclient.NewWithTimeout(r.cfg, r.logger, r.cfg.SummarizationTimeout)
+	summary, err := client.Chat(ctx, r.cfg.SummarizationLLMHost, messages)
+	elapsed := time.Since(start)
+
 	if err != nil {
+		r.logger.Error("LLM chat call failed for searchable summary",
+			zap.Error(err),
+			zap.Duration("elapsed", elapsed),
+			zap.Duration("timeout", r.cfg.SummarizationTimeout))
 		return "", fmt.Errorf("llm chat call failed for searchable summary: %w", err)
+	}
+
+	if elapsed > r.cfg.SummarizationTimeout/2 {
+		r.logger.Warn("Searchable summary generation took longer than expected",
+			zap.Duration("elapsed", elapsed),
+			zap.Duration("timeout", r.cfg.SummarizationTimeout))
 	}
 
 	if summary == "" {
@@ -203,4 +263,24 @@ func (r *RAG) generateSearchableSummary(ctx context.Context, content string) (st
 	}
 
 	return strings.TrimSpace(summary), nil
+}
+
+func truncateResult(result string, maxLen int) string {
+	// Handle errors specially
+	if strings.Contains(result, "Error:") {
+		return compressMiddle(result, maxLen, maxLen/3, maxLen/3)
+	}
+
+	// For normal results, take the first portion
+	if len(result) <= maxLen {
+		return result
+	}
+
+	// Try to break at a newline
+	truncated := result[:maxLen]
+	if lastNewline := strings.LastIndex(truncated, "\n"); lastNewline > maxLen/2 {
+		return result[:lastNewline] + "\n[...]"
+	}
+
+	return truncated + "..."
 }

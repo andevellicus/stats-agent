@@ -158,15 +158,18 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 
 		// Update history based on execution result
 		if execResult.WasCodeExecuted {
-			currentHistory = append(currentHistory,
-				types.AgentMessage{Role: "assistant", Content: llmResponse},
-				types.AgentMessage{Role: "tool", Content: execResult.Result})
+			assistantMsg := types.AgentMessage{Role: "assistant", Content: llmResponse}
+			toolMsg := types.AgentMessage{Role: "tool", Content: execResult.Result}
+			currentHistory = append(currentHistory, assistantMsg, toolMsg)
 
 			if execResult.HasError {
 				_ = stream.Status("Error - attempting to self-correct")
 				loop.RecordError()
 			} else {
 				loop.RecordSuccess()
+				if a.rag != nil {
+					go a.rag.ProcessRecentTurn(ctx, sessionID, assistantMsg, toolMsg)
+				}
 			}
 		} else {
 			// No code to execute - conversation complete

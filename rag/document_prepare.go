@@ -41,6 +41,7 @@ func (r *RAG) prepareDocumentForMessage(
 	var storedContent string
 	var contentToEmbed string
 	var summaryDoc *chromem.Document
+	var contentHash string
 
 	// Handle assistant+tool message pairs as "facts"
 	if message.Role == "assistant" && index+1 < len(messages) && messages[index+1].Role == "tool" {
@@ -53,10 +54,35 @@ func (r *RAG) prepareDocumentForMessage(
 
 		// Extract statistical metadata FIRST (before fact generation)
 		var statMeta map[string]string
+		var extractedCode string
 		if format.HasTag(message.Content, format.PythonTag) {
 			code, _ := format.ExtractTagContent(message.Content, format.PythonTag)
+			extractedCode = code
 			statMeta = ExtractStatisticalMetadata(code, toolContent)
 			r.ensureDatasetMetadata(sessionID, metadata, code, toolContent)
+		}
+
+		// Compute content hash on STABLE parts only (code + tool output)
+		// This prevents assistant message variations from creating false duplicates
+		if extractedCode != "" {
+			hashInput := canonicalizeFactText(extractedCode) + "\n###TOOL_OUTPUT###\n" + toolContent
+			contentHash = hashContent(normalizeForHash(hashInput))
+			metadata["content_hash"] = contentHash
+
+			// Check for duplicates BEFORE expensive LLM fact generation
+			if contentHash != "" {
+				existingDocID, err := r.store.FindRAGDocumentByHash(ctx, sessionID, "fact", contentHash)
+				if err != nil {
+					r.logger.Warn("Failed to check for existing RAG document during fact preparation",
+						zap.Error(err),
+						zap.String("session_id", sessionID))
+				} else if existingDocID != uuid.Nil {
+					r.logger.Debug("Skipping duplicate fact (early deduplication on code+tool)",
+						zap.String("existing_document_id", existingDocID.String()),
+						zap.String("session_id", sessionID))
+					return nil, true, nil
+				}
+			}
 		}
 
 		// Find preceding user message for context
@@ -91,8 +117,14 @@ func (r *RAG) prepareDocumentForMessage(
 		if len(matches) > 1 {
 			code := strings.TrimSpace(matches[1])
 			result := strings.TrimSpace(toolMessage.Content)
+
+			// Create context with timeout for fact summarization
+			timeoutCtx, cancel := context.WithTimeout(ctx, r.cfg.SummarizationTimeout)
+
 			// Pass statistical metadata to fact generator
-			summary, err := r.generateFactSummary(ctx, code, result, statMeta)
+			summary, err := r.generateFactSummary(timeoutCtx, result, statMeta)
+			cancel() // Clean up context
+
 			if err != nil {
 				r.logger.Warn("LLM fact summarization failed, using fallback summary",
 					zap.Error(err),
@@ -136,31 +168,38 @@ func (r *RAG) prepareDocumentForMessage(
 		storedContent = contentToEmbed
 	}
 
-	// Hash-based deduplication check
+	// Hash-based deduplication check (for non-fact messages only)
+	// Facts are deduplicated earlier based on code+tool hash
 	role := metadata["role"]
-	normalizedContent := normalizeForHash(storedContent)
-	contentHash := hashContent(normalizedContent)
-	if contentHash != "" {
-		metadata["content_hash"] = contentHash
-		existingDocID, err := r.store.FindRAGDocumentByHash(ctx, sessionID, role, contentHash)
-		if err != nil {
-			r.logger.Warn("Failed to check for existing RAG document",
-				zap.Error(err),
-				zap.String("session_id", sessionID))
-			return nil, true, nil
-		}
-		if existingDocID != uuid.Nil {
-			r.logger.Debug("Skipping duplicate RAG document",
-				zap.String("existing_document_id", existingDocID.String()),
-				zap.String("session_id", sessionID),
-				zap.String("role", role))
-			return nil, true, nil
+	if role != "fact" {
+		normalizedContent := normalizeForHash(storedContent)
+		contentHash := hashContent(normalizedContent)
+		if contentHash != "" {
+			metadata["content_hash"] = contentHash
+			existingDocID, err := r.store.FindRAGDocumentByHash(ctx, sessionID, role, contentHash)
+			if err != nil {
+				r.logger.Warn("Failed to check for existing RAG document",
+					zap.Error(err),
+					zap.String("session_id", sessionID))
+				return nil, true, nil
+			}
+			if existingDocID != uuid.Nil {
+				r.logger.Debug("Skipping duplicate RAG document",
+					zap.String("existing_document_id", existingDocID.String()),
+					zap.String("session_id", sessionID),
+					zap.String("role", role))
+				return nil, true, nil
+			}
 		}
 	}
 
 	// Generate searchable summary for long messages (non-facts)
 	if role != "fact" && len(message.Content) > 500 {
-		summary, err := r.generateSearchableSummary(ctx, message.Content)
+		// Create context with timeout for searchable summary
+		timeoutCtx, cancel := context.WithTimeout(ctx, r.cfg.SummarizationTimeout)
+		summary, err := r.generateSearchableSummary(timeoutCtx, message.Content)
+		cancel() // Clean up context
+
 		if err != nil {
 			r.logger.Warn("Failed to create searchable summary for long message, will use full content",
 				zap.Error(err),
