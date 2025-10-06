@@ -236,6 +236,9 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		if cand.Content != "" && strings.Contains(cand.Content, "Error:") && !isQueryForError {
 			combined *= r.cfg.HybridErrorPenalty
 		}
+		if role == "assistant" && cand.Content != "" && strings.Contains(strings.ToLower(cand.Content), "analysis complete") {
+			combined *= r.cfg.HybridCompletionBoost
+		}
 
 		if len(metadataHints) > 0 && cand.Metadata != nil {
 			metadataBoost := 0.0

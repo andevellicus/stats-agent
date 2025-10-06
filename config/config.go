@@ -28,6 +28,7 @@ const (
 	defaultHybridFactBoost                  = 1.3
 	defaultHybridSummaryBoost               = 1.2
 	defaultHybridErrorPenalty               = 0.8
+	defaultHybridCompletionBoost            = 1.4
 	defaultPDFTokenThreshold                = 0.75
 	defaultPDFFirstPagesPriority            = 3
 	defaultPDFEnableTableDetection          = true
@@ -80,6 +81,7 @@ type Config struct {
 	HybridFactBoost                  float64       `mapstructure:"HYBRID_FACT_BOOST"`
 	HybridSummaryBoost               float64       `mapstructure:"HYBRID_SUMMARY_BOOST"`
 	HybridErrorPenalty               float64       `mapstructure:"HYBRID_ERROR_PENALTY"`
+	HybridCompletionBoost            float64       `mapstructure:"HYBRID_COMPLETION_BOOST"`
 	PDFTokenThreshold                float64       `mapstructure:"PDF_TOKEN_THRESHOLD"`
 	PDFFirstPagesPriority            int           `mapstructure:"PDF_FIRST_PAGES_PRIORITY"`
 	PDFEnableTableDetection          bool          `mapstructure:"PDF_ENABLE_TABLE_DETECTION"`
@@ -138,6 +140,7 @@ func Load(logger *zap.Logger) *Config {
 	viper.SetDefault("HYBRID_FACT_BOOST", defaultHybridFactBoost)
 	viper.SetDefault("HYBRID_SUMMARY_BOOST", defaultHybridSummaryBoost)
 	viper.SetDefault("HYBRID_ERROR_PENALTY", defaultHybridErrorPenalty)
+	viper.SetDefault("HYBRID_COMPLETION_BOOST", defaultHybridCompletionBoost)
 	viper.SetDefault("PDF_TOKEN_THRESHOLD", defaultPDFTokenThreshold)
 	viper.SetDefault("PDF_FIRST_PAGES_PRIORITY", defaultPDFFirstPagesPriority)
 	viper.SetDefault("PDF_ENABLE_TABLE_DETECTION", defaultPDFEnableTableDetection)

@@ -267,53 +267,45 @@ func createLlamaCppEmbedding(cfg *config.Config, logger *zap.Logger) chromem.Emb
 	}
 }
 
-// ProcessRecentTurn proactively generates and stores facts for a recent assistant+tool message pair.
-// This runs asynchronously and fires-and-forgets - errors are logged but don't affect agent execution.
-// Deduplication via content hash prevents duplicate processing if memory management later archives the same pair.
-func (r *RAG) ProcessRecentTurn(ctx context.Context, sessionID string, assistantMsg, toolMsg types.AgentMessage) {
+// ProcessTurn proactively generates and stores facts/documents for a turn.
+// It can handle single messages (user, final assistant) or pairs (assistant+tool).
+// This runs asynchronously and fires-and-forgets; errors are logged but don't affect agent execution.
+func (r *RAG) ProcessTurn(ctx context.Context, sessionID string, messages ...types.AgentMessage) {
 	// Safety: Only process if feature is enabled
 	if !r.cfg.RAGProactiveProcessing {
 		return
 	}
-
-	// Safety: Only process assistant+tool pairs
-	if assistantMsg.Role != "assistant" || toolMsg.Role != "tool" {
-		r.logger.Warn("ProcessRecentTurn called with invalid message roles",
-			zap.String("assistant_role", assistantMsg.Role),
-			zap.String("tool_role", toolMsg.Role))
+	if len(messages) == 0 {
 		return
 	}
 
 	// Use background context to avoid cancellation when HTTP request ends
-	// Timeout ensures we don't leak goroutines
 	bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	collection := r.db.GetCollection("long-term-memory", r.embedder)
 	if collection == nil {
-		r.logger.Error("ProcessRecentTurn: long-term memory collection not found")
+		r.logger.Error("ProcessTurn: long-term memory collection not found")
 		return
 	}
 
-	// Build message pair for processing
-	messages := []types.AgentMessage{assistantMsg, toolMsg}
-	processedIndices := make(map[int]bool)
-
+	processedindices := make(map[int]bool)
 	var sessionFilter map[string]string
 	if sessionID != "" {
 		sessionFilter = map[string]string{"session_id": sessionID}
 	}
 
-	// Prepare the document (this handles fact generation, deduplication, etc.)
-	docData, skip, err := r.prepareDocumentForMessage(bgCtx, sessionID, messages, 0, collection, sessionFilter, processedIndices)
+	// Prepare the document(s) from the message(s)
+	// The underlying prepareDocumentForMessage handles both single messages and pairs
+	docData, skip, err := r.prepareDocumentForMessage(bgCtx, sessionID, messages, 0, collection, sessionFilter, processedindices)
 	if err != nil {
-		r.logger.Warn("ProcessRecentTurn: failed to prepare document",
+		r.logger.Warn("ProcessTurn: failed to prepare document",
 			zap.Error(err),
 			zap.String("session_id", sessionID))
 		return
 	}
 	if skip || docData == nil {
-		r.logger.Debug("ProcessRecentTurn: document skipped (likely duplicate)",
+		r.logger.Debug("ProcessTurn: document skipped (likely duplicate)",
 			zap.String("session_id", sessionID))
 		return
 	}
@@ -325,7 +317,7 @@ func (r *RAG) ProcessRecentTurn(ctx context.Context, sessionID string, assistant
 	if len(dbDocs) > 0 {
 		for _, doc := range dbDocs {
 			if err := r.store.UpsertRAGDocument(bgCtx, doc.DocumentID, doc.Content, doc.EmbeddingContent, doc.Metadata, doc.ContentHash, doc.Embedding); err != nil {
-				r.logger.Warn("ProcessRecentTurn: failed to persist document to database",
+				r.logger.Warn("ProcessTurn: failed to persist document to database",
 					zap.Error(err),
 					zap.String("session_id", sessionID),
 					zap.String("document_id", doc.DocumentID.String()))
@@ -336,14 +328,15 @@ func (r *RAG) ProcessRecentTurn(ctx context.Context, sessionID string, assistant
 	// Add to vector store
 	if len(chromemDocs) > 0 {
 		if err := collection.AddDocuments(bgCtx, chromemDocs, 1); err != nil {
-			r.logger.Warn("ProcessRecentTurn: failed to add documents to vector store",
+			r.logger.Warn("ProcessTurn: failed to add documents to vector store",
 				zap.Error(err),
 				zap.String("session_id", sessionID))
 			return
 		}
 	}
 
-	r.logger.Info("Proactively processed recent turn into RAG",
+	r.logger.Info("Processed turn into RAG",
 		zap.String("session_id", sessionID),
+		zap.Int("messages_in_turn", len(messages)),
 		zap.Int("documents_added", len(chromemDocs)))
 }

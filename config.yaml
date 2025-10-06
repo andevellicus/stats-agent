@@ -22,9 +22,9 @@ EMBEDDING_LLM_HOST: "http://localhost:8081"
 SUMMARIZATION_LLM_HOST: "http://localhost:8082"
 MAX_TURNS: 30
 RAG_RESULTS: 3
-CONTEXT_LENGTH: 16384
+CONTEXT_LENGTH: 32768
 #CONTEXT_LENGTH: 2048
-CONTEXT_SOFT_LIMIT_RATIO: 0.5
+CONTEXT_SOFT_LIMIT_RATIO: 0.75
 CONSECUTIVE_ERRORS: 5
 LLM_REQUEST_TIMEOUT: 300           # Timeout for main LLM requests (seconds)
 SUMMARIZATION_TIMEOUT: 60          # Timeout for summarization LLM requests (seconds)
@@ -57,13 +57,14 @@ RAG_CONTEXT_MAX_CHARS: 12000           # Hard cap on characters included in asse
 HYBRID_FACT_BOOST: 1.3                 # Multiplier applied to fact documents
 HYBRID_SUMMARY_BOOST: 1.2              # Multiplier applied to summary documents
 HYBRID_ERROR_PENALTY: 0.8              # Multiplier applied when content contains error text
+HYBRID_COMPLETION_BOOST: 1.4           # Multiplier applied to "Analysis Complete" messages
 SEMANTIC_SIMILARITY_THRESHOLD: 0.7  # Minimum cosine similarity for vector hits
 BM25_SCORE_THRESHOLD: 0.10           # Minimum BM25+bonus score for text hits
 ENABLE_METADATA_FALLBACK: true      # Enable metadata-based fallback search when hybrid results are empty
 METADATA_FALLBACK_MAX_FILTERS: 3     # Limit number of auto-derived metadata filters
 
 # --- PDF Processing Configuration ---
-PDF_TOKEN_THRESHOLD: 0.5                  # Use same as context window for PDF content
+PDF_TOKEN_THRESHOLD: 0.75                  # Use same as context window for PDF content
 PDF_FIRST_PAGES_PRIORITY: 3               # Keep first N pages if possible
 PDF_ENABLE_TABLE_DETECTION: true          # Detect and mark tables in extracted text
 PDF_SENTENCE_BOUNDARY_TRUNCATE: true      # Truncate at sentence boundaries for better context

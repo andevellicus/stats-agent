@@ -193,21 +193,23 @@ func (r *RAG) prepareDocumentForMessage(
 		}
 	}
 
-	// Generate searchable summary for long messages (non-facts)
-	if role != "fact" && len(message.Content) > 500 {
-		// Create context with timeout for searchable summary
-		timeoutCtx, cancel := context.WithTimeout(ctx, r.cfg.SummarizationTimeout)
-		summary, err := r.generateSearchableSummary(timeoutCtx, message.Content)
-		cancel() // Clean up context
+	/*
+		// Generate searchable summary for long messages (non-facts)
+		if role != "fact" && len(message.Content) > 500 {
+			// Create context with timeout for searchable summary
+			timeoutCtx, cancel := context.WithTimeout(ctx, r.cfg.SummarizationTimeout)
+			summary, err := r.generateSearchableSummary(timeoutCtx, message.Content)
+			cancel() // Clean up context
 
-		if err != nil {
-			r.logger.Warn("Failed to create searchable summary for long message, will use full content",
-				zap.Error(err),
-				zap.Int("content_length", len(message.Content)))
-		} else {
-			summaryDoc = r.buildSummaryDocument(summary, metadata, sessionID, message.Role)
+			if err != nil {
+				r.logger.Warn("Failed to create searchable summary for long message, will use full content",
+					zap.Error(err),
+					zap.Int("content_length", len(message.Content)))
+			} else {
+				summaryDoc = r.buildSummaryDocument(summary, metadata, sessionID, message.Role)
+			}
 		}
-	}
+	*/
 
 	// Final metadata enrichment
 	r.ensureDatasetMetadata(sessionID, metadata, message.Content, storedContent, contentToEmbed)
@@ -220,30 +222,6 @@ func (r *RAG) prepareDocumentForMessage(
 		ContentHash:   contentHash,
 		SummaryDoc:    summaryDoc,
 	}, false, nil
-}
-
-// buildSummaryDocument creates a summary document for long messages to improve search.
-func (r *RAG) buildSummaryDocument(summary string, parentMetadata map[string]string, sessionID, messageRole string) *chromem.Document {
-	summaryID := uuid.New()
-	metadata := map[string]string{
-		"role":                 messageRole,
-		"document_id":          summaryID.String(),
-		"type":                 "summary",
-		"parent_document_id":   parentMetadata["document_id"],
-		"parent_document_role": parentMetadata["role"],
-	}
-	if sessionID != "" {
-		metadata["session_id"] = sessionID
-	}
-	if dataset := parentMetadata["dataset"]; dataset != "" {
-		metadata["dataset"] = dataset
-	}
-
-	return &chromem.Document{
-		ID:       uuid.New().String(),
-		Content:  summary,
-		Metadata: metadata,
-	}
 }
 
 // ensureDatasetMetadata extracts and ensures dataset metadata is present.

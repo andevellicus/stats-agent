@@ -75,8 +75,14 @@ func (a *Agent) GetMemoryManager() *MemoryManager {
 // Run executes the agent's conversation loop with the given user input.
 // It orchestrates memory management, LLM interaction, and Python code execution.
 func (a *Agent) Run(ctx context.Context, input string, sessionID string, history []types.AgentMessage, stream *Stream) {
-	// 1. Setup: Add user message and retrieve long-term context
-	currentHistory := append(history, types.AgentMessage{Role: "user", Content: input})
+	// 1. Setup: Add user message, process it for RAG, and retrieve long-term context
+	userMessage := types.AgentMessage{Role: "user", Content: input}
+	currentHistory := append(history, userMessage)
+
+	// Proactively process the user message for RAG
+	if a.rag != nil {
+		go a.rag.ProcessTurn(ctx, sessionID, userMessage)
+	}
 
 	// Query RAG for long-term context - non-critical, log warning if fails
 	longTermContext, err := a.rag.Query(ctx, sessionID, input, a.cfg.RAGResults)
@@ -91,7 +97,7 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 		contextTokens, err := a.memoryManager.CountTokens(ctx, longTermContext)
 		softLimitTokens := a.cfg.ContextSoftLimitTokens()
 		if err == nil && contextTokens > softLimitTokens {
-			a.logger.Info("Proactive check: RAG context is too large, summarizing", zap.Int("context_tokens", contextTokens))
+			a.logger.Info("RAG context is too large, summarizing", zap.Int("context_tokens", contextTokens))
 			_ = stream.Status("Compressing memory....")
 			summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(ctx, longTermContext, input)
 			if summaryErr == nil {
@@ -166,14 +172,19 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 				_ = stream.Status("Error - attempting to self-correct")
 				loop.RecordError()
 			} else {
-				loop.RecordSuccess()
 				if a.rag != nil {
-					go a.rag.ProcessRecentTurn(ctx, sessionID, assistantMsg, toolMsg)
+					go a.rag.ProcessTurn(ctx, sessionID, assistantMsg, toolMsg)
 				}
 			}
 		} else {
 			// No code to execute - conversation complete
-			currentHistory = append(currentHistory, types.AgentMessage{Role: "assistant", Content: llmResponse})
+			finalAssistantMsg := types.AgentMessage{Role: "assistant", Content: llmResponse}
+			currentHistory = append(currentHistory, finalAssistantMsg)
+
+			// Proactively process the final assistant message for RAG
+			if a.rag != nil {
+				go a.rag.ProcessTurn(ctx, sessionID, finalAssistantMsg)
+			}
 			return
 		}
 	}

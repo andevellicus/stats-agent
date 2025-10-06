@@ -26,15 +26,15 @@ import (
 )
 
 type ChatHandler struct {
-	chatService           *services.ChatService
-	streamService         *services.StreamService
-	pdfService            *services.PDFService
-	uploadService         *services.UploadService
+	chatService            *services.ChatService
+	streamService          *services.StreamService
+	pdfService             *services.PDFService
+	uploadService          *services.UploadService
 	messageGroupingService *services.MessageGroupingService
-	agent                 AgentInterface
-	cfg                   *config.Config
-	logger                *zap.Logger
-	store                 *database.PostgresStore
+	agent                  AgentInterface
+	cfg                    *config.Config
+	logger                 *zap.Logger
+	store                  *database.PostgresStore
 }
 
 // AgentInterface defines the subset of agent methods we need
@@ -480,6 +480,15 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 	h.chatService.StreamAgentResponse(ctx, c.Writer, userMessage.Content, userMessageID, sessionID.String(), agentHistory)
 }
 
-// All helper functions have been moved to appropriate service layers:
-// - groupMessages, toAgentMessages -> services.MessageGroupingService
-// - sanitizeFilename, verifyFileExists, generateMessageID -> utils package
+func (h *ChatHandler) StopGeneration(c *gin.Context) {
+	sessionID := c.Param("sessionID")
+	if _, err := uuid.Parse(sessionID); err != nil {
+		respondWithClientError(c, http.StatusBadRequest, "Invalid session ID.")
+		return
+	}
+
+	h.logger.Info("Received request to stop generation for session", zap.String("session_id", sessionID))
+	h.chatService.StopSessionRun(sessionID)
+
+	c.Status(http.StatusNoContent)
+}

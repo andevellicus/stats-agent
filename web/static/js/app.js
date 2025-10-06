@@ -148,8 +148,32 @@ function setupFormListener() {
     submitButton.addEventListener('click', (event) => {
         if (activeEventSource) {
             event.preventDefault();
-            activeEventSource.close();
-            console.log("SSE connection closed by user.");
+            const form = document.getElementById('chat-form');
+            const sessionID = form.querySelector('input[name="session_id"]').value;
+            if (sessionID) {
+                // Disable button to prevent multiple clicks
+                submitButton.disabled = true;
+                stopIcon.innerHTML = `<svg class="w-6 h-6 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v2m0 12v2m8-8h-2M4 12H2m15.364 6.364l-1.414-1.414M6.05 6.05l1.414 1.414m12.728 0l-1.414 1.414M6.05 17.95l1.414-1.414"></path></svg>`;
+
+                fetch(`/chat/${sessionID}/stop`, {
+                    method: 'POST',
+                }).then(response => {
+                    if (!response.ok) {
+                        console.error("Failed to stop generation on server.");
+                    }
+                    console.log("Stop request sent to server.");
+                    // The SSE onerror event will handle UI cleanup
+                }).catch(error => {
+                    console.error("Error sending stop request:", error);
+                }).finally(() => {
+                    // Re-enable button and restore icon after a delay,
+                    // letting the onerror handler do its job.
+                    setTimeout(() => {
+                        submitButton.disabled = false;
+                        stopIcon.innerHTML = `<svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M6 6h12v12H6z"></path></svg>`;
+                    }, 500);
+                });
+            }
         }
     });
 
