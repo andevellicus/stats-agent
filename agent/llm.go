@@ -26,6 +26,12 @@ After receiving a tool message (role: "tool"), your response must follow this se
 2.  Next, in 1-2 sentences, state your plan for the single next step.
 3.  Finally, provide a short <python></python> block to execute that plan (≤15 lines, one logical step).
 
+## CODE BLOCK SIZE LIMIT - STRICTLY ENFORCED
+- Maximum 15 lines per <python></python> block
+- ONE atomic operation per block (e.g., load data OR check nulls OR run one test)
+- If you find yourself writing more, you're doing too much in one step
+- STOP and break it into smaller steps
+
 **Do not explicitly write "Observe:", "Plan:", or "Act:" in your response, try to keep the language natural.**
 
 **Critical enforcement**:

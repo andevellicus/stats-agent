@@ -37,6 +37,7 @@ const (
 // Config holds the application's configuration
 type Config struct {
 	WebPort                          int           `mapstructure:"WEB_PORT"`
+	DatabaseURL                      string        `mapstructure:"DATABASE_URL"`
 	PythonExecutorAddress            string        `mapstructure:"PYTHON_EXECUTOR_ADDRESS"`
 	PythonExecutorAddresses          []string      `mapstructure:"PYTHON_EXECUTOR_ADDRESSES"`
 	PythonExecutorPool               []string      `mapstructure:"PYTHON_EXECUTOR_POOL"`
@@ -94,6 +95,7 @@ func Load(logger *zap.Logger) *Config {
 
 	// Set default values
 	viper.SetDefault("WEB_PORT", 8080)
+	viper.SetDefault("DATABASE_URL", "postgres://postgres:changeme@localhost:5432/stats_agent?sslmode=disable")
 	viper.SetDefault("PYTHON_EXECUTOR_ADDRESSES", []string{})
 	viper.SetDefault("PYTHON_EXECUTOR_POOL", []string{})
 	viper.SetDefault("MAIN_LLM_HOST", "http://localhost:8080")
@@ -267,6 +269,14 @@ func Load(logger *zap.Logger) *Config {
 				zap.Int("default", 8080))
 		}
 		config.WebPort = 8080
+	}
+	if config.DatabaseURL == "" {
+		if logger != nil {
+			logger.Fatal("DATABASE_URL is required")
+		} else {
+			fmt.Fprintf(os.Stderr, "FATAL: DATABASE_URL is required\n")
+			os.Exit(1)
+		}
 	}
 
 	return &config

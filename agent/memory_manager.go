@@ -186,11 +186,13 @@ func (m *MemoryManager) ManageHistory(ctx context.Context, sessionID string, his
 	messagesToStore := (*history)[:cutoff]
 
 	// Async archive - fire and forget
-	go func(sessionID string, messages []types.AgentMessage) {
+	// Preserve trace IDs from parent context without inheriting cancellation
+	baseCtx := context.WithoutCancel(ctx)
+	go func(baseCtx context.Context, sessionID string, messages []types.AgentMessage) {
 		const maxAttempts = 3
 		for attempt := 0; attempt < maxAttempts; attempt++ {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			err := m.rag.AddMessagesToStore(ctx, sessionID, messages)
+			archiveCtx, cancel := context.WithTimeout(baseCtx, 2*time.Minute)
+			err := m.rag.AddMessagesToStore(archiveCtx, sessionID, messages)
 			cancel()
 
 			if err == nil {
@@ -209,7 +211,7 @@ func (m *MemoryManager) ManageHistory(ctx context.Context, sessionID string, his
 				zap.String("session_id", sessionID),
 				zap.Int("messages_count", len(messages)))
 		}
-	}(sessionID, messagesToStore)
+	}(baseCtx, sessionID, messagesToStore)
 
 	// Remove archived messages from history immediately
 	*history = (*history)[cutoff:]

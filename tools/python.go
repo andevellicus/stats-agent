@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"stats-agent/config"
+	"stats-agent/web/format"
 
 	"go.uber.org/zap"
 )
@@ -510,8 +511,8 @@ func (t *StatefulPythonTool) CleanupSession(sessionID string) {
 
 // ExecutePythonCode now requires a sessionID to be passed.
 func (t *StatefulPythonTool) ExecutePythonCode(ctx context.Context, text string, sessionID string, output io.Writer) (string, string, bool) {
-	startTag := "<python>"
-	endTag := "</python>"
+	startTag := format.PythonTag.OpenTag
+	endTag := format.PythonTag.CloseTag
 
 	startIdx := strings.Index(text, startTag)
 	if startIdx == -1 {

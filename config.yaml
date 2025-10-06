@@ -1,5 +1,8 @@
 # --- Web Server Configuration ---
-WEB_PORT: 8080  # Port for web server (default: 8080)
+WEB_PORT: 5000  # Port for web server (default: 8080)
+
+# --- Database Configuration ---
+DATABASE_URL: "postgres://postgres:changeme@localhost:5432/stats_agent?sslmode=disable"
 
 # --- Python Executor Configuration ---
 PYTHON_EXECUTOR_ADDRESSES:
@@ -21,7 +24,7 @@ MAX_TURNS: 30
 RAG_RESULTS: 3
 CONTEXT_LENGTH: 16384
 #CONTEXT_LENGTH: 2048
-CONTEXT_SOFT_LIMIT_RATIO: 0.75
+CONTEXT_SOFT_LIMIT_RATIO: 0.5
 CONSECUTIVE_ERRORS: 5
 LLM_REQUEST_TIMEOUT: 300
 

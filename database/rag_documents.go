@@ -262,6 +262,99 @@ func (s *PostgresStore) SearchRAGDocumentsBM25(ctx context.Context, query string
 	return results, nil
 }
 
+// BatchUpsertRAGDocuments efficiently inserts multiple RAG documents in a single transaction.
+// This is significantly faster than individual UpsertRAGDocument calls when persisting many documents.
+func (s *PostgresStore) BatchUpsertRAGDocuments(ctx context.Context, docs []struct {
+	DocumentID       uuid.UUID
+	Content          string
+	EmbeddingContent string
+	Metadata         map[string]string
+	ContentHash      string
+	Embedding        []float32
+}) error {
+	if len(docs) == 0 {
+		return nil
+	}
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction for batch upsert: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Prepare arrays for UNNEST-based batch insert
+	ids := make([]uuid.UUID, len(docs))
+	documentIDs := make([]uuid.UUID, len(docs))
+	contents := make([]string, len(docs))
+	embeddingContents := make([]sql.NullString, len(docs))
+	metadatas := make([]string, len(docs))
+	contentHashes := make([]sql.NullString, len(docs))
+	embeddings := make([]interface{}, len(docs))
+
+	for i, doc := range docs {
+		ids[i] = uuid.New()
+		documentIDs[i] = doc.DocumentID
+		contents[i] = doc.Content
+
+		if doc.EmbeddingContent != "" {
+			embeddingContents[i] = sql.NullString{String: doc.EmbeddingContent, Valid: true}
+		}
+
+		metaJSON, err := json.Marshal(doc.Metadata)
+		if err != nil {
+			return fmt.Errorf("failed to marshal metadata for document %s: %w", doc.DocumentID, err)
+		}
+		metadatas[i] = string(metaJSON)
+
+		if doc.ContentHash != "" {
+			contentHashes[i] = sql.NullString{String: doc.ContentHash, Valid: true}
+		}
+
+		if len(doc.Embedding) > 0 {
+			embeddings[i] = pq.Float32Array(doc.Embedding)
+		} else {
+			embeddings[i] = nil
+		}
+	}
+
+	// Build multi-row VALUES clause
+	var valueClauses []string
+	var allArgs []interface{}
+	argIndex := 1
+
+	for i := range docs {
+		valueClauses = append(valueClauses, fmt.Sprintf(
+			"($%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
+			argIndex, argIndex+1, argIndex+2, argIndex+3, argIndex+4, argIndex+5, argIndex+6,
+		))
+		allArgs = append(allArgs, ids[i], documentIDs[i], contents[i], embeddingContents[i], metadatas[i], contentHashes[i], embeddings[i])
+		argIndex += 7
+	}
+
+	query := `
+		INSERT INTO rag_documents (id, document_id, content, embedding_content, metadata, content_hash, embedding, created_at)
+		VALUES ` + strings.Join(valueClauses, ", ") + `
+		ON CONFLICT (document_id)
+		DO UPDATE SET
+			content = EXCLUDED.content,
+			embedding_content = EXCLUDED.embedding_content,
+			metadata = EXCLUDED.metadata,
+			content_hash = EXCLUDED.content_hash,
+			embedding = EXCLUDED.embedding,
+			created_at = NOW()
+	`
+
+	if _, err := tx.ExecContext(ctx, query, allArgs...); err != nil {
+		return fmt.Errorf("failed to batch upsert rag documents: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit batch upsert transaction: %w", err)
+	}
+
+	return nil
+}
+
 // DeleteRAGDocumentsBySession removes all RAG documents associated with the provided session.
 func (s *PostgresStore) DeleteRAGDocumentsBySession(ctx context.Context, sessionID uuid.UUID) (int64, error) {
 	const query = `DELETE FROM rag_documents WHERE metadata ->> 'session_id' = $1`

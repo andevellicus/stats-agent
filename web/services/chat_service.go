@@ -102,15 +102,9 @@ func (cs *ChatService) StopSessionRun(sessionID string) {
 func (cs *ChatService) InitializeSession(ctx context.Context, sessionID string) error {
 	cs.logger.Info("Initializing new session", zap.String("session_id", sessionID))
 
-	select {
-	case <-ctx.Done():
-		cs.logger.Debug("Request context cancelled during initialization; continuing in background",
-			zap.Error(ctx.Err()),
-			zap.String("session_id", sessionID))
-	default:
-	}
-
-	initCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	// Preserve trace IDs from request context without inheriting cancellation
+	baseCtx := context.WithoutCancel(ctx)
+	initCtx, cancel := context.WithTimeout(baseCtx, 2*time.Minute)
 	defer cancel()
 
 	workspaceDir := filepath.Join("workspaces", sessionID)
@@ -195,7 +189,14 @@ func (cs *ChatService) StreamAgentResponse(
 ) {
 	agentMessageID := uuid.New().String()
 	var writeMu sync.Mutex
-	runCtx, cancelRun := context.WithCancel(context.Background())
+
+	// Preserve trace IDs and values from request context without inheriting cancellation
+	baseCtx := context.WithoutCancel(ctx)
+	// Add timeout for agent work (10 minutes)
+	agentCtx, cancelTimeout := context.WithTimeout(baseCtx, 10*time.Minute)
+	defer cancelTimeout()
+	// Allow manual cancellation via run tracking
+	runCtx, cancelRun := context.WithCancel(agentCtx)
 	token := cs.registerRun(sessionID, cancelRun)
 	defer func() {
 		cancelRun()
@@ -244,7 +245,8 @@ func (cs *ChatService) StreamAgentResponse(
 			return
 		}
 
-		ctxPersist, cancelPersist := context.WithTimeout(context.Background(), 30*time.Second)
+		// Use parent's base context (already without cancellation)
+		ctxPersist, cancelPersist := context.WithTimeout(baseCtx, 30*time.Second)
 		defer cancelPersist()
 
 		var toolPtr *string
@@ -294,8 +296,8 @@ func (cs *ChatService) StreamAgentResponse(
 
 	agentStream.Finalize()
 
-	// Use background context for DB operations after request context might be cancelled
-	backgroundCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Use base context (already created without cancellation) for DB operations
+	backgroundCtx, cancel := context.WithTimeout(baseCtx, 30*time.Second)
 	defer cancel()
 
 	// Discover and mark new files - non-critical, continue if fails

@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
+	"stats-agent/utils"
 	"stats-agent/web/types"
 
 	"github.com/google/uuid"
@@ -517,17 +517,9 @@ func (s *PostgresStore) migrateRenderedFilesToFilesTable(ctx context.Context) er
 				continue
 			}
 
-			// Determine file type from extension
-			ext := strings.ToLower(filepath.Ext(filename))
-			fileType := "other"
-			switch ext {
-			case ".png", ".jpg", ".jpeg", ".gif":
-				fileType = "image"
-			case ".csv", ".xls", ".xlsx":
-				fileType = "csv"
-			case ".pdf":
-				fileType = "pdf"
-			}
+			// Determine file type from extension using utils
+			info := utils.GetFileInfo(filename)
+			fileType := string(info.Type)
 
 			// Build web path
 			sessionIDStr := sessionID.String()

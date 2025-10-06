@@ -1,14 +1,13 @@
 package components
 
-import "path/filepath"
-import "strings"
+import "stats-agent/utils"
 
 // FileOOBWrapper is used for HTMX Out-of-Band swaps to populate the file container.
 templ FileOOBWrapper(containerID string, filePaths []string) {
 	<div id={ containerID } hx-swap-oob="true">
 		for _, path := range filePaths {
-			if isRenderable(path) {
-				if isImage(path) {
+			if info := utils.GetFileInfo(path); info.IsRenderable {
+				if info.IsImage {
 					@ImageBlock(path)
 				} else {
 					@FileBlock(path)
@@ -16,26 +15,4 @@ templ FileOOBWrapper(containerID string, filePaths []string) {
 			}
 		}
 	</div>
-}
-
-// isImage is a helper function to determine if a file is an image based on extension.
-func isImage(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".png", ".jpg", ".jpeg", ".gif":
-		return true
-	default:
-		return false
-	}
-}
-
-// isRenderable determines if a file should be displayed in the chat.
-func isRenderable(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".png", ".jpg", ".jpeg", ".gif", ".csv", ".xls", ".xlsx", ".pdf":
-		return true
-	default:
-		return false
-	}
 }

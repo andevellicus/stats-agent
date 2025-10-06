@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"stats-agent/database"
+	"stats-agent/utils"
 	"stats-agent/web/templates/components"
 	"strings"
 	"time"
@@ -69,17 +70,9 @@ func (fs *FileService) GetAndMarkNewFiles(ctx context.Context, sessionID string)
 				continue
 			}
 
-			// Determine file type
-			ext := strings.ToLower(filepath.Ext(fileName))
-			fileType := "other"
-			switch ext {
-			case ".png", ".jpg", ".jpeg", ".gif":
-				fileType = "image"
-			case ".csv", ".xls", ".xlsx":
-				fileType = "csv"
-			case ".pdf":
-				fileType = "pdf"
-			}
+			// Determine file type using utils
+			info := utils.GetFileInfo(fileName)
+			fileType := string(info.Type)
 
 			// Create file record in database
 			webPath := filepath.ToSlash(filepath.Join("/workspaces", sessionID, fileName))
@@ -117,13 +110,13 @@ func (fs *FileService) RenderFileBlocksForDB(ctx context.Context, filePaths []st
 	for _, path := range filePaths {
 		var buf bytes.Buffer
 		var component templ.Component
-		ext := strings.ToLower(filepath.Ext(path))
-		switch ext {
-		case ".png", ".jpg", ".jpeg", ".gif":
+
+		info := utils.GetFileInfo(path)
+		if info.IsImage {
 			component = components.ImageBlock(path)
-		case ".csv", ".xls", ".xlsx", ".pdf":
+		} else if info.IsRenderable && !info.IsImage {
 			component = components.FileBlock(path)
-		default:
+		} else {
 			component = nil // Ignore other file types
 		}
 

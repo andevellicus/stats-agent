@@ -28,8 +28,7 @@ func main() {
 	defer config.Cleanup()
 	cfg := config.Load(logger)
 
-	connStr := "postgres://postgres:changeme@localhost:5432/stats_agent?sslmode=disable"
-	store, err := database.NewPostgresStore(connStr)
+	store, err := database.NewPostgresStore(cfg.DatabaseURL)
 	if err != nil {
 		logger.Fatal("Failed to connect to database", zap.Error(err))
 	}
