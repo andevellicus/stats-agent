@@ -211,6 +211,19 @@ func (p *executorPool) Addresses() []string {
 	return addrs
 }
 
+// IsHealthy checks if an executor address is currently healthy (not in cooldown).
+func (p *executorPool) IsHealthy(address string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	for _, node := range p.nodes {
+		if node.address == address {
+			return now.After(node.retryAfter) || node.retryAfter.IsZero()
+		}
+	}
+	return false
+}
+
 type StatefulPythonTool struct {
 	pool                      *executorPool
 	logger                    *zap.Logger
@@ -507,6 +520,41 @@ func (t *StatefulPythonTool) CleanupSession(sessionID string) {
 	if t.logger != nil {
 		t.logger.Info("Python session cleaned up", zap.String("session_id", sessionID))
 	}
+}
+
+// GetSessionBinding returns the executor address bound to this session, if any.
+func (t *StatefulPythonTool) GetSessionBinding(sessionID string) (string, bool) {
+	t.sessionMu.RLock()
+	defer t.sessionMu.RUnlock()
+	addr, exists := t.sessionAddr[sessionID]
+	return addr, exists
+}
+
+// NeedsReinitialization checks if a session requires reinitialization.
+// Returns true if:
+// - No executor binding exists for the session
+// - The bound executor is currently unavailable/unhealthy
+func (t *StatefulPythonTool) NeedsReinitialization(sessionID string) bool {
+	t.sessionMu.RLock()
+	addr, exists := t.sessionAddr[sessionID]
+	t.sessionMu.RUnlock()
+
+	if !exists {
+		// No binding exists - needs initialization
+		return true
+	}
+
+	// Check if the bound executor is healthy
+	if !t.pool.IsHealthy(addr) {
+		if t.logger != nil {
+			t.logger.Debug("Session bound to unhealthy executor",
+				zap.String("session_id", sessionID),
+				zap.String("executor", addr))
+		}
+		return true
+	}
+
+	return false
 }
 
 // ExecutePythonCode now requires a sessionID to be passed.

@@ -71,3 +71,9 @@ PDF_SENTENCE_BOUNDARY_TRUNCATE: true      # Truncate at sentence boundaries for 
 
 # --- RAG Processing Configuration ---
 RAG_PROACTIVE_PROCESSING: true            # Generate facts immediately after code execution (default: true)
+
+# --- Fact Generation Strategy ---
+FACT_USE_LLM_FOR_ASSUMPTIONS: false       # Use LLM for assumption_check stages (Shapiro-Wilk, Levene, etc.) - false = use template
+FACT_USE_LLM_FOR_DESCRIPTIVE: false       # Use LLM for descriptive stages (correlations, effect sizes) - false = use template
+FACT_ENABLE_NUMERIC_VERIFICATION: true    # Verify LLM-generated numbers against metadata to prevent hallucinations
+FACT_USE_STRUCTURED_CONTENT_FOR_BM25: true # Store normalized metadata text (vs JSON) in content field for better BM25 keyword search

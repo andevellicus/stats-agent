@@ -97,16 +97,21 @@ func (cs *ChatService) StopSessionRun(sessionID string) {
 	}
 }
 
-// InitializeSession initializes a new session by checking for uploaded files
-// and running Python initialization code.
+// InitializeSession initializes or reinitializes a session's Python environment.
+// This is called for:
+// - First message in a new session
+// - Existing sessions that lost their executor binding (reload, server restart, executor failure)
+//
+// It discovers files in the workspace directory and runs Python initialization code.
 func (cs *ChatService) InitializeSession(ctx context.Context, sessionID string) error {
-	cs.logger.Info("Initializing new session", zap.String("session_id", sessionID))
+	cs.logger.Info("Initializing session Python environment", zap.String("session_id", sessionID))
 
 	// Preserve trace IDs from request context without inheriting cancellation
 	baseCtx := context.WithoutCancel(ctx)
 	initCtx, cancel := context.WithTimeout(baseCtx, 2*time.Minute)
 	defer cancel()
 
+	// Discover all files in workspace directory
 	workspaceDir := filepath.Join("workspaces", sessionID)
 	files, err := os.ReadDir(workspaceDir)
 	if err != nil {
@@ -120,11 +125,13 @@ func (cs *ChatService) InitializeSession(ctx context.Context, sessionID string) 
 		}
 	}
 
+	// Run initialization code on Python executor
 	initResult, err := cs.agent.InitializeSession(initCtx, sessionID, uploadedFiles)
 	if err != nil {
 		return fmt.Errorf("failed to initialize python session: %w", err)
 	}
 
+	// Save initialization output as system message
 	initMessage := types.ChatMessage{
 		ID:        uuid.New().String(),
 		SessionID: sessionID,

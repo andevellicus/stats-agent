@@ -71,10 +71,32 @@
   }
 
 @layer components {
-  .prose h2 { /* You can add custom styles for prose elements here */
+  /* Heading styles for prose */
+  .prose h1 {
+    @apply mb-3 text-2xl font-bold;
+  }
+
+  .prose h2 {
     @apply mb-2 text-xl font-bold;
   }
 
+  .prose h3 {
+    @apply mb-2 text-lg font-semibold;
+  }
+
+  .prose h4 {
+    @apply mb-1 text-base font-semibold;
+  }
+
+  .prose h5 {
+    @apply mb-1 text-sm font-semibold;
+  }
+
+  .prose h6 {
+    @apply mb-1 text-sm font-medium;
+  }
+
+  /* List styles */
   .prose ul,
   .prose ol {
     @apply list-inside pl-5 space-y-2;
@@ -90,5 +112,29 @@
 
   .prose li > p {
     @apply inline;
+  }
+
+  /* Paragraph spacing */
+  .prose p {
+    @apply mb-2;
+  }
+
+  /* Strong and emphasis */
+  .prose strong {
+    @apply font-semibold;
+  }
+
+  .prose em {
+    @apply italic;
+  }
+
+  /* Links */
+  .prose a {
+    @apply text-sky-500 hover:text-sky-700 underline;
+  }
+
+  /* Blockquotes */
+  .prose blockquote {
+    @apply border-l-4 border-gray-300 pl-4 italic;
   }
 }

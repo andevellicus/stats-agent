@@ -85,30 +85,35 @@ func (r *RAG) prepareDocumentForMessage(
 			}
 		}
 
-		// Find preceding user message for context
-		userContent := ""
-		for prev := index - 1; prev >= 0; prev-- {
-			if messages[prev].Role == "user" {
-				userContent = canonicalizeFactText(messages[prev].Content)
-				break
-			}
-		}
-
-		// Store fact as JSON for structured retrieval
-		factPayload := factStoredContent{
-			Assistant: assistantContent,
-			Tool:      toolContent,
-		}
-		if userContent != "" {
-			factPayload.User = userContent
-		}
-
-		factJSON, marshalErr := json.Marshal(factPayload)
-		if marshalErr != nil {
-			r.logger.Warn("Failed to marshal fact payload, falling back to concatenated format", zap.Error(marshalErr))
-			storedContent = fmt.Sprintf("%s\n\n%s", assistantContent, toolContent)
+		// Generate structured content for BM25 keyword search
+		// This enables exact-match queries like "find test where W=0.923"
+		if r.cfg.FactUseStructuredContentForBM25 && len(statMeta) > 0 {
+			storedContent = r.generateStructuredContentForBM25(statMeta)
 		} else {
-			storedContent = string(factJSON)
+			// Fallback to JSON format if no metadata extracted
+			userContent := ""
+			for prev := index - 1; prev >= 0; prev-- {
+				if messages[prev].Role == "user" {
+					userContent = canonicalizeFactText(messages[prev].Content)
+					break
+				}
+			}
+
+			factPayload := factStoredContent{
+				Assistant: assistantContent,
+				Tool:      toolContent,
+			}
+			if userContent != "" {
+				factPayload.User = userContent
+			}
+
+			factJSON, marshalErr := json.Marshal(factPayload)
+			if marshalErr != nil {
+				r.logger.Warn("Failed to marshal fact payload, falling back to concatenated format", zap.Error(marshalErr))
+				storedContent = fmt.Sprintf("%s\n\n%s", assistantContent, toolContent)
+			} else {
+				storedContent = string(factJSON)
+			}
 		}
 
 		// Generate searchable summary for the fact
@@ -118,21 +123,55 @@ func (r *RAG) prepareDocumentForMessage(
 			code := strings.TrimSpace(matches[1])
 			result := strings.TrimSpace(toolMessage.Content)
 
-			// Create context with timeout for fact summarization
-			timeoutCtx, cancel := context.WithTimeout(ctx, r.cfg.SummarizationTimeout)
+			// Stage-aware fact generation strategy
+			analysisStage := statMeta["analysis_stage"]
+			useLLM := true
 
-			// Pass statistical metadata to fact generator
-			summary, err := r.generateFactSummary(timeoutCtx, result, statMeta)
-			cancel() // Clean up context
+			// Determine if we should skip LLM based on stage and config
+			switch analysisStage {
+			case "assumption_check":
+				useLLM = r.cfg.FactUseLLMForAssumptions
+			case "descriptive":
+				useLLM = r.cfg.FactUseLLMForDescriptive
+			case "hypothesis_test", "modeling", "post_hoc":
+				// Always use LLM for important stages
+				useLLM = true
+			default:
+				// Unknown stage - use LLM to be safe
+				useLLM = true
+			}
 
-			if err != nil {
-				r.logger.Warn("LLM fact summarization failed, using fallback summary",
-					zap.Error(err),
-					zap.Int("code_length", len(code)),
-					zap.Int("result_length", len(result)))
-				contentToEmbed = "Fact: A code execution event occurred but could not be summarized."
+			if !useLLM {
+				// Use deterministic template for routine operations
+				contentToEmbed = r.generateDeterministicFact(statMeta)
+				r.logger.Debug("Used deterministic fact template",
+					zap.String("stage", analysisStage),
+					zap.String("test", statMeta["primary_test"]))
 			} else {
-				contentToEmbed = strings.TrimSpace(summary)
+				// Create context with timeout for fact summarization
+				timeoutCtx, cancel := context.WithTimeout(ctx, r.cfg.SummarizationTimeout)
+
+				// Pass statistical metadata to fact generator
+				summary, err := r.generateFactSummary(timeoutCtx, result, statMeta)
+				cancel() // Clean up context
+
+				if err != nil {
+					r.logger.Warn("LLM fact summarization failed, using deterministic fallback",
+						zap.Error(err),
+						zap.Int("code_length", len(code)),
+						zap.Int("result_length", len(result)))
+					contentToEmbed = r.generateDeterministicFact(statMeta)
+				} else {
+					// Verify numeric accuracy if enabled (checks both metadata and raw tool output)
+					if r.cfg.FactEnableNumericVerification && !r.verifyNumericAccuracy(summary, statMeta, result) {
+						r.logger.Warn("LLM fact failed numeric verification, using deterministic template",
+							zap.String("llm_fact", summary),
+							zap.String("stage", analysisStage))
+						contentToEmbed = r.generateDeterministicFact(statMeta)
+					} else {
+						contentToEmbed = strings.TrimSpace(summary)
+					}
+				}
 			}
 		} else {
 			contentToEmbed = "Fact: An assistant action with a tool execution occurred."

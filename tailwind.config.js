@@ -63,4 +63,11 @@ module.exports = {
   plugins: [
     require('@tailwindcss/typography'),
   ],
+  // Safelist prose styles to prevent purging
+  safelist: [
+    {
+      pattern: /^prose$/,
+      variants: ['prose-headings', 'prose-h1', 'prose-h2', 'prose-h3', 'prose-h4', 'prose-h5', 'prose-h6', 'prose-p', 'prose-a', 'prose-strong', 'prose-em', 'prose-ul', 'prose-ol', 'prose-li', 'prose-code', 'prose-pre'],
+    },
+  ],
 }

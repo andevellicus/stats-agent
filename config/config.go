@@ -33,6 +33,10 @@ const (
 	defaultPDFFirstPagesPriority            = 3
 	defaultPDFEnableTableDetection          = true
 	defaultPDFSentenceBoundaryTruncate      = true
+	defaultFactUseLLMForAssumptions         = false
+	defaultFactUseLLMForDescriptive         = false
+	defaultFactEnableNumericVerification    = true
+	defaultFactUseStructuredContentForBM25  = true
 )
 
 // Config holds the application's configuration
@@ -87,6 +91,10 @@ type Config struct {
 	PDFEnableTableDetection          bool          `mapstructure:"PDF_ENABLE_TABLE_DETECTION"`
 	PDFSentenceBoundaryTruncate      bool          `mapstructure:"PDF_SENTENCE_BOUNDARY_TRUNCATE"`
 	RAGProactiveProcessing           bool          `mapstructure:"RAG_PROACTIVE_PROCESSING"`
+	FactUseLLMForAssumptions         bool          `mapstructure:"FACT_USE_LLM_FOR_ASSUMPTIONS"`
+	FactUseLLMForDescriptive         bool          `mapstructure:"FACT_USE_LLM_FOR_DESCRIPTIVE"`
+	FactEnableNumericVerification    bool          `mapstructure:"FACT_ENABLE_NUMERIC_VERIFICATION"`
+	FactUseStructuredContentForBM25  bool          `mapstructure:"FACT_USE_STRUCTURED_CONTENT_FOR_BM25"`
 }
 
 func Load(logger *zap.Logger) *Config {
@@ -146,6 +154,10 @@ func Load(logger *zap.Logger) *Config {
 	viper.SetDefault("PDF_ENABLE_TABLE_DETECTION", defaultPDFEnableTableDetection)
 	viper.SetDefault("PDF_SENTENCE_BOUNDARY_TRUNCATE", defaultPDFSentenceBoundaryTruncate)
 	viper.SetDefault("RAG_PROACTIVE_PROCESSING", true)
+	viper.SetDefault("FACT_USE_LLM_FOR_ASSUMPTIONS", defaultFactUseLLMForAssumptions)
+	viper.SetDefault("FACT_USE_LLM_FOR_DESCRIPTIVE", defaultFactUseLLMForDescriptive)
+	viper.SetDefault("FACT_ENABLE_NUMERIC_VERIFICATION", defaultFactEnableNumericVerification)
+	viper.SetDefault("FACT_USE_STRUCTURED_CONTENT_FOR_BM25", defaultFactUseStructuredContentForBM25)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if logger != nil {

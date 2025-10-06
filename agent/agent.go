@@ -67,6 +67,14 @@ func (a *Agent) CleanupSession(sessionID string) {
 	}
 }
 
+// NeedsReinitialization checks if a session's Python environment requires reinitialization.
+// This happens when:
+// - No executor binding exists (new session, server restart, or binding cleared)
+// - The bound executor is unhealthy (failure, cooldown)
+func (a *Agent) NeedsReinitialization(sessionID string) bool {
+	return a.pythonTool.NeedsReinitialization(sessionID)
+}
+
 // GetMemoryManager returns the agent's memory manager for token counting
 func (a *Agent) GetMemoryManager() *MemoryManager {
 	return a.memoryManager

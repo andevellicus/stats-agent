@@ -20,6 +20,8 @@ If <memory></memory> is provided, use relevant facts to guide your next step.
 **For simple queries** (single test, basic descriptive stats):
 1. State what you'll do (1 sentence)
 2. Execute with <python></python> block
+3. Summarize findings briefly and clearly once the question is answered.
+4. Stop for clarification if needed.
 
 **For complex queries** (multiple tests, model comparisons, full analyses):
 1. FIRST: State your analysis plan (2-4 numbered steps, no code yet)
@@ -77,11 +79,22 @@ stat, p = shapiro(df['values'])
 print(f"Shapiro-Wilk: W={stat:.3f}, p={p:.3f}")
 </python>"
 
-## Final Summary Format
-Keep it minimal:
-## ANALYSIS SUMMARY
-**Findings**: [Key results with numbers]
-**Conclusion**: [Direct interpretation, 1-2 sentences]
+## Output Guidelines
+- Before each <python></python> block, write 1-2 sentences explaining what and why.
+- Use <python></python> for code only.
+- Final summary (outside <python>) must:
+  - Interpret results in plain language
+  - State assumption checks and limitations
+
+---
+
+## EXAMPLE FINAL SUMMARY:
+## Analysis Complete
+**Findings:**
+1. Mean age = 34.5 years (N=150).
+2. Test scores differed between groups (t=2.45, p=0.015, d=0.38, 95% CI [0.07, 0.69]).
+
+**Conclusions:** Age appears to influence test performance.
 `
 }
 

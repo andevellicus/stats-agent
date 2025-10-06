@@ -17,3 +17,8 @@ web/static/css/output.css
 *~
 .DS_Store
 docs/proactive-rag-processing.md
+EXAMPLE_FACT_FLOW.md
+STAGE_AWARE_FACTS.md
+DUAL_CONTENT_ARCHITECTURE.md
+.gitignore
+FALSE_POSITIVE_FIX.md

@@ -40,6 +40,7 @@ type ChatHandler struct {
 // AgentInterface defines the subset of agent methods we need
 type AgentInterface interface {
 	GetMemoryManager() *agent.MemoryManager
+	NeedsReinitialization(sessionID string) bool
 }
 
 type ChatRequest struct {
@@ -455,21 +456,32 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 		return
 	}
 
-	// Check if this is the first message in the session to trigger initialization and title generation
-	if len(messages) == 1 {
-		// Pass the service method to the goroutine
+	// Check if this is the first message in the session to trigger title generation
+	isFirstMessage := len(messages) == 1
+	if isFirstMessage {
+		// Generate title asynchronously
 		go h.chatService.GenerateAndSetTitle(context.Background(), sessionID, userMessage.Content, func(data services.StreamData) error {
 			return h.streamService.WriteSSEData(context.Background(), c.Writer, data, &mu)
 		})
+	}
+
+	// Check if session needs (re)initialization - handles both new sessions and sessions with lost bindings
+	needsInit := h.agent.NeedsReinitialization(sessionID.String())
+	if needsInit {
+		h.logger.Info("Session needs initialization",
+			zap.String("session_id", sessionID.String()),
+			zap.Bool("is_first_message", isFirstMessage))
 
 		if err := h.chatService.InitializeSession(ctx, sessionID.String()); err != nil {
-			h.logger.Error("Failed to initialize session", zap.Error(err))
-		}
-		// Re-fetch messages to include the initialization message for the agent's context
-		messages, err = h.store.GetMessagesBySession(ctx, sessionID)
-		if err != nil {
-			h.streamService.WriteSSEData(ctx, c.Writer, services.StreamData{Type: "error", Content: "Error fetching messages after initialization"}, &mu)
-			return
+			h.logger.Error("Failed to initialize session", zap.Error(err), zap.String("session_id", sessionID.String()))
+			// Don't fail the request - continue without initialization
+		} else {
+			// Re-fetch messages to include the initialization message for the agent's context
+			messages, err = h.store.GetMessagesBySession(ctx, sessionID)
+			if err != nil {
+				h.streamService.WriteSSEData(ctx, c.Writer, services.StreamData{Type: "error", Content: "Error fetching messages after initialization"}, &mu)
+				return
+			}
 		}
 	}
 
