@@ -10,9 +10,9 @@ models/
 web/static/css/output.css
 
 # IDE files
-.vscode/
 .idea/
 *.swp
 *.swo
 *~
 .DS_Store
+docker/chat-template.jinja

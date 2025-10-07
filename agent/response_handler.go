@@ -53,6 +53,11 @@ func (r *ResponseHandler) CollectStreamedResponse(responseChan <-chan string, st
 
 	llmResponse := llmResponseBuilder.String()
 
+	// Debug log the complete LLM response
+	r.logger.Debug("LLM response collected",
+		zap.String("response", llmResponse),
+		zap.Int("length", len(llmResponse)))
+
 	// Add newline if response doesn't end with one
 	if stream != nil && !strings.HasSuffix(llmResponse, "\n") {
 		_, _ = stream.WriteString("\n")

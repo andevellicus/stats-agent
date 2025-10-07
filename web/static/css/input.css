@@ -71,13 +71,40 @@
   }
 
 @layer components {
-  .prose h2 { /* You can add custom styles for prose elements here */
+  /* Headings */
+  .prose h1 {
+    @apply mb-4 text-2xl font-bold;
+  }
+
+  .prose h2 {
     @apply mb-2 text-xl font-bold;
   }
 
+  .prose h3 {
+    @apply mb-2 text-lg font-bold;
+  }
+
+  .prose h4 {
+    @apply mb-2 text-base font-bold;
+  }
+
+  .prose h5 {
+    @apply mb-1 text-sm font-bold;
+  }
+
+  .prose h6 {
+    @apply mb-1 text-sm font-semibold;
+  }
+
+  /* Paragraphs */
+  .prose p {
+    @apply mb-4;
+  }
+
+  /* Lists */
   .prose ul,
   .prose ol {
-    @apply list-inside pl-5 space-y-2;
+    @apply list-inside pl-5 space-y-2 mb-4;
   }
 
   .prose ul {
@@ -90,5 +117,53 @@
 
   .prose li > p {
     @apply inline;
+  }
+
+  .prose li > ul,
+  .prose li > ol {
+    @apply mt-2;
+  }
+
+  /* Links */
+  .prose a {
+    color: #0088d6;
+    text-decoration: underline;
+  }
+
+  .prose a:hover {
+    text-decoration: none;
+  }
+
+  /* Blockquotes */
+  .prose blockquote {
+    @apply border-l-4 border-gray-300 pl-4 italic text-gray-600 mb-4;
+  }
+
+  /* Horizontal rule */
+  .prose hr {
+    @apply border-gray-300 my-6;
+  }
+
+  /* Tables */
+  .prose table {
+    @apply w-full border-collapse mb-4;
+  }
+
+  .prose th {
+    @apply bg-gray-100 border border-gray-300 px-4 py-2 text-left font-semibold;
+  }
+
+  .prose td {
+    @apply border border-gray-300 px-4 py-2;
+  }
+
+  /* Strong/Bold */
+  .prose strong {
+    @apply font-bold;
+  }
+
+  /* Emphasis/Italic */
+  .prose em {
+    @apply italic;
   }
 }

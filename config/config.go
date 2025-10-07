@@ -36,6 +36,7 @@ const (
 
 // Config holds the application's configuration
 type Config struct {
+	LogLevel                         string        `mapstructure:"LOG_LEVEL"`
 	WebPort                          int           `mapstructure:"WEB_PORT"`
 	PythonExecutorAddress            string        `mapstructure:"PYTHON_EXECUTOR_ADDRESS"`
 	PythonExecutorAddresses          []string      `mapstructure:"PYTHON_EXECUTOR_ADDRESSES"`
@@ -93,6 +94,7 @@ func Load(logger *zap.Logger) *Config {
 	viper.AutomaticEnv()
 
 	// Set default values
+	viper.SetDefault("LOG_LEVEL", "info")
 	viper.SetDefault("WEB_PORT", 8080)
 	viper.SetDefault("PYTHON_EXECUTOR_ADDRESSES", []string{})
 	viper.SetDefault("PYTHON_EXECUTOR_POOL", []string{})

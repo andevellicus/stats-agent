@@ -28,6 +28,7 @@ services:
     ports:
       - "${MAIN_LLM_PORT}:${MAIN_LLM_PORT}"
     volumes:
+      - ./chat-template.jinja:/chat-template.jinja:ro
       - ../models:/models
     deploy:
       resources:
@@ -45,8 +46,6 @@ services:
       --temp 0.1
       --top_p 0.85
       --top-k 30
-      --mlock
-      --no-mmap
       --repeat-penalty 1.1
 
   embedding-llm:
@@ -96,10 +95,12 @@ services:
       --host 0.0.0.0
       --port ${SUMMARIZATION_LLM_PORT}
       -ngl ${N_GPU_LAYERS}
-      --temp 0.2
-      --top-p 0.9
-      --top-k 40
-      --mlock
+      --temp 0.05
+      --top-p 0.5
+      --top-k 20
+      --repeat-penalty 1.2
+      -c 4096
+      -n 150
 
   python-executor-1:
     <<: *python-executor

@@ -344,19 +344,3 @@ func (ps *PDFService) truncateAtSentenceBoundary(ctx context.Context, text strin
 	// If we couldn't find a valid truncation point, return original
 	return text, nil
 }
-
-// Helper function for min
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// Helper function for max
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}

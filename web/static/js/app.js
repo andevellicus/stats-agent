@@ -148,6 +148,23 @@ function setupFormListener() {
     submitButton.addEventListener('click', (event) => {
         if (activeEventSource) {
             event.preventDefault();
+
+            // Get session ID from the form
+            const sessionIdInput = form.querySelector('input[name="session_id"]');
+            const sessionId = sessionIdInput ? sessionIdInput.value : null;
+
+            // Call stop endpoint to cancel agent execution
+            if (sessionId) {
+                fetch(`/chat/stop?session_id=${encodeURIComponent(sessionId)}`, {
+                    method: 'POST'
+                }).then(() => {
+                    console.log("Agent execution stopped by user.");
+                }).catch(err => {
+                    console.error("Failed to stop agent execution:", err);
+                });
+            }
+
+            // Close SSE connection
             activeEventSource.close();
             console.log("SSE connection closed by user.");
         }

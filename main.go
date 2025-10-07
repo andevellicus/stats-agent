@@ -19,14 +19,23 @@ import (
 func main() {
 	ctx := context.Background()
 
-	// Initialize logger
-	logger, err := config.InitLogger()
+	// Initialize logger with default level to load config
+	tempLogger, err := config.InitLogger("info")
 	if err != nil {
 		fmt.Printf("Failed to initialize logger: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Load config (which includes log level setting)
+	cfg := config.Load(tempLogger)
+
+	// Re-initialize logger with configured level
+	logger, err := config.InitLogger(cfg.LogLevel)
+	if err != nil {
+		fmt.Printf("Failed to re-initialize logger with configured level: %v\n", err)
+		os.Exit(1)
+	}
 	defer config.Cleanup()
-	cfg := config.Load(logger)
 
 	connStr := "postgres://postgres:changeme@localhost:5432/stats_agent?sslmode=disable"
 	store, err := database.NewPostgresStore(connStr)

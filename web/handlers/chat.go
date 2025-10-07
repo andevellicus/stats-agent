@@ -463,6 +463,18 @@ func (h *ChatHandler) UploadFile(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("File %s uploaded successfully.", file.Filename)})
 }
 
+func (h *ChatHandler) StopAgent(c *gin.Context) {
+	sessionIDStr := c.Query("session_id")
+	if sessionIDStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Session ID required"})
+		return
+	}
+
+	h.chatService.StopSessionRun(sessionIDStr)
+	h.logger.Info("Agent execution stopped by user", zap.String("session_id", sessionIDStr))
+	c.Status(http.StatusOK)
+}
+
 func (h *ChatHandler) StreamResponse(c *gin.Context) {
 	sessionIDStr := c.Query("session_id")
 	userMessageID := c.Query("user_message_id")

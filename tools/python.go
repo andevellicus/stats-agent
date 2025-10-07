@@ -365,6 +365,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import scipy
 import warnings
+from scipy import stats
 warnings.filterwarnings('ignore')
 pd.set_option('display.precision', 3)
 workspace_path = os.getcwd()
