@@ -170,17 +170,16 @@ func (r *RAG) prepareDocumentForMessage(
 					zap.Error(err),
 					zap.Int("code_length", len(code)),
 					zap.Int("result_length", len(result)))
-				contentToEmbed = "Fact: A code execution event occurred but could not be summarized."
+				contentToEmbed = "A code execution event occurred but could not be summarized."
 			} else {
 				contentToEmbed = strings.TrimSpace(summary)
 			}
 		} else {
-			contentToEmbed = "Fact: An assistant action with a tool execution occurred."
+			contentToEmbed = "An assistant action with a tool execution occurred."
 		}
 	} else {
 		if message.Role == "assistant" {
-			trimmed := strings.TrimSpace(message.Content)
-			if strings.HasPrefix(trimmed, "Fact:") && !format.HasTag(message.Content, format.PythonTag) {
+			if !format.HasTag(message.Content, format.PythonTag) {
 				return nil, true, nil
 			}
 		}

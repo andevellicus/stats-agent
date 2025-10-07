@@ -149,14 +149,13 @@ func (r *RAG) generateFactSummary(ctx context.Context, code, result string, meta
 Extract a statistical fact from the following code and output. Follow these rules:
 
 RULES:
-1. Start with "Fact:"
-2. Maximum 200 words (be concise but complete)
-3. Include specific names (test names, variable names, column names)
-4. Preserve key numbers (p-values, effect sizes, R², coefficients, sample sizes)
-5. State statistical conclusions when present (e.g., "significant at α=0.05", "violates normality assumption")
-6. If multiple steps, use 2-3 sentences maximum
-7. For errors, state what failed and why
-8. END your fact with inline metadata tags in square brackets
+1. Maximum 200 words (be concise but complete)
+2. Include specific names (test names, variable names, column names)
+3. Preserve key numbers (p-values, effect sizes, R², coefficients, sample sizes)
+4. State statistical conclusions when present (e.g., "significant at α=0.05", "violates normality assumption")
+5. If multiple steps, use 2-3 sentences maximum
+6. For errors, state what failed and why
+7. END your fact with inline metadata tags in square brackets
 
 METADATA TAGS FORMAT:
 End your fact with relevant metadata in this format: [key1:value1 | key2:value2 | ...]
@@ -183,26 +182,26 @@ EXAMPLES:
 Example 1 - Normality Test:
 Code: from scipy import stats; stat, p = stats.shapiro(df['residuals']); print(f"Shapiro-Wilk: W={stat:.4f}, p={p:.4f}")
 Output: Shapiro-Wilk: W=0.9234, p=0.0156
-Good Fact: Fact: Shapiro-Wilk normality test on residuals yielded W=0.9234, p=0.0156, violating normality assumption at α=0.05 [test:shapiro-wilk | p<0.05:yes | stage:assumption_check | variables:residuals]
-Bad Fact: Fact: A normality test was performed on the data.
+Good Fact: Shapiro-Wilk normality test on residuals yielded W=0.9234, p=0.0156, violating normality assumption at α=0.05 [test:shapiro-wilk | p<0.05:yes | stage:assumption_check | variables:residuals]
+Bad Fact: A normality test was performed on the data.
 
 Example 2 - Descriptive Statistics:
 Code: print(df[['age', 'income', 'score']].describe())
 Output: age: count=150, mean=34.23, std=8.91, min=18, max=65; income: mean=52340.12, std=12450.67; score: mean=78.45, std=12.34
-Good Fact: Fact: Dataset contains 150 observations with variables age (M=34.23, SD=8.91, range 18-65), income (M=52340.12, SD=12450.67), and score (M=78.45, SD=12.34) [stage:descriptive | variables:age,income,score]
-Bad Fact: Fact: Descriptive statistics were calculated for the dataframe.
+Good Fact: Dataset contains 150 observations with variables age (M=34.23, SD=8.91, range 18-65), income (M=52340.12, SD=12450.67), and score (M=78.45, SD=12.34) [stage:descriptive | variables:age,income,score]
+Bad Fact: Descriptive statistics were calculated for the dataframe.
 
 Example 3 - Regression Model:
 Code: model = LinearRegression(); model.fit(X_train, y_train); r2 = model.score(X_test, y_test); print(f"R²={r2:.3f}, Coefficients: {model.coef_}")
 Output: R²=0.734, Coefficients: [2.34, -1.56, 0.89]
-Good Fact: Fact: Linear regression model trained with R²=0.734 on test set, yielding coefficients [2.34, -1.56, 0.89] for predictor variables [test:linear-regression | stage:modeling]
-Bad Fact: Fact: A regression model was fitted to the training data.
+Good Fact: Linear regression model trained with R²=0.734 on test set, yielding coefficients [2.34, -1.56, 0.89] for predictor variables [test:linear-regression | stage:modeling]
+Bad Fact: A regression model was fitted to the training data.
 
 Example 4 - Data Transformation:
 Code: df['log_income'] = np.log(df['income'])
 Output: Success: Code executed with no output.
-Good Fact: Fact: Created log-transformed variable log_income from income column for normalization [variables:income,log_income]
-Bad Fact: Fact: A transformation was applied to the income variable.
+Good Fact: Created log-transformed variable log_income from income column for normalization [variables:income,log_income]
+Bad Fact: A transformation was applied to the income variable.
 
 %s
 
@@ -214,7 +213,7 @@ Code:
 Output:
 %s
 
-Respond with only the fact, starting with "Fact:" and ending with metadata tags in square brackets.
+Respond with only the fact, ending with metadata tags in square brackets.
 `, metadataTags, code, finalResult)
 
 	messages := []types.AgentMessage{

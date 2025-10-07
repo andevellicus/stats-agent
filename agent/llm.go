@@ -26,11 +26,9 @@ After receiving a tool message (role: "tool"), your response must follow this se
 2.  Next, in 1-2 sentences, state your plan for the single next step.
 3.  Finally, provide a short <python></python> block to execute that plan (≤15 lines, one logical step).
 
-**Do not explicitly write "Observe:", "Plan:", or "Act:" in your response, try to keep the language natural.**
-
 **Critical enforcement**:
 - If you intend to run a statistical test, you must first run and report assumption checks in a separate Act step. Do not run the test until you have printed the assumption results and justified the test choice.
-- You must not state any calculated result (e.g., mean, p-value) that has not first appeared in a preceding tool message. All reported results must come directly from executed code.
+- You must not state any calculated result (e.g., mean, p-value) that has not first appeared in a preceding tool message. All reported results must come directly from executed code. DO NOT cite tests that have not completed correctly.
 
 ---
 
