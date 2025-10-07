@@ -37,7 +37,7 @@ func NewAgent(cfg *config.Config, pythonTool *tools.StatefulPythonTool, rag *rag
 	logger.Info("Agent initialized", zap.Int("context_window_size", cfg.ContextLength))
 
 	// Initialize specialized components
-	memoryManager := NewMemoryManager(cfg, rag, logger)
+	memoryManager := NewMemoryManager(cfg, logger)
 	executionCoordinator := NewExecutionCoordinator(pythonTool, logger)
 	responseHandler := NewResponseHandler(cfg, logger)
 
@@ -76,7 +76,13 @@ func (a *Agent) GetMemoryManager() *MemoryManager {
 // It orchestrates memory management, LLM interaction, and Python code execution.
 func (a *Agent) Run(ctx context.Context, input string, sessionID string, history []types.AgentMessage, stream *Stream) {
 	// 1. Setup: Add user message and retrieve long-term context
-	currentHistory := append(history, types.AgentMessage{Role: "user", Content: input})
+	userMsg := types.AgentMessage{Role: "user", Content: input}
+	currentHistory := append(history, userMsg)
+
+	// Store user message to RAG
+	if a.rag != nil {
+		a.rag.AddMessagesAsync(sessionID, []types.AgentMessage{userMsg})
+	}
 
 	// Query RAG for long-term context - non-critical, log warning if fails
 	longTermContext, err := a.rag.Query(ctx, sessionID, input, a.cfg.RAGResults)
@@ -86,12 +92,12 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 			zap.String("session_id", sessionID))
 	}
 
-	// Proactively check if long-term context itself is too large
+	// Check if long-term context itself is too large
 	if longTermContext != "" {
 		contextTokens, err := a.memoryManager.CountTokens(ctx, longTermContext)
 		softLimitTokens := a.cfg.ContextSoftLimitTokens()
 		if err == nil && contextTokens > softLimitTokens {
-			a.logger.Info("Proactive check: RAG context is too large, summarizing", zap.Int("context_tokens", contextTokens))
+			a.logger.Info("RAG context is too large, summarizing", zap.Int("context_tokens", contextTokens))
 			_ = stream.Status("Compressing memory....")
 			summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(ctx, longTermContext, input)
 			if summaryErr == nil {
@@ -158,9 +164,15 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 
 		// Update history based on execution result
 		if execResult.WasCodeExecuted {
-			currentHistory = append(currentHistory,
-				types.AgentMessage{Role: "assistant", Content: llmResponse},
-				types.AgentMessage{Role: "tool", Content: execResult.Result})
+			assistantMsg := types.AgentMessage{Role: "assistant", Content: llmResponse}
+			toolMsg := types.AgentMessage{Role: "tool", Content: execResult.Result}
+
+			currentHistory = append(currentHistory, assistantMsg, toolMsg)
+
+			// Store assistant+tool pair to RAG for fact generation
+			if a.rag != nil {
+				a.rag.AddMessagesAsync(sessionID, []types.AgentMessage{assistantMsg, toolMsg})
+			}
 
 			if execResult.HasError {
 				_ = stream.Status("Error - attempting to self-correct")
@@ -170,7 +182,14 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 			}
 		} else {
 			// No code to execute - conversation complete
-			currentHistory = append(currentHistory, types.AgentMessage{Role: "assistant", Content: llmResponse})
+			assistantMsg := types.AgentMessage{Role: "assistant", Content: llmResponse}
+			currentHistory = append(currentHistory, assistantMsg)
+
+			// Store final assistant message to RAG
+			if a.rag != nil {
+				a.rag.AddMessagesAsync(sessionID, []types.AgentMessage{assistantMsg})
+			}
+
 			return
 		}
 	}

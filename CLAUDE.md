@@ -391,17 +391,21 @@ The `processAgentContentForDB` function in `web/handlers/chat.go` converts markd
 ## Logging
 
 The application uses **Zap** structured logging with dependency injection:
-- Logger is initialized in `main.go` via `config.InitLogger()`
+- Logger is initialized in `main.go` via `config.InitLogger(cfg.LogLevel)`
 - Logger is passed to all components via constructors (Agent, RAG, Python tool, handlers)
 - No global logger state - each component receives its own logger reference
-- Development config with info-level logging by default
+- Log level is configurable via `LOG_LEVEL` in `config.yaml` (options: debug, info, warn, error)
+- Default level is `info`
 - Automatic cleanup via `defer config.Cleanup()`
 
 Example:
 ```go
 logger.Info("Message", zap.String("key", value), zap.Int("count", n))
+logger.Debug("Debug info", zap.String("response", text))
 logger.Error("Failed", zap.Error(err))
 ```
+
+To see debug logs (including LLM responses), set `LOG_LEVEL: debug` in `config.yaml`.
 
 ## Agent Execution Flow
 

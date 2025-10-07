@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"stats-agent/config"
-	"stats-agent/rag"
 	"stats-agent/web/format"
 	"stats-agent/web/types"
 	"time"
@@ -16,18 +15,16 @@ import (
 	"go.uber.org/zap"
 )
 
-// MemoryManager handles token counting, context window management, and history archival.
+// MemoryManager handles token counting, context window management, and history trimming.
 type MemoryManager struct {
 	cfg    *config.Config
-	rag    *rag.RAG
 	logger *zap.Logger
 }
 
 // NewMemoryManager creates a new memory manager instance.
-func NewMemoryManager(cfg *config.Config, rag *rag.RAG, logger *zap.Logger) *MemoryManager {
+func NewMemoryManager(cfg *config.Config, logger *zap.Logger) *MemoryManager {
 	return &MemoryManager{
 		cfg:    cfg,
-		rag:    rag,
 		logger: logger,
 	}
 }
@@ -146,8 +143,9 @@ func (m *MemoryManager) IsOverThreshold(ctx context.Context, history []types.Age
 	return totalTokens > contextWindowThreshold, nil
 }
 
-// ManageHistory checks if history exceeds threshold and archives older messages to RAG.
+// ManageHistory checks if history exceeds threshold and trims older messages.
 // It operates on a pointer to the history slice and modifies it in place.
+// Note: Messages are stored to RAG proactively during conversation, so this only trims history.
 func (m *MemoryManager) ManageHistory(ctx context.Context, sessionID string, history *[]types.AgentMessage, stream *Stream) error {
 	totalTokens, err := m.CalculateHistorySize(ctx, *history)
 	if err != nil {
@@ -161,7 +159,7 @@ func (m *MemoryManager) ManageHistory(ctx context.Context, sessionID string, his
 	}
 
 	if stream != nil {
-		_ = stream.Status("Archiving older messages....")
+		_ = stream.Status("Trimming conversation history....")
 	}
 
 	// Cut history in half
@@ -180,41 +178,17 @@ func (m *MemoryManager) ManageHistory(ctx context.Context, sessionID string, his
 	}
 
 	if cutoff == 0 {
-		return nil // Nothing to archive
+		return nil // Nothing to trim
 	}
 
-	messagesToStore := (*history)[:cutoff]
-
-	// Async archive - fire and forget
-	go func(sessionID string, messages []types.AgentMessage) {
-		const maxAttempts = 3
-		for attempt := 0; attempt < maxAttempts; attempt++ {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			err := m.rag.AddMessagesToStore(ctx, sessionID, messages)
-			cancel()
-
-			if err == nil {
-				m.logger.Info("Archived messages to long-term RAG store",
-					zap.Int("messages_moved", len(messages)))
-				return
-			}
-
-			if attempt < maxAttempts-1 {
-				time.Sleep(time.Second * time.Duration(attempt+1))
-				continue
-			}
-
-			m.logger.Error("RAG storage failed after retries - messages lost",
-				zap.Error(err),
-				zap.String("session_id", sessionID),
-				zap.Int("messages_count", len(messages)))
-		}
-	}(sessionID, messagesToStore)
-
-	// Remove archived messages from history immediately
+	// Remove old messages from history immediately
+	// Note: Messages are already stored to RAG proactively during conversation,
+	// so memory manager only needs to trim the in-memory history
+	removedCount := cutoff
 	*history = (*history)[cutoff:]
 
-	m.logger.Info("Memory management complete",
+	m.logger.Info("Memory management complete - trimmed old messages from history",
+		zap.Int("messages_removed", removedCount),
 		zap.Int("remaining_messages", len(*history)),
 		zap.Int("total_tokens", totalTokens))
 
