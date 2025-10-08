@@ -68,7 +68,31 @@ func (s *Server) setupRoutes() {
 		EnableTableDetection:     s.config.PDFEnableTableDetection,
 		SentenceBoundaryTruncate: s.config.PDFSentenceBoundaryTruncate,
 	}
-	pdfService := services.NewPDFService(s.logger, pdfConfig)
+
+	// Initialize PDF extractor client (pdfplumber microservice)
+	pdfExtractorClient := services.NewPDFExtractorClient(
+		s.config.PDFExtractorURL,
+		s.config.PDFExtractorTimeout*time.Second,
+		s.config.PDFExtractorEnabled,
+		s.logger,
+	)
+
+	// Check if PDF extractor service is available
+	if pdfExtractorClient.IsEnabled() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		if err := pdfExtractorClient.HealthCheck(ctx); err != nil {
+			s.logger.Warn("PDF extractor service not available, will use fallback",
+				zap.Error(err),
+				zap.String("url", s.config.PDFExtractorURL))
+		} else {
+			s.logger.Info("PDF extractor service ready",
+				zap.String("url", s.config.PDFExtractorURL))
+		}
+	}
+
+	pdfService := services.NewPDFService(s.logger, pdfConfig, pdfExtractorClient)
 	chatService := services.NewChatService(s.agent, s.store, s.logger, fileService, messageService, streamService)
 
 	// Initialize rate limiter

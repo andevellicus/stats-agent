@@ -65,3 +65,8 @@ PDF_TOKEN_THRESHOLD: 0.75                 # Use 75% of context window for PDF co
 PDF_FIRST_PAGES_PRIORITY: 3               # Keep first N pages if possible
 PDF_ENABLE_TABLE_DETECTION: true          # Detect and mark tables in extracted text
 PDF_SENTENCE_BOUNDARY_TRUNCATE: true      # Truncate at sentence boundaries for better context
+
+# --- PDF Extractor Service (pdfplumber microservice) ---
+PDF_EXTRACTOR_URL: "http://localhost:9001"  # URL of the pdfplumber extraction service
+PDF_EXTRACTOR_ENABLED: true                  # Enable high-quality pdfplumber extraction
+PDF_EXTRACTOR_TIMEOUT: 30                    # Timeout in seconds for PDF extraction requests

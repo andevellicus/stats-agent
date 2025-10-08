@@ -72,6 +72,11 @@ func (a *Agent) GetMemoryManager() *MemoryManager {
 	return a.memoryManager
 }
 
+// GetRAG returns the agent's RAG instance for document storage
+func (a *Agent) GetRAG() *rag.RAG {
+	return a.rag
+}
+
 // Run executes the agent's conversation loop with the given user input.
 // It orchestrates memory management, LLM interaction, and Python code execution.
 func (a *Agent) Run(ctx context.Context, input string, sessionID string, history []types.AgentMessage, stream *Stream) {

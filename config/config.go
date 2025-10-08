@@ -32,6 +32,9 @@ const (
 	defaultPDFFirstPagesPriority            = 3
 	defaultPDFEnableTableDetection          = true
 	defaultPDFSentenceBoundaryTruncate      = true
+	defaultPDFExtractorURL                  = "http://localhost:5001"
+	defaultPDFExtractorEnabled              = true
+	defaultPDFExtractorTimeout              = 30 * time.Second
 )
 
 // Config holds the application's configuration
@@ -82,6 +85,9 @@ type Config struct {
 	PDFFirstPagesPriority            int           `mapstructure:"PDF_FIRST_PAGES_PRIORITY"`
 	PDFEnableTableDetection          bool          `mapstructure:"PDF_ENABLE_TABLE_DETECTION"`
 	PDFSentenceBoundaryTruncate      bool          `mapstructure:"PDF_SENTENCE_BOUNDARY_TRUNCATE"`
+	PDFExtractorURL                  string        `mapstructure:"PDF_EXTRACTOR_URL"`
+	PDFExtractorEnabled              bool          `mapstructure:"PDF_EXTRACTOR_ENABLED"`
+	PDFExtractorTimeout              time.Duration `mapstructure:"PDF_EXTRACTOR_TIMEOUT"`
 }
 
 func Load(logger *zap.Logger) *Config {
@@ -137,6 +143,9 @@ func Load(logger *zap.Logger) *Config {
 	viper.SetDefault("PDF_FIRST_PAGES_PRIORITY", defaultPDFFirstPagesPriority)
 	viper.SetDefault("PDF_ENABLE_TABLE_DETECTION", defaultPDFEnableTableDetection)
 	viper.SetDefault("PDF_SENTENCE_BOUNDARY_TRUNCATE", defaultPDFSentenceBoundaryTruncate)
+	viper.SetDefault("PDF_EXTRACTOR_URL", defaultPDFExtractorURL)
+	viper.SetDefault("PDF_EXTRACTOR_ENABLED", defaultPDFExtractorEnabled)
+	viper.SetDefault("PDF_EXTRACTOR_TIMEOUT", defaultPDFExtractorTimeout)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if logger != nil {

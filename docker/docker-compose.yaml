@@ -28,7 +28,6 @@ services:
     ports:
       - "${MAIN_LLM_PORT}:${MAIN_LLM_PORT}"
     volumes:
-      - ./chat-template.jinja:/chat-template.jinja:ro
       - ../models:/models
     deploy:
       resources:
@@ -43,7 +42,7 @@ services:
       --port ${MAIN_LLM_PORT}
       -ngl ${N_GPU_LAYERS}
       -c 16384
-      --temp 0.1
+      --temp 0.5
       --top_p 0.85
       --top-k 30
       --repeat-penalty 1.1
@@ -131,6 +130,23 @@ services:
     container_name: python-executor-5
     ports:
       - "9995:9999"
+
+  pdf-extractor:
+    build:
+      context: ./pdf-extractor
+      dockerfile: Dockerfile
+    container_name: pdf-extractor
+    ports:
+      - "9001:9001"
+    volumes:
+      - ../workspaces:/app/workspaces
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
 volumes:
   postgres-data:

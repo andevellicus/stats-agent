@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"stats-agent/agent"
 	"stats-agent/config"
 	"stats-agent/database"
+	"stats-agent/rag"
 	"stats-agent/web/middleware"
 	"stats-agent/web/services"
 	"stats-agent/web/templates/components"
@@ -39,6 +39,7 @@ type ChatHandler struct {
 // AgentInterface defines the subset of agent methods we need
 type AgentInterface interface {
 	GetMemoryManager() *agent.MemoryManager
+	GetRAG() *rag.RAG
 }
 
 type ChatRequest struct {
@@ -274,6 +275,7 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 	}
 
 	// Handle potential file upload
+	var displayMessage string // Track what to display to the user
 	file, err := c.FormFile("file")
 	if err == nil {
 		sanitizedFilename := sanitizeFilename(file.Filename)
@@ -315,33 +317,58 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 
 		// Extract text from PDF and prepend to message
 		if ext == ".pdf" {
-			// Build TruncationConfig from config values
-			truncConfig := services.TruncationConfig{
-				MaxTokens:                h.cfg.ContextLength,
-				TokenThreshold:           h.cfg.PDFTokenThreshold,
-				FirstPagesPrio:           h.cfg.PDFFirstPagesPriority,
-				EnableTableDetection:     h.cfg.PDFEnableTableDetection,
-				SentenceBoundaryTruncate: h.cfg.PDFSentenceBoundaryTruncate,
-			}
-			memManager := h.agent.GetMemoryManager()
-
-			pdfText, err := h.pdfService.ExtractTextSmart(c.Request.Context(), dst, truncConfig, memManager)
+			// Extract full PDF text without truncation
+			pdfText, err := h.pdfService.ExtractText(dst)
 			if err != nil {
 				h.logger.Error("Failed to extract PDF text",
 					zap.Error(err),
 					zap.String("filename", sanitizedFilename))
 				// Continue - user can still reference the file
 			} else {
-				// Prepend PDF content to user message
+				// Prepend full PDF content to user message for agent processing
 				pdfContent := fmt.Sprintf("[PDF Content from %s]\n\n%s\n\n---\n\n",
 					file.Filename, pdfText)
 
-				// Prepend PDF content to user's message
+				// Store original user message for display
+				originalMessage := req.Message
+
+				// Prepend PDF content to user's message for agent processing
 				if strings.TrimSpace(req.Message) == "" {
 					req.Message = pdfContent + "Please analyze the content from this PDF and provide statistical insights."
+					displayMessage = fmt.Sprintf("[📎 PDF uploaded: %s]<br><br>Please analyze the content from this PDF and provide statistical insights.", file.Filename)
 				} else {
 					req.Message = pdfContent + req.Message
+					displayMessage = fmt.Sprintf("[📎 PDF uploaded: %s]<br><br>%s", file.Filename, originalMessage)
 				}
+
+				// Extract pages and store in RAG asynchronously
+				go func() {
+					pages, err := h.pdfService.ExtractPages(dst)
+					if err != nil {
+						h.logger.Error("Failed to extract PDF pages for RAG",
+							zap.Error(err),
+							zap.String("filename", sanitizedFilename))
+						return
+					}
+
+					ragInstance := h.agent.GetRAG()
+					if ragInstance == nil {
+						h.logger.Warn("RAG instance not available for PDF storage")
+						return
+					}
+
+					if err := ragInstance.AddPDFPagesToRAG(context.Background(), req.SessionID, file.Filename, pages); err != nil {
+						h.logger.Error("Failed to store PDF pages in RAG",
+							zap.Error(err),
+							zap.String("filename", sanitizedFilename),
+							zap.String("session_id", req.SessionID))
+					} else {
+						h.logger.Info("Successfully stored PDF pages in RAG",
+							zap.String("filename", sanitizedFilename),
+							zap.Int("pages", len(pages)),
+							zap.String("session_id", req.SessionID))
+					}
+				}()
 			}
 		} else {
 			// For non-PDF files, use existing message logic
@@ -387,6 +414,7 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 	userMessage := types.ChatMessage{
 		Role:      "user",
 		Content:   req.Message,
+		Rendered:  displayMessage, // If empty, template will use Content
 		ID:        generateMessageID(),
 		SessionID: sessionID.String(),
 	}
@@ -592,14 +620,63 @@ func toAgentMessages(messages []types.ChatMessage) []types.AgentMessage {
 }
 
 func sanitizeFilename(filename string) string {
+	// Trim leading/trailing spaces and dots
 	sanitized := strings.Trim(filename, " .")
+
+	// Remove path traversal attempts
 	sanitized = strings.ReplaceAll(sanitized, "..", "")
-	reg := regexp.MustCompile(`[^a-zA-Z0-9._\s-]`)
-	sanitized = reg.ReplaceAllString(sanitized, "")
+
+	// Preserve extension
+	ext := filepath.Ext(sanitized)
+	nameWithoutExt := strings.TrimSuffix(sanitized, ext)
+
+	// Replace special characters with safe alternatives
+	nameWithoutExt = replaceSpecialChars(nameWithoutExt)
+
+	// Reconstruct with original extension
+	sanitized = nameWithoutExt + ext
+
+	// Limit total length to 255 characters
 	if len(sanitized) > 255 {
-		sanitized = sanitized[:255]
+		// Truncate name portion, preserve extension
+		maxNameLen := 255 - len(ext)
+		if maxNameLen > 0 {
+			sanitized = nameWithoutExt[:maxNameLen] + ext
+		} else {
+			sanitized = sanitized[:255]
+		}
 	}
+
 	return sanitized
+}
+
+func replaceSpecialChars(s string) string {
+	// Replace common special chars with readable alternatives
+	s = strings.ReplaceAll(s, "%", "pct")
+	s = strings.ReplaceAll(s, "&", "and")
+	s = strings.ReplaceAll(s, " ", "_")
+
+	// Replace filesystem-unsafe characters with underscore
+	// These are problematic across Windows, Linux, macOS
+	unsafeChars := []string{
+		"<", ">", ":", "\"", "/", "\\", "|", "?", "*",
+		"(", ")", "[", "]", "{", "}", "'", ",", ";", "!",
+		"@", "#", "$", "^", "`", "~", "+", "=",
+	}
+
+	for _, char := range unsafeChars {
+		s = strings.ReplaceAll(s, char, "_")
+	}
+
+	// Collapse multiple underscores to single
+	for strings.Contains(s, "__") {
+		s = strings.ReplaceAll(s, "__", "_")
+	}
+
+	// Trim leading/trailing underscores
+	s = strings.Trim(s, "_")
+
+	return s
 }
 
 func verifyFileExists(workspaceDir, filename string) bool {

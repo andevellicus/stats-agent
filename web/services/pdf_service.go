@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	pdfTypes "stats-agent/pdf"
 	"strings"
+	"time"
 
 	"github.com/jdkato/prose/v2"
 	"github.com/ledongthuc/pdf"
@@ -12,8 +14,9 @@ import (
 )
 
 type PDFService struct {
-	logger *zap.Logger
-	config *PDFConfig
+	logger          *zap.Logger
+	config          *PDFConfig
+	extractorClient *PDFExtractorClient // Optional pdfplumber client
 }
 
 // PDFConfig holds PDF-specific configuration
@@ -38,16 +41,37 @@ type TruncationConfig struct {
 	SentenceBoundaryTruncate bool    // Truncate at sentence boundaries
 }
 
-func NewPDFService(logger *zap.Logger, config *PDFConfig) *PDFService {
+func NewPDFService(logger *zap.Logger, config *PDFConfig, extractorClient *PDFExtractorClient) *PDFService {
 	return &PDFService{
-		logger: logger,
-		config: config,
+		logger:          logger,
+		config:          config,
+		extractorClient: extractorClient,
 	}
 }
 
 // ExtractText extracts all text content from a PDF file
 // Returns the full text with page markers for context
+// Tries pdfplumber first (if enabled), falls back to ledongthuc/pdf
 func (ps *PDFService) ExtractText(pdfPath string) (string, error) {
+	// Try pdfplumber extraction first if available
+	if ps.extractorClient != nil && ps.extractorClient.IsEnabled() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		text, err := ps.extractorClient.ExtractText(ctx, pdfPath)
+		if err == nil {
+			ps.logger.Info("PDF extraction successful via pdfplumber",
+				zap.String("path", pdfPath),
+				zap.Int("characters", len(text)))
+			return text, nil
+		}
+
+		ps.logger.Warn("pdfplumber extraction failed, falling back to ledongthuc/pdf",
+			zap.Error(err),
+			zap.String("path", pdfPath))
+	}
+
+	// Fallback to ledongthuc/pdf extraction
 	f, r, err := pdf.Open(pdfPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to open PDF: %w", err)
@@ -57,7 +81,7 @@ func (ps *PDFService) ExtractText(pdfPath string) (string, error) {
 	var fullText strings.Builder
 	totalPages := r.NumPage()
 
-	ps.logger.Debug("Extracting text from PDF",
+	ps.logger.Debug("Extracting text from PDF using fallback method",
 		zap.String("path", pdfPath),
 		zap.Int("pages", totalPages))
 
@@ -69,6 +93,7 @@ func (ps *PDFService) ExtractText(pdfPath string) (string, error) {
 			continue
 		}
 
+		// Use GetPlainText for text extraction
 		text, err := page.GetPlainText(nil)
 		if err != nil {
 			ps.logger.Warn("Failed to extract text from page",
@@ -77,6 +102,9 @@ func (ps *PDFService) ExtractText(pdfPath string) (string, error) {
 			continue
 		}
 
+		// No post-processing - let pdfplumber microservice handle text cleaning
+		// Fallback only: keep raw text as-is from ledongthuc/pdf
+
 		// Add page marker for context
 		fullText.WriteString(fmt.Sprintf("--- Page %d ---\n", pageNum))
 		fullText.WriteString(text)
@@ -84,12 +112,82 @@ func (ps *PDFService) ExtractText(pdfPath string) (string, error) {
 	}
 
 	extractedText := fullText.String()
-	ps.logger.Info("PDF text extraction completed",
+	ps.logger.Info("PDF text extraction completed (fallback)",
 		zap.String("path", pdfPath),
 		zap.Int("pages", totalPages),
 		zap.Int("characters", len(extractedText)))
 
 	return extractedText, nil
+}
+
+// ExtractPages extracts text from each page individually
+// Returns a slice of pdf.Page structs, one per page
+// Tries pdfplumber first (if enabled), falls back to ledongthuc/pdf
+func (ps *PDFService) ExtractPages(pdfPath string) ([]pdfTypes.Page, error) {
+	// Try pdfplumber extraction first if available
+	if ps.extractorClient != nil && ps.extractorClient.IsEnabled() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		pages, err := ps.extractorClient.ExtractPages(ctx, pdfPath)
+		if err == nil {
+			ps.logger.Info("PDF page extraction successful via pdfplumber",
+				zap.String("path", pdfPath),
+				zap.Int("pages", len(pages)))
+			return pages, nil
+		}
+
+		ps.logger.Warn("pdfplumber page extraction failed, falling back to ledongthuc/pdf",
+			zap.Error(err),
+			zap.String("path", pdfPath))
+	}
+
+	// Fallback to ledongthuc/pdf extraction
+	f, r, err := pdf.Open(pdfPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open PDF: %w", err)
+	}
+	defer f.Close()
+
+	totalPages := r.NumPage()
+	pages := make([]pdfTypes.Page, 0, totalPages)
+
+	ps.logger.Debug("Extracting pages from PDF using fallback method",
+		zap.String("path", pdfPath),
+		zap.Int("pages", totalPages))
+
+	for pageNum := 1; pageNum <= totalPages; pageNum++ {
+		page := r.Page(pageNum)
+		if page.V.IsNull() {
+			ps.logger.Warn("Skipping null page",
+				zap.Int("page", pageNum))
+			continue
+		}
+
+		// Use GetPlainText for text extraction
+		text, err := page.GetPlainText(nil)
+		if err != nil {
+			ps.logger.Warn("Failed to extract text from page",
+				zap.Int("page", pageNum),
+				zap.Error(err))
+			continue
+		}
+
+		// No post-processing - let pdfplumber microservice handle text cleaning
+		// Fallback only: keep raw text as-is from ledongthuc/pdf
+
+		pages = append(pages, pdfTypes.Page{
+			PageNumber: pageNum,
+			Text:       strings.TrimSpace(text),
+		})
+	}
+
+	ps.logger.Info("PDF page extraction completed (fallback)",
+		zap.String("path", pdfPath),
+		zap.Int("pages_extracted", len(pages)),
+		zap.Int("total_pages", totalPages))
+
+	return pages, nil
 }
 
 // ExtractTextSmart extracts PDF text with intelligent truncation for large documents
@@ -343,4 +441,115 @@ func (ps *PDFService) truncateAtSentenceBoundary(ctx context.Context, text strin
 
 	// If we couldn't find a valid truncation point, return original
 	return text, nil
+}
+
+// cleanPDFText cleans up PDF text extraction issues
+// Handles cases where each character is separated by spaces or where words are concatenated
+func cleanPDFText(text string) string {
+	// First, check if we have the "character spacing" issue (e.g., "h e l l o")
+	// This is indicated by many single-character "words"
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return text
+	}
+
+	// Count single-character words
+	singleCharCount := 0
+	for _, word := range words {
+		if len([]rune(word)) == 1 {
+			singleCharCount++
+		}
+	}
+
+	// If more than 60% are single characters, we have character spacing issue
+	if float64(singleCharCount)/float64(len(words)) > 0.6 {
+		// Remove all spaces - they're between characters, not words
+		text = strings.ReplaceAll(text, " ", "")
+		// Now we need to add spaces back intelligently
+		return addIntelligentSpacing(text)
+	}
+
+	// Otherwise, text is mostly fine, just normalize whitespace
+	return normalizeWhitespace(text)
+}
+
+// addIntelligentSpacing adds spaces to text that has none
+func addIntelligentSpacing(text string) string {
+	var result strings.Builder
+	runes := []rune(text)
+
+	for i := 0; i < len(runes); i++ {
+		current := runes[i]
+		result.WriteRune(current)
+
+		if i < len(runes)-1 {
+			next := runes[i+1]
+
+			// Add space after sentence-ending punctuation
+			if (current == '.' || current == '!' || current == '?') && (isUpper(next) || isLetter(next)) {
+				result.WriteRune(' ')
+			}
+
+			// Add space after comma, semicolon, colon
+			if (current == ',' || current == ';' || current == ':') && (isLetter(next) || isDigit(next)) {
+				result.WriteRune(' ')
+			}
+
+			// Add space between lowercase and uppercase
+			if isLower(current) && isUpper(next) {
+				result.WriteRune(' ')
+			}
+
+			// Add space after closing parenthesis
+			if (current == ')' || current == ']' || current == '}') && (isUpper(next) || isLower(next)) {
+				result.WriteRune(' ')
+			}
+
+			// Add space before opening parenthesis after letter/digit
+			if (isLetter(current) || isDigit(current)) && (next == '(' || next == '[' || next == '{') {
+				result.WriteRune(' ')
+			}
+
+			// Add space between number and letter
+			if isDigit(current) && isLetter(next) {
+				result.WriteRune(' ')
+			}
+
+			// Add space between letter and number (e.g., "level1" -> "level 1")
+			if isLetter(current) && isDigit(next) {
+				result.WriteRune(' ')
+			}
+
+			// Add space after dash/hyphen if followed by uppercase
+			if (current == '–' || current == '-' || current == '—') && isUpper(next) {
+				result.WriteRune(' ')
+			}
+		}
+	}
+
+	return result.String()
+}
+
+// normalizeWhitespace collapses multiple spaces into one
+func normalizeWhitespace(text string) string {
+	// Replace multiple spaces with single space
+	re := regexp.MustCompile(`\s+`)
+	return re.ReplaceAllString(text, " ")
+}
+
+// Helper functions for character classification
+func isUpper(r rune) bool {
+	return r >= 'A' && r <= 'Z'
+}
+
+func isLower(r rune) bool {
+	return r >= 'a' && r <= 'z'
+}
+
+func isLetter(r rune) bool {
+	return isUpper(r) || isLower(r)
+}
+
+func isDigit(r rune) bool {
+	return r >= '0' && r <= '9'
 }

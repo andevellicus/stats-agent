@@ -293,6 +293,17 @@ func (r *RAG) persistPreparedDocument(ctx context.Context, data *ragDocumentData
 
 	var documents []chromem.Document
 	if len(data.EmbedContent) > r.maxEmbeddingChars {
+		if data.Metadata["role"] == "fact" {
+			previewLen := 150
+			if len(data.EmbedContent) < previewLen {
+				previewLen = len(data.EmbedContent)
+			}
+			r.logger.Warn("Fact summary exceeds chunking threshold - should be more concise",
+				zap.Int("length", len(data.EmbedContent)),
+				zap.Int("threshold", r.maxEmbeddingChars),
+				zap.String("document_id", data.Metadata["document_id"]),
+				zap.String("preview", data.EmbedContent[:previewLen]))
+		}
 		r.logger.Info("Chunking oversized message for embedding",
 			zap.String("role", data.Metadata["role"]),
 			zap.Int("length", len(data.EmbedContent)))
