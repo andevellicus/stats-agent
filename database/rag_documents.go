@@ -11,9 +11,31 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/lib/pq"
+	"github.com/pgvector/pgvector-go"
 )
 
+// RAGDocument represents a document in the rag_documents table (content and metadata only).
+type RAGDocument struct {
+	ID          uuid.UUID
+	Content     string
+	Metadata    map[string]string
+	ContentHash string
+	CreatedAt   time.Time
+}
+
+// RAGEmbedding represents an embedding window in the rag_embeddings table.
+type RAGEmbedding struct {
+	ID          uuid.UUID
+	DocumentID  uuid.UUID
+	WindowIndex int
+	WindowStart int
+	WindowEnd   int
+	WindowText  string
+	Embedding   []float32
+	CreatedAt   time.Time
+}
+
+// StoredRAGDocument is the legacy combined struct (for backwards compatibility).
 type StoredRAGDocument struct {
 	ID               uuid.UUID
 	DocumentID       uuid.UUID
@@ -35,32 +57,128 @@ type BM25SearchResult struct {
 	ExactMatchBonus  float64
 }
 
-// UpsertRAGDocument stores or updates a RAG document's content and metadata.
-func (s *PostgresStore) UpsertRAGDocument(ctx context.Context, documentID uuid.UUID, content string, embeddingContent string, metadata map[string]string, contentHash string, embedding []float32) error {
+// UpsertDocument stores or updates a RAG document's content and metadata (without embeddings).
+// Returns the document ID (either existing or newly created).
+func (s *PostgresStore) UpsertDocument(ctx context.Context, documentID uuid.UUID, content string, metadata map[string]string, contentHash string) (uuid.UUID, error) {
 	metaJSON, err := json.Marshal(metadata)
 	if err != nil {
-		return fmt.Errorf("failed to marshal metadata for rag document: %w", err)
+		return uuid.Nil, fmt.Errorf("failed to marshal metadata for rag document: %w", err)
 	}
 
 	hashValue := sql.NullString{String: contentHash, Valid: contentHash != ""}
-	var embeddingValue interface{}
-	if len(embedding) > 0 {
-		embeddingValue = pq.Float32Array(embedding)
-	} else {
-		embeddingValue = nil
-	}
 
 	query := `
-	        INSERT INTO rag_documents (id, document_id, content, embedding_content, metadata, content_hash, embedding, created_at)
-	        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-	        ON CONFLICT (document_id)
-	        DO UPDATE SET content = EXCLUDED.content, embedding_content = EXCLUDED.embedding_content, metadata = EXCLUDED.metadata, content_hash = EXCLUDED.content_hash, embedding = EXCLUDED.embedding, created_at = NOW()
-	    `
+		INSERT INTO rag_documents (id, content, metadata, content_hash, created_at)
+		VALUES ($1, $2, $3, $4, NOW())
+		ON CONFLICT (id)
+		DO UPDATE SET content = EXCLUDED.content, metadata = EXCLUDED.metadata, content_hash = EXCLUDED.content_hash, created_at = NOW()
+		RETURNING id
+	`
 
-	rowID := uuid.New()
-	if _, err := s.DB.ExecContext(ctx, query, rowID, documentID, content, embeddingContent, string(metaJSON), hashValue, embeddingValue); err != nil {
-		return fmt.Errorf("failed to upsert rag document: %w", err)
+	var returnedID uuid.UUID
+	if err := s.DB.QueryRowContext(ctx, query, documentID, content, string(metaJSON), hashValue).Scan(&returnedID); err != nil {
+		return uuid.Nil, fmt.Errorf("failed to upsert rag document: %w", err)
 	}
+	return returnedID, nil
+}
+
+// CreateEmbedding stores a single embedding window for a document.
+func (s *PostgresStore) CreateEmbedding(ctx context.Context, documentID uuid.UUID, windowIndex, windowStart, windowEnd int, windowText string, embedding []float32) error {
+	if len(embedding) == 0 {
+		return fmt.Errorf("cannot create embedding with empty vector")
+	}
+
+	embeddingVector := pgvector.NewVector(embedding)
+
+	query := `
+		INSERT INTO rag_embeddings (id, document_id, window_index, window_start, window_end, window_text, embedding, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+		ON CONFLICT (document_id, window_index)
+		DO UPDATE SET window_start = EXCLUDED.window_start, window_end = EXCLUDED.window_end, window_text = EXCLUDED.window_text, embedding = EXCLUDED.embedding, created_at = NOW()
+	`
+
+	embeddingID := uuid.New()
+	if _, err := s.DB.ExecContext(ctx, query, embeddingID, documentID, windowIndex, windowStart, windowEnd, windowText, embeddingVector); err != nil {
+		return fmt.Errorf("failed to create embedding for document %s window %d: %w", documentID, windowIndex, err)
+	}
+	return nil
+}
+
+// GetDocumentEmbeddings retrieves all embedding windows for a specific document.
+func (s *PostgresStore) GetDocumentEmbeddings(ctx context.Context, documentID uuid.UUID) ([]RAGEmbedding, error) {
+	query := `
+		SELECT id, document_id, window_index, window_start, window_end, window_text, embedding, created_at
+		FROM rag_embeddings
+		WHERE document_id = $1
+		ORDER BY window_index ASC
+	`
+
+	rows, err := s.DB.QueryContext(ctx, query, documentID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query embeddings for document %s: %w", documentID, err)
+	}
+	defer rows.Close()
+
+	var embeddings []RAGEmbedding
+	for rows.Next() {
+		var (
+			id          uuid.UUID
+			docID       uuid.UUID
+			windowIndex int
+			windowStart int
+			windowEnd   int
+			windowText  string
+			embedding   pgvector.Vector
+			createdAt   time.Time
+		)
+
+		if err := rows.Scan(&id, &docID, &windowIndex, &windowStart, &windowEnd, &windowText, &embedding, &createdAt); err != nil {
+			return nil, fmt.Errorf("failed to scan embedding row: %w", err)
+		}
+
+		var embeddingCopy []float32
+		if embeddingSlice := embedding.Slice(); len(embeddingSlice) > 0 {
+			embeddingCopy = make([]float32, len(embeddingSlice))
+			copy(embeddingCopy, embeddingSlice)
+		}
+
+		embeddings = append(embeddings, RAGEmbedding{
+			ID:          id,
+			DocumentID:  docID,
+			WindowIndex: windowIndex,
+			WindowStart: windowStart,
+			WindowEnd:   windowEnd,
+			WindowText:  windowText,
+			Embedding:   embeddingCopy,
+			CreatedAt:   createdAt,
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating embedding rows: %w", err)
+	}
+
+	return embeddings, nil
+}
+
+// UpsertRAGDocument is the legacy function (deprecated, kept for backwards compatibility during migration).
+func (s *PostgresStore) UpsertRAGDocument(ctx context.Context, documentID uuid.UUID, content string, embeddingContent string, metadata map[string]string, contentHash string, embedding []float32) error {
+	// Use new schema: store document first
+	if _, err := s.UpsertDocument(ctx, documentID, content, metadata, contentHash); err != nil {
+		return err
+	}
+
+	// Store single embedding window if provided
+	if len(embedding) > 0 {
+		windowText := embeddingContent
+		if windowText == "" {
+			windowText = content
+		}
+		if err := s.CreateEmbedding(ctx, documentID, 0, 0, len(windowText), windowText, embedding); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -87,7 +205,7 @@ func (s *PostgresStore) ListRAGDocuments(ctx context.Context) ([]StoredRAGDocume
 			embeddingContent sql.NullString
 			metadataJSON     []byte
 			contentHash      sql.NullString
-			embedding        pq.Float32Array
+			embedding        pgvector.Vector
 			createdAt        time.Time
 		)
 
@@ -103,9 +221,9 @@ func (s *PostgresStore) ListRAGDocuments(ctx context.Context) ([]StoredRAGDocume
 		}
 
 		var embeddingCopy []float32
-		if len(embedding) > 0 {
-			embeddingCopy = make([]float32, len(embedding))
-			copy(embeddingCopy, embedding)
+		if embeddingSlice := embedding.Slice(); len(embeddingSlice) > 0 {
+			embeddingCopy = make([]float32, len(embeddingSlice))
+			copy(embeddingCopy, embeddingSlice)
 		}
 
 		documents = append(documents, StoredRAGDocument{
@@ -129,7 +247,7 @@ func (s *PostgresStore) ListRAGDocuments(ctx context.Context) ([]StoredRAGDocume
 
 // GetRAGDocumentContent returns the stored content for a given document ID.
 func (s *PostgresStore) GetRAGDocumentContent(ctx context.Context, documentID uuid.UUID) (string, error) {
-	const query = `SELECT content FROM rag_documents WHERE document_id = $1`
+	const query = `SELECT content FROM rag_documents WHERE id = $1`
 
 	var content string
 	err := s.DB.QueryRowContext(ctx, query, documentID).Scan(&content)
@@ -142,6 +260,42 @@ func (s *PostgresStore) GetRAGDocumentContent(ctx context.Context, documentID uu
 	return content, nil
 }
 
+// GetDocument retrieves a full document record by ID.
+func (s *PostgresStore) GetDocument(ctx context.Context, documentID uuid.UUID) (RAGDocument, error) {
+	query := `SELECT id, content, metadata, content_hash, created_at FROM rag_documents WHERE id = $1`
+
+	var (
+		id           uuid.UUID
+		content      string
+		metadataJSON []byte
+		contentHash  sql.NullString
+		createdAt    time.Time
+	)
+
+	err := s.DB.QueryRowContext(ctx, query, documentID).Scan(&id, &content, &metadataJSON, &contentHash, &createdAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return RAGDocument{}, sql.ErrNoRows
+		}
+		return RAGDocument{}, fmt.Errorf("failed to fetch document: %w", err)
+	}
+
+	metadata := make(map[string]string)
+	if len(metadataJSON) > 0 {
+		if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
+			return RAGDocument{}, fmt.Errorf("failed to unmarshal document metadata: %w", err)
+		}
+	}
+
+	return RAGDocument{
+		ID:          id,
+		Content:     content,
+		Metadata:    metadata,
+		ContentHash: contentHash.String,
+		CreatedAt:   createdAt,
+	}, nil
+}
+
 // FindRAGDocumentByHash looks for an existing RAG document using session, role, and hashed content.
 // Returns uuid.Nil when no matching record exists or hash is empty.
 func (s *PostgresStore) FindRAGDocumentByHash(ctx context.Context, sessionID, role, contentHash string) (uuid.UUID, error) {
@@ -150,7 +304,7 @@ func (s *PostgresStore) FindRAGDocumentByHash(ctx context.Context, sessionID, ro
 	}
 
 	var builder strings.Builder
-	builder.WriteString("SELECT document_id FROM rag_documents WHERE content_hash = $1")
+	builder.WriteString("SELECT id FROM rag_documents WHERE content_hash = $1")
 	args := []any{contentHash}
 	paramIndex := 2
 
@@ -188,7 +342,7 @@ func (s *PostgresStore) SearchRAGDocumentsBM25(ctx context.Context, query string
 		return nil, nil
 	}
 
-	const searchableTextExpr = "COALESCE(rd.embedding_content, rd.content) || ' ' || COALESCE(meta.metadata_text, '')"
+	const searchableTextExpr = "rd.content || ' ' || COALESCE(meta.metadata_text, '')"
 	const rankExpr = "ts_rank_cd(to_tsvector('english', " + searchableTextExpr + "), websearch_to_tsquery('english', $1))"
 	const positionExpr = "position(lower($1) in lower(" + searchableTextExpr + "))"
 	const bonusExpr = "CASE WHEN " + positionExpr + " > 0 THEN 0.2 ELSE 0 END"
@@ -196,7 +350,7 @@ func (s *PostgresStore) SearchRAGDocumentsBM25(ctx context.Context, query string
 	var builder strings.Builder
 	args := []any{trimmed}
 
-	builder.WriteString("SELECT rd.document_id, rd.metadata, rd.content, rd.embedding_content, ")
+	builder.WriteString("SELECT rd.id, rd.metadata, rd.content, ")
 	builder.WriteString(rankExpr)
 	builder.WriteString(" AS rank, ")
 	builder.WriteString(bonusExpr)
@@ -226,15 +380,14 @@ func (s *PostgresStore) SearchRAGDocumentsBM25(ctx context.Context, query string
 	var results []BM25SearchResult
 	for rows.Next() {
 		var (
-			documentID       uuid.UUID
-			metadataJSON     []byte
-			content          string
-			embeddingContent sql.NullString
-			rank             float64
-			exactBonus       float64
+			documentID   uuid.UUID
+			metadataJSON []byte
+			content      string
+			rank         float64
+			exactBonus   float64
 		)
 
-		if err := rows.Scan(&documentID, &metadataJSON, &content, &embeddingContent, &rank, &exactBonus); err != nil {
+		if err := rows.Scan(&documentID, &metadataJSON, &content, &rank, &exactBonus); err != nil {
 			return nil, fmt.Errorf("failed to scan BM25 search result: %w", err)
 		}
 
@@ -249,7 +402,7 @@ func (s *PostgresStore) SearchRAGDocumentsBM25(ctx context.Context, query string
 			DocumentID:       documentID,
 			Metadata:         metadata,
 			Content:          content,
-			EmbeddingContent: embeddingContent.String,
+			EmbeddingContent: "",
 			BM25Score:        rank,
 			ExactMatchBonus:  exactBonus,
 		})
@@ -257,6 +410,97 @@ func (s *PostgresStore) SearchRAGDocumentsBM25(ctx context.Context, query string
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating BM25 search results: %w", err)
+	}
+
+	return results, nil
+}
+
+// VectorSearchResult represents a vector similarity search hit from pgvector.
+type VectorSearchResult struct {
+	DocumentID       uuid.UUID
+	Metadata         map[string]string
+	Content          string
+	EmbeddingContent string
+	Similarity       float64
+	WindowIndex      int // Which embedding window matched (for multi-vector documents)
+	WindowStart      int // Character offset where window starts in full document
+	WindowEnd        int // Character offset where window ends in full document
+}
+
+// VectorSearchRAGDocuments performs a cosine similarity search using pgvector.
+// Returns documents ordered by similarity (highest first), joining embeddings with documents.
+func (s *PostgresStore) VectorSearchRAGDocuments(ctx context.Context, queryVector []float32, limit int, sessionID string) ([]VectorSearchResult, error) {
+	if len(queryVector) == 0 || limit <= 0 {
+		return nil, nil
+	}
+
+	// Convert []float32 to pgvector.Vector
+	vec := pgvector.NewVector(queryVector)
+
+	var builder strings.Builder
+	args := []any{vec}
+
+	builder.WriteString("SELECT rd.id, rd.metadata, rd.content, re.window_text, re.window_index, re.window_start, re.window_end, 1 - (re.embedding <=> $1) AS similarity ")
+	builder.WriteString("FROM rag_embeddings re ")
+	builder.WriteString("INNER JOIN rag_documents rd ON re.document_id = rd.id ")
+	builder.WriteString("WHERE re.embedding IS NOT NULL ")
+
+	// Apply session-specific filtering when provided
+	if sessionID != "" {
+		builder.WriteString("AND COALESCE(rd.metadata ->> 'session_id', '') = $")
+		builder.WriteString(strconv.Itoa(len(args) + 1))
+		args = append(args, sessionID)
+		builder.WriteString(" ")
+	}
+
+	builder.WriteString("ORDER BY re.embedding <=> $1 LIMIT $")
+	builder.WriteString(strconv.Itoa(len(args) + 1))
+	args = append(args, limit)
+
+	rows, err := s.DB.QueryContext(ctx, builder.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute vector search: %w", err)
+	}
+	defer rows.Close()
+
+	var results []VectorSearchResult
+	for rows.Next() {
+		var (
+			documentID       uuid.UUID
+			metadataJSON     []byte
+			content          string
+			embeddingContent string
+			windowIndex      int
+			windowStart      int
+			windowEnd        int
+			similarity       float64
+		)
+
+		if err := rows.Scan(&documentID, &metadataJSON, &content, &embeddingContent, &windowIndex, &windowStart, &windowEnd, &similarity); err != nil {
+			return nil, fmt.Errorf("failed to scan vector search result: %w", err)
+		}
+
+		metadata := make(map[string]string)
+		if len(metadataJSON) > 0 {
+			if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal vector search metadata: %w", err)
+			}
+		}
+
+		results = append(results, VectorSearchResult{
+			DocumentID:       documentID,
+			Metadata:         metadata,
+			Content:          content,
+			EmbeddingContent: embeddingContent,
+			Similarity:       similarity,
+			WindowIndex:      windowIndex,
+			WindowStart:      windowStart,
+			WindowEnd:        windowEnd,
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating vector search results: %w", err)
 	}
 
 	return results, nil

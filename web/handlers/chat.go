@@ -315,61 +315,46 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 			return
 		}
 
-		// Extract text from PDF and prepend to message
+		// Handle PDF uploads
 		if ext == ".pdf" {
-			// Extract full PDF text without truncation
-			pdfText, err := h.pdfService.ExtractText(dst)
-			if err != nil {
-				h.logger.Error("Failed to extract PDF text",
-					zap.Error(err),
-					zap.String("filename", sanitizedFilename))
-				// Continue - user can still reference the file
+			// Set user message for display (without embedding full PDF text)
+			if strings.TrimSpace(req.Message) == "" {
+				req.Message = fmt.Sprintf("[📎 File uploaded: %s]\n\nPlease analyze the content from this PDF and provide statistical insights.", file.Filename)
+				displayMessage = fmt.Sprintf("[📎 PDF uploaded: %s]<br><br>Please analyze the content from this PDF and provide statistical insights.", file.Filename)
 			} else {
-				// Prepend full PDF content to user message for agent processing
-				pdfContent := fmt.Sprintf("[PDF Content from %s]\n\n%s\n\n---\n\n",
-					file.Filename, pdfText)
+				displayMessage = fmt.Sprintf("[📎 PDF uploaded: %s]<br><br>%s", file.Filename, req.Message)
+				req.Message = fmt.Sprintf("[📎 File uploaded: %s]\n\n%s", file.Filename, req.Message)
+			}
 
-				// Store original user message for display
-				originalMessage := req.Message
-
-				// Prepend PDF content to user's message for agent processing
-				if strings.TrimSpace(req.Message) == "" {
-					req.Message = pdfContent + "Please analyze the content from this PDF and provide statistical insights."
-					displayMessage = fmt.Sprintf("[📎 PDF uploaded: %s]<br><br>Please analyze the content from this PDF and provide statistical insights.", file.Filename)
-				} else {
-					req.Message = pdfContent + req.Message
-					displayMessage = fmt.Sprintf("[📎 PDF uploaded: %s]<br><br>%s", file.Filename, originalMessage)
+			// Extract pages and store in RAG asynchronously
+			// The agent will retrieve relevant PDF content via semantic search
+			go func() {
+				pages, err := h.pdfService.ExtractPages(dst)
+				if err != nil {
+					h.logger.Error("Failed to extract PDF pages for RAG",
+						zap.Error(err),
+						zap.String("filename", sanitizedFilename))
+					return
 				}
 
-				// Extract pages and store in RAG asynchronously
-				go func() {
-					pages, err := h.pdfService.ExtractPages(dst)
-					if err != nil {
-						h.logger.Error("Failed to extract PDF pages for RAG",
-							zap.Error(err),
-							zap.String("filename", sanitizedFilename))
-						return
-					}
+				ragInstance := h.agent.GetRAG()
+				if ragInstance == nil {
+					h.logger.Warn("RAG instance not available for PDF storage")
+					return
+				}
 
-					ragInstance := h.agent.GetRAG()
-					if ragInstance == nil {
-						h.logger.Warn("RAG instance not available for PDF storage")
-						return
-					}
-
-					if err := ragInstance.AddPDFPagesToRAG(context.Background(), req.SessionID, file.Filename, pages); err != nil {
-						h.logger.Error("Failed to store PDF pages in RAG",
-							zap.Error(err),
-							zap.String("filename", sanitizedFilename),
-							zap.String("session_id", req.SessionID))
-					} else {
-						h.logger.Info("Successfully stored PDF pages in RAG",
-							zap.String("filename", sanitizedFilename),
-							zap.Int("pages", len(pages)),
-							zap.String("session_id", req.SessionID))
-					}
-				}()
-			}
+				if err := ragInstance.AddPDFPagesToRAG(context.Background(), req.SessionID, file.Filename, pages); err != nil {
+					h.logger.Error("Failed to store PDF pages in RAG",
+						zap.Error(err),
+						zap.String("filename", sanitizedFilename),
+						zap.String("session_id", req.SessionID))
+				} else {
+					h.logger.Info("Successfully stored PDF pages in RAG",
+						zap.String("filename", sanitizedFilename),
+						zap.Int("pages", len(pages)),
+						zap.String("session_id", req.SessionID))
+				}
+			}()
 		} else {
 			// For non-PDF files, use existing message logic
 			if strings.TrimSpace(req.Message) == "" {

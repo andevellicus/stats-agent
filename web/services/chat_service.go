@@ -122,7 +122,13 @@ func (cs *ChatService) InitializeSession(ctx context.Context, sessionID string) 
 	var uploadedFiles []string
 	for _, file := range files {
 		if !file.IsDir() {
-			uploadedFiles = append(uploadedFiles, file.Name())
+			// Only report CSV and Excel files that the agent can directly process
+			// Other files (PDFs, images) are tracked in the database but not auto-loaded
+			filename := file.Name()
+			ext := filepath.Ext(strings.ToLower(filename))
+			if ext == ".csv" || ext == ".xlsx" || ext == ".xls" {
+				uploadedFiles = append(uploadedFiles, filename)
+			}
 		}
 	}
 

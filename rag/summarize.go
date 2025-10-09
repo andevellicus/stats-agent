@@ -59,9 +59,8 @@ CRITICAL RULES:
 2. ALWAYS preserve: numbers, statistical measures, column names, file names, variable names
 3. Extract MULTIPLE facts if relevant (1-3 facts maximum)
 4. Each fact should be ONE concise sentence
-5. Start each fact with "Fact:" on its own line
-6. Ignore: instructions, system messages, casual chat, failed attempts
-7. If no relevant facts exist, output: "Fact: No relevant prior analysis found."
+5. Ignore: instructions, system messages, casual chat, failed attempts
+6. If no relevant facts exist, output: "No relevant prior analysis found."
 
 WHAT TO EXTRACT:
 - Statistical results (correlations, p-values, test results, effect sizes)
@@ -82,14 +81,13 @@ Example 1:
 Memory: "Let me help you analyze that. First, I loaded the data. Then I checked for missing values - found 23 missing values in the income column. I dropped those rows and proceeded with the t-test. Independent samples t-test comparing male vs female salaries showed t=2.34, df=198, p=0.021, Cohen's d=0.33."
 User question: "What were the results of the gender salary comparison?"
 Output:
-Fact: Dataset had 23 missing values in income column which were removed.
-Fact: Independent t-test found statistically significant salary difference between genders (t=2.34, df=198, p=0.021) with small effect size (d=0.33).
+Dataset had 23 missing values in income column which were removed. Independent t-test found statistically significant salary difference between genders (t=2.34, df=198, p=0.021) with small effect size (d=0.33).
 
 Example 2:
 Memory: "Hi! How can I help you today? What kind of analysis would you like to perform?"
 User question: "What did we discuss about regression?"
 Output:
-Fact: No relevant prior analysis found.
+No relevant prior analysis found.
 
 Remember: Be SPECIFIC. Include actual numbers, variable names, and technical details. Vague summaries are useless.`
 

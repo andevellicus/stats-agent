@@ -24,7 +24,6 @@ const (
 	defaultMaxHybridCandidates              = 100
 	defaultHybridSemanticWeight             = 0.7
 	defaultHybridBM25Weight                 = 0.3
-	defaultRAGContextMaxChars               = 12000
 	defaultHybridFactBoost                  = 1.3
 	defaultHybridSummaryBoost               = 1.2
 	defaultHybridErrorPenalty               = 0.8
@@ -74,10 +73,13 @@ type Config struct {
 	EmbeddingTokenSoftLimit          int           `mapstructure:"EMBEDDING_TOKEN_SOFT_LIMIT"`
 	EmbeddingTokenTarget             int           `mapstructure:"EMBEDDING_TOKEN_TARGET"`
 	MinTokenCheckCharThreshold       int           `mapstructure:"MIN_TOKEN_CHECK_CHAR_THRESHOLD"`
+	ConversationChunkSize            int           `mapstructure:"CONVERSATION_CHUNK_SIZE"`
+	ConversationChunkOverlap         float64       `mapstructure:"CONVERSATION_CHUNK_OVERLAP"`
+	DocumentChunkSize                int           `mapstructure:"DOCUMENT_CHUNK_SIZE"`
+	DocumentChunkOverlap             float64       `mapstructure:"DOCUMENT_CHUNK_OVERLAP"`
 	MaxHybridCandidates              int           `mapstructure:"MAX_HYBRID_CANDIDATES"`
 	HybridSemanticWeight             float64       `mapstructure:"HYBRID_SEMANTIC_WEIGHT"`
 	HybridBM25Weight                 float64       `mapstructure:"HYBRID_BM25_WEIGHT"`
-	RAGContextMaxChars               int           `mapstructure:"RAG_CONTEXT_MAX_CHARS"`
 	HybridFactBoost                  float64       `mapstructure:"HYBRID_FACT_BOOST"`
 	HybridSummaryBoost               float64       `mapstructure:"HYBRID_SUMMARY_BOOST"`
 	HybridErrorPenalty               float64       `mapstructure:"HYBRID_ERROR_PENALTY"`
@@ -135,10 +137,13 @@ func Load(logger *zap.Logger) *Config {
 	viper.SetDefault("MAX_HYBRID_CANDIDATES", 100)
 	viper.SetDefault("HYBRID_SEMANTIC_WEIGHT", defaultHybridSemanticWeight)
 	viper.SetDefault("HYBRID_BM25_WEIGHT", defaultHybridBM25Weight)
-	viper.SetDefault("RAG_CONTEXT_MAX_CHARS", defaultRAGContextMaxChars)
 	viper.SetDefault("HYBRID_FACT_BOOST", defaultHybridFactBoost)
 	viper.SetDefault("HYBRID_SUMMARY_BOOST", defaultHybridSummaryBoost)
 	viper.SetDefault("HYBRID_ERROR_PENALTY", defaultHybridErrorPenalty)
+	viper.SetDefault("CONVERSATION_CHUNK_SIZE", 1500)
+	viper.SetDefault("CONVERSATION_CHUNK_OVERLAP", 0.20)
+	viper.SetDefault("DOCUMENT_CHUNK_SIZE", 3500)
+	viper.SetDefault("DOCUMENT_CHUNK_OVERLAP", 0.0)
 	viper.SetDefault("PDF_TOKEN_THRESHOLD", defaultPDFTokenThreshold)
 	viper.SetDefault("PDF_FIRST_PAGES_PRIORITY", defaultPDFFirstPagesPriority)
 	viper.SetDefault("PDF_ENABLE_TABLE_DETECTION", defaultPDFEnableTableDetection)
@@ -243,13 +248,6 @@ func Load(logger *zap.Logger) *Config {
 	if config.HybridSemanticWeight == 0 && config.HybridBM25Weight == 0 {
 		config.HybridSemanticWeight = defaultHybridSemanticWeight
 		config.HybridBM25Weight = defaultHybridBM25Weight
-	}
-	if config.RAGContextMaxChars <= 0 {
-		approx := config.ContextLength * 4
-		if approx <= 0 {
-			approx = defaultRAGContextMaxChars
-		}
-		config.RAGContextMaxChars = approx
 	}
 	if config.HybridFactBoost <= 0 {
 		config.HybridFactBoost = defaultHybridFactBoost

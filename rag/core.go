@@ -13,24 +13,22 @@ import (
 	"stats-agent/llmclient"
 
 	"github.com/google/uuid"
-	"github.com/philippgille/chromem-go"
 	"go.uber.org/zap"
 )
 
 const (
-	// BGE models typically handle 512 tokens max
-	// ~4 chars per token, with safety margin
-	defaultMaxEmbeddingChars  = 1000
-	defaultMaxEmbeddingTokens = 250
+	// BGE-large-en-v1.5 has a 512 token hard limit
+	defaultMaxEmbeddingTokens = 480 // Safe default (512 - 32 buffer)
 )
+
+// EmbeddingFunc is a function that generates embeddings for text.
+type EmbeddingFunc func(ctx context.Context, text string) ([]float32, error)
 
 type RAG struct {
 	cfg                        *config.Config
-	db                         *chromem.DB
 	store                      *database.PostgresStore
-	embedder                   chromem.EmbeddingFunc
+	embedder                   EmbeddingFunc
 	logger                     *zap.Logger
-	maxEmbeddingChars          int
 	maxEmbeddingTokens         int
 	embeddingTokenSoftLimit    int
 	embeddingTokenTarget       int
@@ -39,7 +37,6 @@ type RAG struct {
 	datasetMu                  sync.RWMutex
 	sessionDatasets            map[string]string
 	sentenceSplitter           SentenceSplitter
-	contextMaxChars            int
 }
 
 type factStoredContent struct {
@@ -58,6 +55,7 @@ type hybridCandidate struct {
 	HasSemantic   bool
 	HasBM25       bool
 	Score         float64
+	WindowIndex   int // Which embedding window matched (for multi-vector documents)
 }
 
 // Embedding request/response types moved to llmclient
@@ -68,7 +66,13 @@ type ragDocumentData struct {
 	StoredContent string
 	EmbedContent  string
 	ContentHash   string
-	SummaryDoc    *chromem.Document
+	SummaryDoc    *summaryDocument
+}
+
+type summaryDocument struct {
+	ID       string
+	Content  string
+	Metadata map[string]string
 }
 
 func New(cfg *config.Config, store *database.PostgresStore, logger *zap.Logger) (*RAG, error) {
@@ -76,16 +80,8 @@ func New(cfg *config.Config, store *database.PostgresStore, logger *zap.Logger) 
 		return nil, fmt.Errorf("postgres store is required for RAG persistence")
 	}
 
-	db := chromem.NewDB()
 	embedder := createLlamaCppEmbedding(cfg, logger)
-	if _, err := db.GetOrCreateCollection("long-term-memory", nil, embedder); err != nil {
-		return nil, fmt.Errorf("failed to create initial collection: %w", err)
-	}
 
-	maxEmbeddingChars := cfg.MaxEmbeddingChars
-	if maxEmbeddingChars <= 0 {
-		maxEmbeddingChars = defaultMaxEmbeddingChars
-	}
 	maxEmbeddingTokens := cfg.MaxEmbeddingTokens
 	if maxEmbeddingTokens <= 0 {
 		maxEmbeddingTokens = defaultMaxEmbeddingTokens
@@ -95,21 +91,11 @@ func New(cfg *config.Config, store *database.PostgresStore, logger *zap.Logger) 
 	minTokenThreshold := cfg.MinTokenCheckCharThreshold
 	hybridCandidates := cfg.MaxHybridCandidates
 
-	contextMax := cfg.RAGContextMaxChars
-	if contextMax <= 0 {
-		contextMax = cfg.ContextLength * 4
-		if contextMax <= 0 {
-			contextMax = 12000
-		}
-	}
-
 	r := &RAG{
 		cfg:                        cfg,
-		db:                         db,
 		store:                      store,
 		embedder:                   embedder,
 		logger:                     logger,
-		maxEmbeddingChars:          maxEmbeddingChars,
 		maxEmbeddingTokens:         maxEmbeddingTokens,
 		embeddingTokenSoftLimit:    embeddingSoftLimit,
 		embeddingTokenTarget:       embeddingTarget,
@@ -117,7 +103,6 @@ func New(cfg *config.Config, store *database.PostgresStore, logger *zap.Logger) 
 		maxHybridCandidates:        hybridCandidates,
 		sessionDatasets:            make(map[string]string),
 		sentenceSplitter:           NewRegexSentenceSplitter(),
-		contextMaxChars:            contextMax,
 	}
 
 	return r, nil
@@ -187,6 +172,8 @@ func filterStructuralMetadata(metadata map[string]string) map[string]string {
 		"parent_document_role": true,
 		"chunk_index":          true,
 		"dataset":              true, // Keep for query boosting and metadata filtering
+		"filename":             true, // Original filename
+		"page_number":          true, // Page number for PDFs
 	}
 
 	for key, value := range metadata {
@@ -234,17 +221,33 @@ func (r *RAG) clearSessionDataset(sessionID string) {
 	r.datasetMu.Unlock()
 }
 
-func resolveLookupID(metadata map[string]string) string {
-	if metadata == nil {
+func resolveLookupID(documentID string, metadata map[string]string) string {
+	if documentID == "" {
 		return ""
 	}
-	docID := metadata["document_id"]
-	lookupID := docID
-	if docType, ok := metadata["type"]; ok && (docType == "summary" || docType == "chunk") {
+	lookupID := documentID
+
+	if metadata == nil {
+		return lookupID
+	}
+
+	docType, hasType := metadata["type"]
+	if !hasType {
+		return lookupID
+	}
+
+	// For conversation chunks and summaries, fetch parent document
+	if docType == "summary" || docType == "chunk" {
 		if parentID := metadata["parent_document_id"]; parentID != "" {
 			lookupID = parentID
 		}
 	}
+
+	// For document chunks, return the chunk itself (no parent lookup)
+	if docType == "document_chunk" {
+		return documentID
+	}
+
 	return lookupID
 }
 
@@ -258,7 +261,7 @@ func resolveRole(metadata map[string]string) string {
 	return metadata["parent_document_role"]
 }
 
-func createLlamaCppEmbedding(cfg *config.Config, logger *zap.Logger) chromem.EmbeddingFunc {
+func createLlamaCppEmbedding(cfg *config.Config, logger *zap.Logger) EmbeddingFunc {
 	client := llmclient.New(cfg, logger)
 	return func(ctx context.Context, doc string) ([]float32, error) {
 		return client.Embed(ctx, cfg.EmbeddingLLMHost, doc)

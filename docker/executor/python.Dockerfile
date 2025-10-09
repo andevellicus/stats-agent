@@ -28,7 +28,7 @@ RUN pip install \
     plotly \
     # Automated EDA
     ydata-profiling \
-    shap \
+    shap pycox\
     lifelines arch \
     imblearn umap \
     pmdarima tbats prophet 

@@ -76,7 +76,7 @@ func (r *RAG) QueryByMetadata(ctx context.Context, sessionID string, filters map
 	}
 
 	queryBuilder := strings.Builder{}
-	queryBuilder.WriteString("SELECT document_id, content, metadata FROM rag_documents WHERE ")
+	queryBuilder.WriteString("SELECT id, content, metadata FROM rag_documents WHERE ")
 	queryBuilder.WriteString(strings.Join(conditions, " AND "))
 	queryBuilder.WriteString(fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d", len(args)+1))
 	args = append(args, nResults)
@@ -103,10 +103,6 @@ func (r *RAG) QueryByMetadata(ctx context.Context, sessionID string, filters map
 			}
 		}
 
-		if _, ok := meta["document_id"]; !ok {
-			meta["document_id"] = docID.String()
-		}
-
 		records = append(records, documentRecord{
 			documentID: docID.String(),
 			content:    content,
@@ -130,8 +126,6 @@ func (r *RAG) renderRecordsToMemory(ctx context.Context, records []documentRecor
 	processedDocIDs := make(map[string]bool)
 	var contextBuilder strings.Builder
 	contextBuilder.WriteString("<memory>\n")
-	contextChars := len("<memory>\n")
-	contextLimit := r.contextMaxChars
 
 	lastEmittedUser := ""
 	addedDocs := 0
@@ -141,12 +135,12 @@ func (r *RAG) renderRecordsToMemory(ctx context.Context, records []documentRecor
 			break
 		}
 
-		docID := record.metadata["document_id"]
+		docID := record.documentID
 		if docID == "" {
 			continue
 		}
 
-		lookupID := resolveLookupID(record.metadata)
+		lookupID := resolveLookupID(record.documentID, record.metadata)
 		if lookupID == "" {
 			r.logger.Warn("Unable to resolve lookup identifier for document", zap.String("document_id", docID))
 			continue
@@ -208,13 +202,8 @@ func (r *RAG) renderRecordsToMemory(ctx context.Context, records []documentRecor
 					lines = append(lines, fmt.Sprintf("- tool: %s\n", canonicalizeFactText(fact.Tool)))
 				}
 
-				entryLen := totalLength(lines)
-				if contextLimit > 0 && contextChars+entryLen > contextLimit {
-					continue
-				}
 				for _, line := range lines {
 					contextBuilder.WriteString(line)
-					contextChars += len(line)
 				}
 
 				processedDocIDs[lookupID] = true
@@ -230,13 +219,8 @@ func (r *RAG) renderRecordsToMemory(ctx context.Context, records []documentRecor
 			lines = append(lines, fmt.Sprintf("- %s: %s\n", role, content))
 		}
 
-		entryLen := totalLength(lines)
-		if contextLimit > 0 && contextChars+entryLen > contextLimit {
-			continue
-		}
 		for _, line := range lines {
 			contextBuilder.WriteString(line)
-			contextChars += len(line)
 		}
 
 		processedDocIDs[lookupID] = true

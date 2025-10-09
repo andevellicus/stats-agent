@@ -10,7 +10,7 @@ x-python-executor: &python-executor
 
 services:
   postgres:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg15
     container_name: stats-agent-postgres
     environment:
       POSTGRES_DB: stats_agent

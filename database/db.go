@@ -5,9 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"stats-agent/web/types"
@@ -34,6 +32,11 @@ func NewPostgresStore(connStr string) (*PostgresStore, error) {
 
 // EnsureSchema creates the required tables if they do not already exist.
 func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
+	// Enable pgvector extension first
+	if _, err := s.DB.ExecContext(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
+		return fmt.Errorf("failed to enable pgvector extension: %w", err)
+	}
+
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS users (
             id UUID PRIMARY KEY,
@@ -47,8 +50,7 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
             last_active TIMESTAMPTZ DEFAULT NOW(),
             workspace_path TEXT NOT NULL,
             title TEXT DEFAULT '',
-            is_active BOOLEAN DEFAULT TRUE,
-            rendered_files TEXT[] DEFAULT '{}'::TEXT[]
+            is_active BOOLEAN DEFAULT TRUE
         )`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_last_active ON sessions(last_active DESC)`,
@@ -57,20 +59,28 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
             session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
-            rendered TEXT NOT NULL, 
+            rendered TEXT NOT NULL,
             created_at TIMESTAMPTZ DEFAULT NOW(),
             metadata JSONB DEFAULT '{}'::jsonb
         )`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_session_created_at ON messages(session_id, created_at)`,
 		`CREATE TABLE IF NOT EXISTS rag_documents (
             id UUID PRIMARY KEY,
-            document_id UUID NOT NULL,
             content TEXT NOT NULL,
-            embedding_content TEXT,
-            metadata JSONB DEFAULT '{}'::jsonb,
             content_hash TEXT,
-            embedding REAL[],
+            metadata JSONB DEFAULT '{}'::jsonb,
             created_at TIMESTAMPTZ DEFAULT NOW()
+        )`,
+		`CREATE TABLE IF NOT EXISTS rag_embeddings (
+            id UUID PRIMARY KEY,
+            document_id UUID NOT NULL REFERENCES rag_documents(id) ON DELETE CASCADE,
+            window_index INT NOT NULL,
+            window_start INT NOT NULL,
+            window_end INT NOT NULL,
+            window_text TEXT NOT NULL,
+            embedding vector(1024) NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(document_id, window_index)
         )`,
 		`CREATE TABLE IF NOT EXISTS files (
             id UUID PRIMARY KEY,
@@ -97,26 +107,92 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		// This is a schema migration compatibility step, not a critical operation
 	}
 
-	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS content_hash TEXT`); err != nil {
-		return fmt.Errorf("failed to add content_hash column: %w", err)
+	// Migrate existing rag_documents to new schema
+	// Check if old schema exists (has document_id column)
+	var hasDocumentID bool
+	err := s.DB.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_name = 'rag_documents' AND column_name = 'document_id'
+		)
+	`).Scan(&hasDocumentID)
+	if err != nil {
+		return fmt.Errorf("failed to check for old schema: %w", err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS embedding_content TEXT`); err != nil {
-		return fmt.Errorf("failed to add embedding_content column: %w", err)
-	}
-	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS embedding REAL[]`); err != nil {
-		return fmt.Errorf("failed to add embedding column: %w", err)
+
+	if hasDocumentID {
+		// Old schema exists - migrate data
+		// 1. Create temporary backup
+		if _, err := s.DB.ExecContext(ctx, `
+			CREATE TABLE IF NOT EXISTS rag_documents_old AS
+			SELECT * FROM rag_documents
+		`); err != nil {
+			return fmt.Errorf("failed to backup old rag_documents: %w", err)
+		}
+
+		// 2. Drop old table
+		if _, err := s.DB.ExecContext(ctx, `DROP TABLE IF EXISTS rag_documents CASCADE`); err != nil {
+			return fmt.Errorf("failed to drop old rag_documents: %w", err)
+		}
+
+		// 3. Recreate with new schema
+		if _, err := s.DB.ExecContext(ctx, `
+			CREATE TABLE rag_documents (
+				id UUID PRIMARY KEY,
+				content TEXT NOT NULL,
+				content_hash TEXT,
+				metadata JSONB DEFAULT '{}'::jsonb,
+				created_at TIMESTAMPTZ DEFAULT NOW()
+			)
+		`); err != nil {
+			return fmt.Errorf("failed to recreate rag_documents: %w", err)
+		}
+
+		// 4. Migrate data (use document_id as new id)
+		if _, err := s.DB.ExecContext(ctx, `
+			INSERT INTO rag_documents (id, content, content_hash, metadata, created_at)
+			SELECT DISTINCT ON (document_id)
+				document_id, content, content_hash, metadata, created_at
+			FROM rag_documents_old
+		`); err != nil {
+			return fmt.Errorf("failed to migrate documents: %w", err)
+		}
+
+		// 5. Migrate embeddings if they exist
+		if _, err := s.DB.ExecContext(ctx, `
+			INSERT INTO rag_embeddings (id, document_id, window_index, window_start, window_end, window_text, embedding, created_at)
+			SELECT
+				id,
+				document_id,
+				0,
+				0,
+				COALESCE(LENGTH(embedding_content), LENGTH(content)),
+				COALESCE(embedding_content, content),
+				embedding,
+				created_at
+			FROM rag_documents_old
+			WHERE embedding IS NOT NULL
+		`); err != nil {
+			return fmt.Errorf("failed to migrate embeddings: %w", err)
+		}
+
+		// 6. Drop backup
+		if _, err := s.DB.ExecContext(ctx, `DROP TABLE IF EXISTS rag_documents_old`); err != nil {
+			// Non-fatal - just log
+		}
 	}
 
 	indexStmts := []string{
 		`CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_user_active ON sessions(user_id, is_active, last_active DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_rag_documents_created_at ON rag_documents(created_at)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_documents_document_id ON rag_documents(document_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_rag_documents_content_hash ON rag_documents(content_hash)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_documents_session_role_hash ON rag_documents (content_hash, COALESCE(metadata ->> 'session_id', ''), COALESCE(metadata ->> 'role', '')) WHERE content_hash IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_rag_documents_metadata_dataset ON rag_documents ((metadata ->> 'dataset'))`,
 		`CREATE INDEX IF NOT EXISTS idx_rag_documents_metadata_primary_test ON rag_documents ((metadata ->> 'primary_test'))`,
 		`CREATE INDEX IF NOT EXISTS idx_rag_documents_metadata_role ON rag_documents ((metadata ->> 'role'))`,
+		`CREATE INDEX IF NOT EXISTS idx_rag_embeddings_document_id ON rag_embeddings(document_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_rag_embeddings_vector_cosine ON rag_embeddings USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)`,
 		`CREATE INDEX IF NOT EXISTS idx_files_session_id ON files(session_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_files_message_id ON files(message_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_files_created_at ON files(created_at)`,
@@ -126,13 +202,6 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("failed to ensure rag_documents index: %w", err)
 		}
-	}
-
-	// Migrate existing rendered_files to files table (one-time migration)
-	if err := s.migrateRenderedFilesToFilesTable(ctx); err != nil {
-		// Log but don't fail - migration is non-critical
-		// Continue startup even if migration fails
-		return fmt.Errorf("rendered_files migration failed (non-critical): %w", err)
 	}
 
 	return nil
@@ -471,102 +540,5 @@ func (s *PostgresStore) DeleteUser(ctx context.Context, userID uuid.UUID) error 
 		return errors.New("user not found")
 	}
 
-	return nil
-}
-
-// migrateRenderedFilesToFilesTable migrates data from sessions.rendered_files array to the files table
-// This is a one-time migration that runs on startup and is idempotent
-func (s *PostgresStore) migrateRenderedFilesToFilesTable(ctx context.Context) error {
-	// Check if migration has already run by checking if any files table records exist
-	var fileCount int
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM files`).Scan(&fileCount); err != nil {
-		return fmt.Errorf("failed to check files table: %w", err)
-	}
-
-	// If files already exist, assume migration already ran
-	if fileCount > 0 {
-		return nil
-	}
-
-	// Get all sessions with rendered_files
-	query := `
-		SELECT id, rendered_files, workspace_path
-		FROM sessions
-		WHERE rendered_files IS NOT NULL AND array_length(rendered_files, 1) > 0
-	`
-	rows, err := s.DB.QueryContext(ctx, query)
-	if err != nil {
-		return fmt.Errorf("failed to query sessions: %w", err)
-	}
-	defer rows.Close()
-
-	migratedCount := 0
-	for rows.Next() {
-		var sessionID uuid.UUID
-		var workspacePath string
-		var renderedFiles pq.StringArray
-
-		if err := rows.Scan(&sessionID, &renderedFiles, &workspacePath); err != nil {
-			// Log but continue with other sessions
-			continue
-		}
-
-		// Create file records for each rendered file
-		for _, filename := range renderedFiles {
-			if filename == "" {
-				continue
-			}
-
-			// Determine file type from extension
-			ext := strings.ToLower(filepath.Ext(filename))
-			fileType := "other"
-			switch ext {
-			case ".png", ".jpg", ".jpeg", ".gif":
-				fileType = "image"
-			case ".csv", ".xls", ".xlsx":
-				fileType = "csv"
-			case ".pdf":
-				fileType = "pdf"
-			}
-
-			// Build web path
-			sessionIDStr := sessionID.String()
-			webPath := filepath.ToSlash(filepath.Join("/workspaces", sessionIDStr, filename))
-
-			// Try to get file size if file still exists
-			var fileSize int64
-			fullPath := filepath.Join(workspacePath, filename)
-			if info, err := os.Stat(fullPath); err == nil {
-				fileSize = info.Size()
-			}
-
-			// Insert file record - use ON CONFLICT to handle duplicates
-			insertQuery := `
-				INSERT INTO files (id, session_id, filename, file_path, file_type, file_size, created_at, message_id)
-				VALUES ($1, $2, $3, $4, $5, $6, NOW(), NULL)
-				ON CONFLICT (session_id, filename) DO NOTHING
-			`
-			_, err := s.DB.ExecContext(ctx, insertQuery,
-				uuid.New(),
-				sessionID,
-				filename,
-				webPath,
-				fileType,
-				fileSize,
-			)
-			if err != nil {
-				// Log but continue with other files
-				continue
-			}
-			migratedCount++
-		}
-	}
-
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("error iterating sessions: %w", err)
-	}
-
-	// Migration successful - optionally log the count
-	// The rendered_files column is kept for backward compatibility but not actively used
 	return nil
 }

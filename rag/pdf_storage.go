@@ -6,7 +6,6 @@ import (
 	"stats-agent/pdf"
 
 	"github.com/google/uuid"
-	"github.com/philippgille/chromem-go"
 	"go.uber.org/zap"
 )
 
@@ -17,12 +16,8 @@ func (r *RAG) AddPDFPagesToRAG(ctx context.Context, sessionID, filename string, 
 		return nil
 	}
 
-	collection := r.db.GetCollection("long-term-memory", r.embedder)
-	if collection == nil {
-		return fmt.Errorf("long-term memory collection not found")
-	}
-
-	var documentsToEmbed []chromem.Document
+	pagesAdded := 0
+	chunksCreated := 0
 
 	for _, page := range pages {
 		if page.Text == "" {
@@ -37,73 +32,94 @@ func (r *RAG) AddPDFPagesToRAG(ctx context.Context, sessionID, filename string, 
 		metadata := map[string]string{
 			"session_id":  sessionID,
 			"document_id": docID.String(),
-			"role":        "pdf_page",
-			"source":      "pdf",
+			"role":        "document",
+			"type":        "pdf",
 			"filename":    filename,
 			"page_number": fmt.Sprintf("%d", page.PageNumber),
 		}
 
-		// Content to embed includes page context
-		embedContent := fmt.Sprintf("PDF: %s (Page %d)\n\n%s", filename, page.PageNumber, page.Text)
-
-		// Ensure content is within embedding limits
-		embedContent = r.ensureEmbeddingTokenLimit(ctx, embedContent)
-
-		// Create embedding
-		embeddingVector, err := r.embedder(ctx, embedContent)
-		if err != nil {
-			r.logger.Warn("Failed to create embedding for PDF page",
-				zap.Error(err),
-				zap.String("filename", filename),
-				zap.Int("page", page.PageNumber))
-			continue
-		}
+		// Content for embedding - just the text without prefix
+		// The metadata already contains type, filename, and page info
+		fullContent := page.Text
 
 		// Filter metadata for JSONB storage
 		structuralMetadata := filterStructuralMetadata(metadata)
 
-		// Store in database
-		if err := r.store.UpsertRAGDocument(ctx, docID, page.Text, embedContent, structuralMetadata, contentHash, embeddingVector); err != nil {
-			r.logger.Warn("Failed to persist PDF page to database",
+		// Check if we need to chunk this page based on token count
+		// Use document chunk size (3500 tokens by default)
+		chunkSize := r.cfg.DocumentChunkSize
+		if chunkSize <= 0 {
+			chunkSize = 3500
+		}
+
+		pageTokens, err := r.countTokensForEmbedding(ctx, fullContent)
+		if err != nil {
+			r.logger.Warn("Failed to count tokens for PDF page, using character estimate",
 				zap.Error(err),
 				zap.String("filename", filename),
 				zap.Int("page", page.PageNumber))
-			continue
+			pageTokens = len(fullContent) / 4 // Conservative estimate
 		}
 
-		// Check if we need to chunk this page
-		if len(embedContent) > r.maxEmbeddingChars {
+		if pageTokens > chunkSize {
 			r.logger.Info("Chunking large PDF page",
 				zap.String("filename", filename),
 				zap.Int("page", page.PageNumber),
-				zap.Int("length", len(embedContent)))
-			chunks := r.persistChunks(ctx, structuralMetadata, embedContent)
-			documentsToEmbed = append(documentsToEmbed, chunks...)
+				zap.Int("tokens", pageTokens),
+				zap.Int("chunk_size", chunkSize))
+			r.persistDocumentChunks(ctx, structuralMetadata, fullContent)
+			chunksCreated++
 		} else {
-			// Single document for this page
-			doc := chromem.Document{
-				ID:       uuid.New().String(),
-				Content:  embedContent,
-				Metadata: metadata,
+			// Page fits in single chunk - use multi-vector approach
+			// Store document first
+			docID, err := r.store.UpsertDocument(ctx, docID, fullContent, structuralMetadata, contentHash)
+			if err != nil {
+				r.logger.Warn("Failed to store PDF page document",
+					zap.Error(err),
+					zap.String("filename", filename),
+					zap.Int("page", page.PageNumber))
+				continue
 			}
-			documentsToEmbed = append(documentsToEmbed, doc)
+
+			// Create embedding windows (may be 1 or more depending on page length)
+			windows, err := r.createEmbeddingWindows(ctx, fullContent)
+			if err != nil {
+				r.logger.Warn("Failed to create embedding windows for PDF page",
+					zap.Error(err),
+					zap.String("filename", filename),
+					zap.Int("page", page.PageNumber))
+				continue
+			}
+
+			// Store all embedding windows
+			for _, window := range windows {
+				if err := r.store.CreateEmbedding(ctx, docID, window.WindowIndex, window.WindowStart, window.WindowEnd, window.WindowText, window.Embedding); err != nil {
+					r.logger.Warn("Failed to store embedding window for PDF page",
+						zap.Error(err),
+						zap.String("filename", filename),
+						zap.Int("page", page.PageNumber),
+						zap.Int("window_index", window.WindowIndex))
+					// Continue with other windows
+				}
+			}
+
+			r.logger.Debug("Stored PDF page with multiple embedding windows",
+				zap.String("filename", filename),
+				zap.Int("page", page.PageNumber),
+				zap.Int("windows", len(windows)))
+			pagesAdded++
 		}
 	}
 
-	if len(documentsToEmbed) == 0 {
+	if pagesAdded == 0 && chunksCreated == 0 {
 		r.logger.Warn("No PDF pages could be embedded", zap.String("filename", filename))
 		return nil
 	}
 
-	// Add all documents to the collection
-	if err := collection.AddDocuments(ctx, documentsToEmbed, 4); err != nil {
-		return fmt.Errorf("failed to add PDF pages to RAG collection: %w", err)
-	}
-
 	r.logger.Info("Added PDF pages to RAG",
 		zap.String("filename", filename),
-		zap.Int("pages", len(pages)),
-		zap.Int("chunks", len(documentsToEmbed)))
+		zap.Int("pages", pagesAdded),
+		zap.Int("chunked_pages", chunksCreated))
 
 	return nil
 }
