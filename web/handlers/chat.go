@@ -326,35 +326,35 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 				req.Message = fmt.Sprintf("[📎 File uploaded: %s]\n\n%s", file.Filename, req.Message)
 			}
 
-			// Extract pages and store in RAG asynchronously
-			// The agent will retrieve relevant PDF content via semantic search
-			go func() {
-				pages, err := h.pdfService.ExtractPages(dst)
-				if err != nil {
-					h.logger.Error("Failed to extract PDF pages for RAG",
-						zap.Error(err),
-						zap.String("filename", sanitizedFilename))
-					return
-				}
+			// Extract pages and store in RAG synchronously
+			// This ensures the PDF content is available when the agent starts processing
+			pdfCtx, pdfCancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+			defer pdfCancel()
 
+			pages, err := h.pdfService.ExtractPages(dst)
+			if err != nil {
+				h.logger.Error("Failed to extract PDF pages for RAG",
+					zap.Error(err),
+					zap.String("filename", sanitizedFilename))
+				// Continue - user can still ask questions, just without PDF content in RAG
+			} else {
 				ragInstance := h.agent.GetRAG()
 				if ragInstance == nil {
 					h.logger.Warn("RAG instance not available for PDF storage")
-					return
-				}
-
-				if err := ragInstance.AddPDFPagesToRAG(context.Background(), req.SessionID, file.Filename, pages); err != nil {
-					h.logger.Error("Failed to store PDF pages in RAG",
-						zap.Error(err),
-						zap.String("filename", sanitizedFilename),
-						zap.String("session_id", req.SessionID))
 				} else {
-					h.logger.Info("Successfully stored PDF pages in RAG",
-						zap.String("filename", sanitizedFilename),
-						zap.Int("pages", len(pages)),
-						zap.String("session_id", req.SessionID))
+					if err := ragInstance.AddPDFPagesToRAG(pdfCtx, req.SessionID, file.Filename, pages); err != nil {
+						h.logger.Error("Failed to store PDF pages in RAG",
+							zap.Error(err),
+							zap.String("filename", sanitizedFilename),
+							zap.String("session_id", req.SessionID))
+					} else {
+						h.logger.Info("Successfully stored PDF pages in RAG",
+							zap.String("filename", sanitizedFilename),
+							zap.Int("pages", len(pages)),
+							zap.String("session_id", req.SessionID))
+					}
 				}
-			}()
+			}
 		} else {
 			// For non-PDF files, use existing message logic
 			if strings.TrimSpace(req.Message) == "" {

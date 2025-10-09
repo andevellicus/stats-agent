@@ -80,35 +80,13 @@ func (a *Agent) GetRAG() *rag.RAG {
 // Run executes the agent's conversation loop with the given user input.
 // It orchestrates memory management, LLM interaction, and Python code execution.
 func (a *Agent) Run(ctx context.Context, input string, sessionID string, history []types.AgentMessage, stream *Stream) {
-	// 1. Setup: Add user message and retrieve long-term context
+	// 1. Setup: Add user message to history
 	userMsg := types.AgentMessage{Role: "user", Content: input}
 	currentHistory := append(history, userMsg)
 
 	// Store user message to RAG
 	if a.rag != nil {
 		a.rag.AddMessagesAsync(sessionID, []types.AgentMessage{userMsg})
-	}
-
-	// Query RAG for long-term context - non-critical, log warning if fails
-	longTermContext, err := a.rag.Query(ctx, sessionID, input, a.cfg.RAGResults)
-	if err != nil {
-		a.logger.Warn("Failed to query RAG for long-term context, continuing without it",
-			zap.Error(err),
-			zap.String("session_id", sessionID))
-	}
-
-	// Check if long-term context itself is too large
-	if longTermContext != "" {
-		contextTokens, err := a.memoryManager.CountTokens(ctx, longTermContext)
-		softLimitTokens := a.cfg.ContextSoftLimitTokens()
-		if err == nil && contextTokens > softLimitTokens {
-			a.logger.Info("RAG context is too large, summarizing", zap.Int("context_tokens", contextTokens))
-			_ = stream.Status("Compressing memory....")
-			summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(ctx, longTermContext, input)
-			if summaryErr == nil {
-				longTermContext = summarizedContext
-			}
-		}
 	}
 
 	// 2. Initialize conversation loop controller
@@ -128,6 +106,46 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 		if shouldContinue, reason := loop.ShouldContinue(turn); !shouldContinue {
 			_ = stream.Status(reason)
 			break
+		}
+
+		// Query RAG for long-term context before each turn
+		// This ensures newly added content (PDFs, facts) is available
+		queryText := input // Default: use original user question
+		if turn > 0 {
+			// For subsequent turns, combine user input with recent assistant focus
+			// This helps retrieve context relevant to what the agent is currently working on
+			for i := len(currentHistory) - 1; i >= 0; i-- {
+				if currentHistory[i].Role == "assistant" {
+					// Combine original question with what agent is currently doing
+					queryText = input + " " + currentHistory[i].Content
+					break
+				}
+			}
+		}
+
+		longTermContext, err := a.rag.Query(ctx, sessionID, queryText, a.cfg.RAGResults)
+		if err != nil {
+			a.logger.Warn("Failed to query RAG for long-term context, continuing without it",
+				zap.Error(err),
+				zap.String("session_id", sessionID),
+				zap.Int("turn", turn))
+			longTermContext = "" // Ensure empty on error
+		}
+
+		// Check if long-term context itself is too large
+		if longTermContext != "" {
+			contextTokens, err := a.memoryManager.CountTokens(ctx, longTermContext)
+			softLimitTokens := a.cfg.ContextSoftLimitTokens()
+			if err == nil && contextTokens > softLimitTokens {
+				a.logger.Info("RAG context is too large, summarizing",
+					zap.Int("context_tokens", contextTokens),
+					zap.Int("turn", turn))
+				_ = stream.Status("Compressing memory....")
+				summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(ctx, longTermContext, input)
+				if summaryErr == nil {
+					longTermContext = summarizedContext
+				}
+			}
 		}
 
 		// Build messages for LLM (combine long-term context + history)

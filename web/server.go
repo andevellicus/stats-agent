@@ -1,19 +1,21 @@
 package web
 
 import (
-	"context"
-	"net/http"
-	"os"
-	"stats-agent/agent"
-	"stats-agent/config"
-	"stats-agent/database"
-	"stats-agent/web/handlers"
-	"stats-agent/web/middleware"
-	"stats-agent/web/services"
-	"time"
+    "context"
+    "net/http"
+    "os"
+    "stats-agent/agent"
+    "stats-agent/config"
+    "stats-agent/database"
+    "stats-agent/web/handlers"
+    "stats-agent/web/middleware"
+    "stats-agent/web/services"
+    "time"
 
-	"github.com/gin-gonic/gin"
-	"go.uber.org/zap"
+    "github.com/gin-gonic/gin"
+    "go.uber.org/zap"
+    neturl "net/url"
+    "strconv"
 )
 
 type Server struct {
@@ -62,20 +64,24 @@ func (s *Server) setupRoutes() {
 	fileService := services.NewFileService(s.store, s.logger)
 	messageService := services.NewMessageService(s.store, s.logger)
 	streamService := services.NewStreamService(s.logger)
-	pdfConfig := &services.PDFConfig{
-		TokenThreshold:           s.config.PDFTokenThreshold,
-		FirstPagesPriority:       s.config.PDFFirstPagesPriority,
-		EnableTableDetection:     s.config.PDFEnableTableDetection,
-		SentenceBoundaryTruncate: s.config.PDFSentenceBoundaryTruncate,
-	}
+    pdfConfig := &services.PDFConfig{
+        TokenThreshold:           s.config.PDFTokenThreshold,
+        FirstPagesPriority:       s.config.PDFFirstPagesPriority,
+        EnableTableDetection:     s.config.PDFEnableTableDetection,
+        SentenceBoundaryTruncate: s.config.PDFSentenceBoundaryTruncate,
+        HeaderFooterRepeatThreshold: s.config.PDFHeaderFooterRepeatThreshold,
+        ReferencesTrimEnabled:       s.config.PDFReferencesTrimEnabled,
+        ReferencesCitationDensity:   s.config.PDFReferencesCitationDensity,
+    }
 
-	// Initialize PDF extractor client (pdfplumber microservice)
-	pdfExtractorClient := services.NewPDFExtractorClient(
-		s.config.PDFExtractorURL,
-		s.config.PDFExtractorTimeout*time.Second,
-		s.config.PDFExtractorEnabled,
-		s.logger,
-	)
+    // Initialize PDF extractor client (pdfplumber microservice)
+    extractorURL := buildPDFExtractorURL(s.config.PDFExtractorURL, s.config)
+    pdfExtractorClient := services.NewPDFExtractorClient(
+        extractorURL,
+        s.config.PDFExtractorTimeout*time.Second,
+        s.config.PDFExtractorEnabled,
+        s.logger,
+    )
 
 	// Check if PDF extractor service is available
 	if pdfExtractorClient.IsEnabled() {
@@ -115,6 +121,31 @@ func (s *Server) setupRoutes() {
 	s.router.GET("/chat/:sessionID", chatHandler.LoadSession)
 	s.router.DELETE("/chat/:sessionID", chatHandler.DeleteSession)
 }
+
+// buildPDFExtractorURL appends configured tuning params as query args.
+func buildPDFExtractorURL(base string, cfg *config.Config) string {
+    if base == "" || cfg == nil {
+        return base
+    }
+    u, err := neturl.Parse(base)
+    if err != nil {
+        return base
+    }
+    q := u.Query()
+    // Add only when set (non-zero/true/non-empty)
+    if cfg.PDFExtractorMode != "" { q.Set("mode", cfg.PDFExtractorMode) }
+    if cfg.PDFExtractorWordMargin > 0 { q.Set("wm", trimFloat(cfg.PDFExtractorWordMargin)) }
+    if cfg.PDFExtractorCharMargin > 0 { q.Set("cm", trimFloat(cfg.PDFExtractorCharMargin)) }
+    if cfg.PDFExtractorLineMargin > 0 { q.Set("lm", trimFloat(cfg.PDFExtractorLineMargin)) }
+    if cfg.PDFExtractorBoxesFlow != 0 { q.Set("bf", trimFloat(cfg.PDFExtractorBoxesFlow)) }
+    if cfg.PDFExtractorUseTextFlow { q.Set("flow", "1") }
+    if cfg.PDFExtractorXTolerance > 0 { q.Set("xt", trimFloat(cfg.PDFExtractorXTolerance)) }
+    if cfg.PDFExtractorYTolerance > 0 { q.Set("yt", trimFloat(cfg.PDFExtractorYTolerance)) }
+    u.RawQuery = q.Encode()
+    return u.String()
+}
+
+func trimFloat(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) }
 
 func (s *Server) Start(ctx context.Context, addr string) error {
 	s.logger.Info("Starting web server", zap.String("address", addr))

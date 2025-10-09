@@ -9,11 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install pdfplumber and Flask dependencies
-RUN pip install --no-cache-dir \
-    flask==3.1.0 \
-    pdfplumber==0.11.4 \
-    gunicorn==23.0.0
+# Install dependencies from pinned requirements
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the Flask service
 COPY pdf_service.py .

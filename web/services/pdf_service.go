@@ -1,12 +1,12 @@
 package services
 
 import (
-	"context"
-	"fmt"
-	"regexp"
-	pdfTypes "stats-agent/pdf"
-	"strings"
-	"time"
+    "context"
+    "fmt"
+    "regexp"
+    pdfTypes "stats-agent/pdf"
+    "strings"
+    "time"
 
 	"github.com/jdkato/prose/v2"
 	"github.com/ledongthuc/pdf"
@@ -14,17 +14,21 @@ import (
 )
 
 type PDFService struct {
-	logger          *zap.Logger
-	config          *PDFConfig
-	extractorClient *PDFExtractorClient // Optional pdfplumber client
+    logger          *zap.Logger
+    config          *PDFConfig
+    extractorClient *PDFExtractorClient // Optional pdfplumber client
 }
 
 // PDFConfig holds PDF-specific configuration
 type PDFConfig struct {
-	TokenThreshold           float64
-	FirstPagesPriority       int
-	EnableTableDetection     bool
-	SentenceBoundaryTruncate bool
+    TokenThreshold           float64
+    FirstPagesPriority       int
+    EnableTableDetection     bool
+    SentenceBoundaryTruncate bool
+    // Cleanup
+    HeaderFooterRepeatThreshold float64
+    ReferencesTrimEnabled       bool
+    ReferencesCitationDensity   float64
 }
 
 // TokenCounter interface abstracts token counting for PDF truncation
@@ -53,89 +57,47 @@ func NewPDFService(logger *zap.Logger, config *PDFConfig, extractorClient *PDFEx
 // Returns the full text with page markers for context
 // Tries pdfplumber first (if enabled), falls back to ledongthuc/pdf
 func (ps *PDFService) ExtractText(pdfPath string) (string, error) {
-	// Try pdfplumber extraction first if available
-	if ps.extractorClient != nil && ps.extractorClient.IsEnabled() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		text, err := ps.extractorClient.ExtractText(ctx, pdfPath)
-		if err == nil {
-			ps.logger.Info("PDF extraction successful via pdfplumber",
-				zap.String("path", pdfPath),
-				zap.Int("characters", len(text)))
-			return text, nil
-		}
-
-		ps.logger.Warn("pdfplumber extraction failed, falling back to ledongthuc/pdf",
-			zap.Error(err),
-			zap.String("path", pdfPath))
-	}
-
-	// Fallback to ledongthuc/pdf extraction
-	f, r, err := pdf.Open(pdfPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to open PDF: %w", err)
-	}
-	defer f.Close()
-
-	var fullText strings.Builder
-	totalPages := r.NumPage()
-
-	ps.logger.Debug("Extracting text from PDF using fallback method",
-		zap.String("path", pdfPath),
-		zap.Int("pages", totalPages))
-
-	for pageNum := 1; pageNum <= totalPages; pageNum++ {
-		page := r.Page(pageNum)
-		if page.V.IsNull() {
-			ps.logger.Warn("Skipping null page",
-				zap.Int("page", pageNum))
-			continue
-		}
-
-		// Use GetPlainText for text extraction
-		text, err := page.GetPlainText(nil)
-		if err != nil {
-			ps.logger.Warn("Failed to extract text from page",
-				zap.Int("page", pageNum),
-				zap.Error(err))
-			continue
-		}
-
-		// No post-processing - let pdfplumber microservice handle text cleaning
-		// Fallback only: keep raw text as-is from ledongthuc/pdf
-
-		// Add page marker for context
-		fullText.WriteString(fmt.Sprintf("--- Page %d ---\n", pageNum))
-		fullText.WriteString(text)
-		fullText.WriteString("\n\n")
-	}
-
-	extractedText := fullText.String()
-	ps.logger.Info("PDF text extraction completed (fallback)",
-		zap.String("path", pdfPath),
-		zap.Int("pages", totalPages),
-		zap.Int("characters", len(extractedText)))
-
-	return extractedText, nil
+    // Build from pages so we can apply header/footer stripping uniformly
+    pages, err := ps.ExtractPages(pdfPath)
+    if err != nil {
+        return "", err
+    }
+    var full strings.Builder
+    for _, p := range pages {
+        full.WriteString(fmt.Sprintf("--- Page %d ---\n", p.PageNumber))
+        full.WriteString(p.Text)
+        full.WriteString("\n\n")
+    }
+    text := full.String()
+    ps.logger.Info("PDF text extraction completed",
+        zap.String("path", pdfPath),
+        zap.Int("pages", len(pages)),
+        zap.Int("characters", len(text)))
+    return text, nil
 }
 
 // ExtractPages extracts text from each page individually
 // Returns a slice of pdf.Page structs, one per page
 // Tries pdfplumber first (if enabled), falls back to ledongthuc/pdf
 func (ps *PDFService) ExtractPages(pdfPath string) ([]pdfTypes.Page, error) {
-	// Try pdfplumber extraction first if available
-	if ps.extractorClient != nil && ps.extractorClient.IsEnabled() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+    // Try pdfplumber extraction first if available
+    if ps.extractorClient != nil && ps.extractorClient.IsEnabled() {
+        ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+        defer cancel()
 
-		pages, err := ps.extractorClient.ExtractPages(ctx, pdfPath)
-		if err == nil {
-			ps.logger.Info("PDF page extraction successful via pdfplumber",
-				zap.String("path", pdfPath),
-				zap.Int("pages", len(pages)))
-			return pages, nil
-		}
+        pages, err := ps.extractorClient.ExtractPages(ctx, pdfPath)
+        if err == nil {
+            ps.logger.Info("PDF page extraction successful via pdfplumber",
+                zap.String("path", pdfPath),
+                zap.Int("pages", len(pages)))
+            // Strip repeated headers/footers across pages
+            pages = ps.stripRepeatedHeaderFooterWithConfig(pages)
+            // Optionally trim trailing references
+            if ps.config != nil && ps.config.ReferencesTrimEnabled {
+                pages = ps.trimTrailingReferences(pages)
+            }
+            return pages, nil
+        }
 
 		ps.logger.Warn("pdfplumber page extraction failed, falling back to ledongthuc/pdf",
 			zap.Error(err),
@@ -156,13 +118,13 @@ func (ps *PDFService) ExtractPages(pdfPath string) ([]pdfTypes.Page, error) {
 		zap.String("path", pdfPath),
 		zap.Int("pages", totalPages))
 
-	for pageNum := 1; pageNum <= totalPages; pageNum++ {
-		page := r.Page(pageNum)
-		if page.V.IsNull() {
-			ps.logger.Warn("Skipping null page",
-				zap.Int("page", pageNum))
-			continue
-		}
+    for pageNum := 1; pageNum <= totalPages; pageNum++ {
+        page := r.Page(pageNum)
+        if page.V.IsNull() {
+            ps.logger.Warn("Skipping null page",
+                zap.Int("page", pageNum))
+            continue
+        }
 
 		// Use GetPlainText for text extraction
 		text, err := page.GetPlainText(nil)
@@ -173,21 +135,25 @@ func (ps *PDFService) ExtractPages(pdfPath string) ([]pdfTypes.Page, error) {
 			continue
 		}
 
-		// No post-processing - let pdfplumber microservice handle text cleaning
-		// Fallback only: keep raw text as-is from ledongthuc/pdf
+        pages = append(pages, pdfTypes.Page{
+            PageNumber: pageNum,
+            Text:       strings.TrimSpace(text),
+        })
+    }
 
-		pages = append(pages, pdfTypes.Page{
-			PageNumber: pageNum,
-			Text:       strings.TrimSpace(text),
-		})
-	}
+    // Strip repeated headers/footers across pages (fallback path)
+    pages = ps.stripRepeatedHeaderFooterWithConfig(pages)
+    // Optionally trim trailing references
+    if ps.config != nil && ps.config.ReferencesTrimEnabled {
+        pages = ps.trimTrailingReferences(pages)
+    }
 
-	ps.logger.Info("PDF page extraction completed (fallback)",
-		zap.String("path", pdfPath),
-		zap.Int("pages_extracted", len(pages)),
-		zap.Int("total_pages", totalPages))
+    ps.logger.Info("PDF page extraction completed (fallback)",
+        zap.String("path", pdfPath),
+        zap.Int("pages_extracted", len(pages)),
+        zap.Int("total_pages", totalPages))
 
-	return pages, nil
+    return pages, nil
 }
 
 // ExtractTextSmart extracts PDF text with intelligent truncation for large documents
@@ -445,111 +411,240 @@ func (ps *PDFService) truncateAtSentenceBoundary(ctx context.Context, text strin
 
 // cleanPDFText cleans up PDF text extraction issues
 // Handles cases where each character is separated by spaces or where words are concatenated
-func cleanPDFText(text string) string {
-	// First, check if we have the "character spacing" issue (e.g., "h e l l o")
-	// This is indicated by many single-character "words"
-	words := strings.Fields(text)
-	if len(words) == 0 {
-		return text
-	}
-
-	// Count single-character words
-	singleCharCount := 0
-	for _, word := range words {
-		if len([]rune(word)) == 1 {
-			singleCharCount++
-		}
-	}
-
-	// If more than 60% are single characters, we have character spacing issue
-	if float64(singleCharCount)/float64(len(words)) > 0.6 {
-		// Remove all spaces - they're between characters, not words
-		text = strings.ReplaceAll(text, " ", "")
-		// Now we need to add spaces back intelligently
-		return addIntelligentSpacing(text)
-	}
-
-	// Otherwise, text is mostly fine, just normalize whitespace
-	return normalizeWhitespace(text)
+// stripRepeatedHeaderFooter removes lines that repeat across most pages at the top/bottom.
+func stripRepeatedHeaderFooter(pages []pdfTypes.Page) []pdfTypes.Page {
+    if len(pages) < 3 {
+        return pages
+    }
+    type counter struct{ canon string; orig string; count int }
+    headerCounts := map[string]*counter{}
+    footerCounts := map[string]*counter{}
+    // Collect first/last non-empty lines
+    for _, p := range pages {
+        lines := strings.Split(p.Text, "\n")
+        // first non-empty
+        for _, ln := range lines {
+            l := strings.TrimSpace(ln)
+            if l == "" { continue }
+            c := canonicalLine(l)
+            if c != "" {
+                if headerCounts[c] == nil { headerCounts[c] = &counter{canon: c, orig: l} }
+                headerCounts[c].count++
+            }
+            break
+        }
+        // last non-empty
+        for i := len(lines)-1; i >= 0; i-- {
+            l := strings.TrimSpace(lines[i])
+            if l == "" { continue }
+            c := canonicalLine(l)
+            if c != "" {
+                if footerCounts[c] == nil { footerCounts[c] = &counter{canon: c, orig: l} }
+                footerCounts[c].count++
+            }
+            break
+        }
+    }
+    // Pick header/footer candidates repeated on >=60% pages
+    threshold := int(0.6*float64(len(pages)) + 0.5)
+    var headerCand, footerCand *counter
+    for _, v := range headerCounts {
+        if v.count >= threshold && len(v.canon) >= 8 && len(v.canon) <= 200 {
+            if headerCand == nil || v.count > headerCand.count { headerCand = v }
+        }
+    }
+    for _, v := range footerCounts {
+        if v.count >= threshold && len(v.canon) >= 8 && len(v.canon) <= 200 {
+            if footerCand == nil || v.count > footerCand.count { footerCand = v }
+        }
+    }
+    if headerCand == nil && footerCand == nil { return pages }
+    // Remove candidates
+    cleaned := make([]pdfTypes.Page, 0, len(pages))
+    for _, p := range pages {
+        lines := strings.Split(p.Text, "\n")
+        // header
+        if headerCand != nil {
+            for idx, ln := range lines {
+                l := strings.TrimSpace(ln)
+                if l == "" { continue }
+                if canonicalLine(l) == headerCand.canon {
+                    lines = append(lines[:idx], lines[idx+1:]...)
+                    break
+                }
+                break
+            }
+        }
+        // footer
+        if footerCand != nil {
+            for i := len(lines)-1; i >= 0; i-- {
+                l := strings.TrimSpace(lines[i])
+                if l == "" { continue }
+                if canonicalLine(l) == footerCand.canon {
+                    lines = append(lines[:i], lines[i+1:]...)
+                    break
+                }
+                break
+            }
+        }
+        p.Text = strings.Join(lines, "\n")
+        cleaned = append(cleaned, p)
+    }
+    return cleaned
 }
 
-// addIntelligentSpacing adds spaces to text that has none
-func addIntelligentSpacing(text string) string {
-	var result strings.Builder
-	runes := []rune(text)
-
-	for i := 0; i < len(runes); i++ {
-		current := runes[i]
-		result.WriteRune(current)
-
-		if i < len(runes)-1 {
-			next := runes[i+1]
-
-			// Add space after sentence-ending punctuation
-			if (current == '.' || current == '!' || current == '?') && (isUpper(next) || isLetter(next)) {
-				result.WriteRune(' ')
-			}
-
-			// Add space after comma, semicolon, colon
-			if (current == ',' || current == ';' || current == ':') && (isLetter(next) || isDigit(next)) {
-				result.WriteRune(' ')
-			}
-
-			// Add space between lowercase and uppercase
-			if isLower(current) && isUpper(next) {
-				result.WriteRune(' ')
-			}
-
-			// Add space after closing parenthesis
-			if (current == ')' || current == ']' || current == '}') && (isUpper(next) || isLower(next)) {
-				result.WriteRune(' ')
-			}
-
-			// Add space before opening parenthesis after letter/digit
-			if (isLetter(current) || isDigit(current)) && (next == '(' || next == '[' || next == '{') {
-				result.WriteRune(' ')
-			}
-
-			// Add space between number and letter
-			if isDigit(current) && isLetter(next) {
-				result.WriteRune(' ')
-			}
-
-			// Add space between letter and number (e.g., "level1" -> "level 1")
-			if isLetter(current) && isDigit(next) {
-				result.WriteRune(' ')
-			}
-
-			// Add space after dash/hyphen if followed by uppercase
-			if (current == '–' || current == '-' || current == '—') && isUpper(next) {
-				result.WriteRune(' ')
-			}
-		}
-	}
-
-	return result.String()
+func canonicalLine(s string) string {
+    // Collapse internal whitespace and strip non-letters at ends for robust matching
+    s = strings.TrimSpace(s)
+    if s == "" { return s }
+    reSpace := regexp.MustCompile(`\s+`)
+    s = reSpace.ReplaceAllString(s, " ")
+    return s
 }
 
-// normalizeWhitespace collapses multiple spaces into one
-func normalizeWhitespace(text string) string {
-	// Replace multiple spaces with single space
-	re := regexp.MustCompile(`\s+`)
-	return re.ReplaceAllString(text, " ")
+// stripRepeatedHeaderFooterWithConfig uses configured repeat threshold if provided
+func (ps *PDFService) stripRepeatedHeaderFooterWithConfig(pages []pdfTypes.Page) []pdfTypes.Page {
+    if ps.config == nil || ps.config.HeaderFooterRepeatThreshold <= 0 {
+        return stripRepeatedHeaderFooter(pages)
+    }
+    // Temporarily override threshold by adjusting page list duplication count
+    // Reuse existing implementation by prefiltering candidates using configured threshold.
+    // Implement like original but swap 0.6 with configured threshold.
+    if len(pages) < 3 {
+        return pages
+    }
+    type counter struct{ canon string; orig string; count int }
+    headerCounts := map[string]*counter{}
+    footerCounts := map[string]*counter{}
+    for _, p := range pages {
+        lines := strings.Split(p.Text, "\n")
+        for _, ln := range lines {
+            l := strings.TrimSpace(ln)
+            if l == "" { continue }
+            c := canonicalLine(l)
+            if c != "" {
+                if headerCounts[c] == nil { headerCounts[c] = &counter{canon: c, orig: l} }
+                headerCounts[c].count++
+            }
+            break
+        }
+        for i := len(lines)-1; i >= 0; i-- {
+            l := strings.TrimSpace(lines[i])
+            if l == "" { continue }
+            c := canonicalLine(l)
+            if c != "" {
+                if footerCounts[c] == nil { footerCounts[c] = &counter{canon: c, orig: l} }
+                footerCounts[c].count++
+            }
+            break
+        }
+    }
+    thr := ps.config.HeaderFooterRepeatThreshold
+    threshold := int(thr*float64(len(pages)) + 0.5)
+    var headerCand, footerCand *counter
+    for _, v := range headerCounts {
+        if v.count >= threshold && len(v.canon) >= 8 && len(v.canon) <= 200 {
+            if headerCand == nil || v.count > headerCand.count { headerCand = v }
+        }
+    }
+    for _, v := range footerCounts {
+        if v.count >= threshold && len(v.canon) >= 8 && len(v.canon) <= 200 {
+            if footerCand == nil || v.count > footerCand.count { footerCand = v }
+        }
+    }
+    if headerCand == nil && footerCand == nil { return pages }
+    cleaned := make([]pdfTypes.Page, 0, len(pages))
+    for _, p := range pages {
+        lines := strings.Split(p.Text, "\n")
+        if headerCand != nil {
+            for idx, ln := range lines {
+                l := strings.TrimSpace(ln)
+                if l == "" { continue }
+                if canonicalLine(l) == headerCand.canon {
+                    lines = append(lines[:idx], lines[idx+1:]...)
+                    break
+                }
+                break
+            }
+        }
+        if footerCand != nil {
+            for i := len(lines)-1; i >= 0; i-- {
+                l := strings.TrimSpace(lines[i])
+                if l == "" { continue }
+                if canonicalLine(l) == footerCand.canon {
+                    lines = append(lines[:i], lines[i+1:]...)
+                    break
+                }
+                break
+            }
+        }
+        p.Text = strings.Join(lines, "\n")
+        cleaned = append(cleaned, p)
+    }
+    return cleaned
 }
 
-// Helper functions for character classification
-func isUpper(r rune) bool {
-	return r >= 'A' && r <= 'Z'
-}
+// trimTrailingReferences removes trailing pages that look like reference sections.
+func (ps *PDFService) trimTrailingReferences(pages []pdfTypes.Page) []pdfTypes.Page {
+    if len(pages) == 0 {
+        return pages
+    }
+    density := 0.5
+    if ps.config != nil && ps.config.ReferencesCitationDensity > 0 {
+        density = ps.config.ReferencesCitationDensity
+    }
+    // Compile regexes
+    reHeading := regexp.MustCompile(`(?i)^\s*(references|bibliography|works\s+cited|literature\s+cited)\s*$`)
+    reNumbered := regexp.MustCompile(`^\s*(\[?\d+[\]\.)]|\d+\.)\s+`)
+    reAuthorYear := regexp.MustCompile(`\(19\d{2}|20\d{2}\)`) // (1999) or (2021)
+    reDOI := regexp.MustCompile(`(?i)\b(doi:|10\.[0-9]{4,9}/\S+)`)
+    reURL := regexp.MustCompile(`(?i)https?://\S+|arxiv\.org|pmid`) 
 
-func isLower(r rune) bool {
-	return r >= 'a' && r <= 'z'
-}
-
-func isLetter(r rune) bool {
-	return isUpper(r) || isLower(r)
-}
-
-func isDigit(r rune) bool {
-	return r >= '0' && r <= '9'
+    // Walk from end backwards, mark first non-reference page
+    cutIdx := len(pages)
+    for i := len(pages) - 1; i >= 0; i-- {
+        txt := pages[i].Text
+        lines := strings.Split(txt, "\n")
+        // Check heading within first few non-empty lines
+        headingFound := false
+        nonEmpty := 0
+        for _, ln := range lines {
+            l := strings.TrimSpace(ln)
+            if l == "" { continue }
+            nonEmpty++
+            if reHeading.MatchString(l) {
+                headingFound = true
+                break
+            }
+            if nonEmpty >= 5 { // only scan first few lines
+                break
+            }
+        }
+        // Compute citation-like line density
+        nonEmpty = 0
+        matches := 0
+        for _, ln := range lines {
+            l := strings.TrimSpace(ln)
+            if l == "" { continue }
+            nonEmpty++
+            if reNumbered.MatchString(l) || reAuthorYear.MatchString(l) || reDOI.MatchString(l) || reURL.MatchString(l) {
+                matches++
+            }
+        }
+        var pageLooksLikeRefs bool
+        if headingFound {
+            pageLooksLikeRefs = true
+        } else if nonEmpty > 0 && float64(matches)/float64(nonEmpty) >= density {
+            pageLooksLikeRefs = true
+        }
+        if pageLooksLikeRefs {
+            cutIdx = i // keep moving cut upwards
+        } else {
+            break
+        }
+    }
+    if cutIdx < len(pages) {
+        return pages[:cutIdx]
+    }
+    return pages
 }

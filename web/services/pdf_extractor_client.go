@@ -1,27 +1,29 @@
 package services
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"mime/multipart"
-	"net/http"
-	"os"
-	"path/filepath"
-	pdfTypes "stats-agent/pdf"
-	"time"
+    "bytes"
+    "context"
+    "encoding/json"
+    "fmt"
+    "io"
+    "mime/multipart"
+    "net/http"
+    neturl "net/url"
+    "os"
+    "path/filepath"
+    pdfTypes "stats-agent/pdf"
+    "strings"
+    "time"
 
-	"go.uber.org/zap"
+    "go.uber.org/zap"
 )
 
 // PDFExtractorClient handles communication with the pdfplumber microservice
 type PDFExtractorClient struct {
-	baseURL    string
-	httpClient *http.Client
-	logger     *zap.Logger
-	enabled    bool
+    baseURL    string
+    httpClient *http.Client
+    logger     *zap.Logger
+    enabled    bool
 }
 
 // PDFExtractorResponse represents the JSON response from the extraction service
@@ -60,14 +62,14 @@ func (c *PDFExtractorClient) IsEnabled() bool {
 
 // HealthCheck checks if the PDF extractor service is available
 func (c *PDFExtractorClient) HealthCheck(ctx context.Context) error {
-	if !c.enabled {
-		return fmt.Errorf("PDF extractor is disabled")
-	}
+    if !c.enabled {
+        return fmt.Errorf("PDF extractor is disabled")
+    }
 
-	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/health", nil)
-	if err != nil {
-		return fmt.Errorf("failed to create health check request: %w", err)
-	}
+    req, err := http.NewRequestWithContext(ctx, "GET", c.endpointURL("/health"), nil)
+    if err != nil {
+        return fmt.Errorf("failed to create health check request: %w", err)
+    }
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -84,9 +86,9 @@ func (c *PDFExtractorClient) HealthCheck(ctx context.Context) error {
 
 // ExtractText extracts text from a PDF file using the pdfplumber service
 func (c *PDFExtractorClient) ExtractText(ctx context.Context, pdfPath string) (string, error) {
-	if !c.enabled {
-		return "", fmt.Errorf("PDF extractor is disabled")
-	}
+    if !c.enabled {
+        return "", fmt.Errorf("PDF extractor is disabled")
+    }
 
 	// Open the PDF file
 	file, err := os.Open(pdfPath)
@@ -113,10 +115,10 @@ func (c *PDFExtractorClient) ExtractText(ctx context.Context, pdfPath string) (s
 	}
 
 	// Create HTTP request
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/extract", body)
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
+    req, err := http.NewRequestWithContext(ctx, "POST", c.endpointURL("/extract"), body)
+    if err != nil {
+        return "", fmt.Errorf("failed to create request: %w", err)
+    }
 
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
@@ -141,12 +143,12 @@ func (c *PDFExtractorClient) ExtractText(ctx context.Context, pdfPath string) (s
 		return "", fmt.Errorf("extraction failed: %s", result.Error)
 	}
 
-	c.logger.Info("PDF extraction successful",
-		zap.String("path", pdfPath),
-		zap.Int("pages", result.TotalPages),
-		zap.Int("characters", result.Characters))
+    c.logger.Info("PDF extraction successful",
+        zap.String("path", pdfPath),
+        zap.Int("pages", result.TotalPages),
+        zap.Int("characters", result.Characters))
 
-	return result.Text, nil
+    return result.Text, nil
 }
 
 // ExtractPages extracts text from each page individually using the pdfplumber service
@@ -180,10 +182,10 @@ func (c *PDFExtractorClient) ExtractPages(ctx context.Context, pdfPath string) (
 	}
 
 	// Create HTTP request
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/extract", body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
+    req, err := http.NewRequestWithContext(ctx, "POST", c.endpointURL("/extract"), body)
+    if err != nil {
+        return nil, fmt.Errorf("failed to create request: %w", err)
+    }
 
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
@@ -217,5 +219,21 @@ func (c *PDFExtractorClient) ExtractPages(ctx context.Context, pdfPath string) (
 		zap.String("path", pdfPath),
 		zap.Int("pages", len(pages)))
 
-	return pages, nil
+    return pages, nil
+}
+
+// endpointURL safely appends endpoint path to baseURL, preserving any query parameters.
+func (c *PDFExtractorClient) endpointURL(endpoint string) string {
+    base := strings.TrimSpace(c.baseURL)
+    if base == "" {
+        return endpoint
+    }
+    u, err := neturl.Parse(base)
+    if err != nil {
+        // Fallback to naive concat
+        return strings.TrimRight(base, "/") + endpoint
+    }
+    // Join path
+    u.Path = strings.TrimRight(u.Path, "/") + endpoint
+    return u.String()
 }

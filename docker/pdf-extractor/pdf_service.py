@@ -10,6 +10,10 @@ import re
 import logging
 from flask import Flask, request, jsonify
 import pdfplumber
+from io import BytesIO
+import statistics
+from pdfminer.high_level import extract_text as pm_extract_text
+from pdfminer.layout import LAParams
 
 # Configure logging
 logging.basicConfig(
@@ -27,6 +31,97 @@ app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10MB max file size
 def health():
     """Health check endpoint"""
     return jsonify({"status": "healthy", "service": "pdf-extractor"}), 200
+
+def clean_text(s: str) -> str:
+    # Remove soft hyphen and dehyphenate across linebreaks
+    s = s.replace("\u00ad", "")
+    s = re.sub(r'([A-Za-z0-9])-\r?\n([A-Za-z0-9])', r'\1\2', s)
+    # Normalize whitespace, keep paragraph breaks
+    s = re.sub(r'[ \t]+', ' ', s)
+    s = re.sub(r'\n{3,}', '\n\n', s)
+    return s.strip()
+
+def words_based_page_text(page, use_text_flow: bool, xt: float, yt: float) -> str:
+    # Reconstruct lines from words using bounding boxes
+    words = page.extract_words(use_text_flow=use_text_flow, keep_blank_chars=False, x_tolerance=xt, y_tolerance=yt)
+    lines = {}
+    for w in words or []:
+        top = w.get("top"); bottom = w.get("bottom"); x0 = w.get("x0"); text = w.get("text", "")
+        if top is None or bottom is None or x0 is None:
+            continue
+        y_mid = round((top + bottom) / 2, 1)
+        lines.setdefault(y_mid, []).append(w)
+    out_lines = []
+    for _, ws in sorted(lines.items(), key=lambda kv: kv[0]):
+        ws_sorted = sorted(ws, key=lambda w: w.get("x0", 0))
+        out_lines.append(" ".join(w.get("text", "") for w in ws_sorted))
+    return clean_text("\n".join(out_lines))
+
+def pdfminer_page_text(pdf_bytes: bytes, page_index: int, lap: LAParams) -> str:
+    try:
+        txt = pm_extract_text(BytesIO(pdf_bytes), laparams=lap, page_numbers=[page_index])
+    except Exception:
+        txt = ""
+    return clean_text(txt or "")
+
+def quality_metrics(text: str):
+    if not text:
+        return (0.0, 999.0)
+    spaces = text.count(' ')
+    whitespace_ratio = spaces / max(1, len(text))
+    words = re.findall(r'\w+', text)
+    avg_word_len = statistics.mean(map(len, words)) if words else 999.0
+    return (whitespace_ratio, avg_word_len)
+
+def strip_repeated_headers_footers(pages_texts: list[str]) -> list[str]:
+    if len(pages_texts) < 3:
+        return pages_texts
+    def first_nonempty(line_list):
+        for l in line_list:
+            t = l.strip()
+            if t:
+                return re.sub(r'\s+', ' ', t)
+        return ""
+    def last_nonempty(line_list):
+        for i in range(len(line_list)-1, -1, -1):
+            t = line_list[i].strip()
+            if t:
+                return re.sub(r'\s+', ' ', t)
+        return ""
+    tops, bots = [], []
+    for txt in pages_texts:
+        lines = txt.splitlines()
+        tops.append(first_nonempty(lines))
+        bots.append(last_nonempty(lines))
+    from collections import Counter
+    def pick_common(lines):
+        if not lines:
+            return ""
+        common, cnt = Counter(lines).most_common(1)[0]
+        return common if common and cnt >= 0.6*len(lines) and 8 <= len(common) <= 200 else ""
+    top_c = pick_common(tops)
+    bot_c = pick_common(bots)
+    if not top_c and not bot_c:
+        return pages_texts
+    cleaned = []
+    for txt in pages_texts:
+        lines = txt.splitlines()
+        # drop header
+        if top_c:
+            for i, l in enumerate(lines):
+                if l.strip():
+                    if re.sub(r'\s+', ' ', l.strip()) == top_c:
+                        lines = lines[i+1:]
+                    break
+        # drop footer
+        if bot_c:
+            for i in range(len(lines)-1, -1, -1):
+                if lines[i].strip():
+                    if re.sub(r'\s+', ' ', lines[i].strip()) == bot_c:
+                        lines = lines[:i]
+                    break
+        cleaned.append("\n".join(lines))
+    return cleaned
 
 @app.route('/extract', methods=['POST'])
 def extract_pdf():
@@ -78,58 +173,87 @@ def extract_pdf():
 
         logger.info(f"Processing PDF: {file.filename}")
 
-        # Extract text using pdfplumber
+        # Parse tuning params (with sensible defaults)
+        mode = (request.args.get('mode') or '').lower()  # 'words' | 'pdfminer' | '' (auto)
+        use_text_flow = (request.args.get('flow') or '').lower() in ('1', 'true', 'yes')
+        xt = float(request.args.get('xt') or 3)
+        yt = float(request.args.get('yt') or 3)
+        wm = float(request.args.get('wm') or 0.0)
+        cm = float(request.args.get('cm') or 0.0)
+        lm = float(request.args.get('lm') or 0.0)
+        bf = float(request.args.get('bf') or 0.0)
+
+        # Read PDF into memory (for using both pdfplumber and pdfminer)
+        pdf_bytes = file.read()
         pages_data = []
         full_text_parts = []
+        metadata = {}
 
-        with pdfplumber.open(file.stream) as pdf:
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
             total_pages = len(pdf.pages)
             logger.info(f"PDF has {total_pages} pages")
 
-            for page_num, page in enumerate(pdf.pages, start=1):
-                # Extract text with layout preservation for better spacing
-                # pdfplumber does a better job than Go libraries at word spacing
-                page_text = page.extract_text(
-                    layout=True,
-                    x_tolerance=3,  # Horizontal tolerance for detecting word boundaries
-                    y_tolerance=3   # Vertical tolerance for detecting line boundaries
+            # Decide strategy in auto mode by sampling the first page
+            chosen = mode if mode in ('words', 'pdfminer') else ''
+            if not chosen and total_pages > 0:
+                try:
+                    p0 = pdf.pages[0]
+                    cand_w = words_based_page_text(p0, use_text_flow, xt, yt)
+                    lap_probe = LAParams(
+                        char_margin=cm or 2.0,
+                        word_margin=wm or 0.35,
+                        line_margin=lm or 0.2,
+                        boxes_flow=bf if bf != 0.0 else 0.5,
+                        all_texts=True,
+                        detect_vertical=True,
+                    )
+                    cand_p = pdfminer_page_text(pdf_bytes, 0, lap_probe)
+                    wr_w, awl_w = quality_metrics(cand_w)
+                    wr_p, awl_p = quality_metrics(cand_p)
+                    chosen = 'words' if (wr_w, -awl_w) > (wr_p, -awl_p) else 'pdfminer'
+                except Exception as e:
+                    logger.warning(f"Auto strategy probe failed, defaulting to words: {e}")
+                    chosen = 'words'
+            if not chosen:
+                chosen = 'words'
+
+            if chosen == 'words':
+                for i, page in enumerate(pdf.pages, start=1):
+                    page_text = words_based_page_text(page, use_text_flow, xt, yt)
+                    pages_data.append({"page": i, "text": page_text})
+            else:  # pdfminer path
+                lap = LAParams(
+                    char_margin=cm or 2.0,
+                    word_margin=wm or 0.35,
+                    line_margin=lm or 0.2,
+                    boxes_flow=bf if bf != 0.0 else 0.5,
+                    all_texts=True,
+                    detect_vertical=True,
                 )
+                for i in range(total_pages):
+                    page_text = pdfminer_page_text(pdf_bytes, i, lap)
+                    pages_data.append({"page": i+1, "text": page_text})
 
-                if page_text:
-                    # Normalize whitespace: collapse multiple spaces to single space
-                    # but preserve paragraph breaks (double newlines)
-                    page_text = re.sub(r' +', ' ', page_text)  # Multiple spaces -> single space
-                    page_text = re.sub(r'\n +', '\n', page_text)  # Remove leading spaces on lines
-                    page_text = re.sub(r' +\n', '\n', page_text)  # Remove trailing spaces on lines
-                    page_text = page_text.strip()
-
-                    pages_data.append({
-                        "page": page_num,
-                        "text": page_text
-                    })
-
-                    # Add page marker for full text
-                    full_text_parts.append(f"--- Page {page_num} ---\n{page_text}")
-                else:
-                    logger.warning(f"No text extracted from page {page_num}")
-                    pages_data.append({
-                        "page": page_num,
-                        "text": ""
-                    })
-
-            # Get PDF metadata
+            # PDF metadata
             metadata = pdf.metadata or {}
 
-        # Combine all pages
+        # Remove repeated headers/footers across pages
+        texts = [p["text"] for p in pages_data]
+        texts = strip_repeated_headers_footers(texts)
+        for i, t in enumerate(texts):
+            pages_data[i]["text"] = t
+
+        for p in pages_data:
+            full_text_parts.append(f"--- Page {p['page']} ---\n{p['text']}")
         full_text = "\n\n".join(full_text_parts)
 
-        logger.info(f"Successfully extracted {len(full_text)} characters from {total_pages} pages")
+        logger.info(f"Successfully extracted {len(full_text)} characters from {len(pages_data)} pages (mode={mode or 'auto'} -> {chosen})")
 
         return jsonify({
             "success": True,
             "text": full_text,
             "pages": pages_data,
-            "total_pages": total_pages,
+            "total_pages": len(pages_data),
             "metadata": {
                 "title": metadata.get('Title', ''),
                 "author": metadata.get('Author', ''),

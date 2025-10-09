@@ -1,13 +1,14 @@
 package agent
 
 import (
-	"context"
-	"strings"
+    "context"
+    "regexp"
+    "strings"
 
-	"stats-agent/tools"
-	"stats-agent/web/format"
+    "stats-agent/tools"
+    "stats-agent/web/format"
 
-	"go.uber.org/zap"
+    "go.uber.org/zap"
 )
 
 // ExecutionCoordinator handles Python code detection, execution, and result processing.
@@ -38,8 +39,11 @@ func (e *ExecutionCoordinator) ProcessResponse(ctx context.Context, llmResponse,
 	// Normalize malformed tag fragments before further processing
 	sanitizedResponse := sanitizePythonTags(llmResponse)
 
-	// Convert markdown code blocks to XML tags first
-	processedResponse := e.ConvertMarkdownToXML(sanitizedResponse)
+    // Convert markdown code blocks to XML tags first
+    processedResponse := e.ConvertMarkdownToXML(sanitizedResponse)
+
+    // Ensure any unbalanced tags are closed so execution can proceed
+    processedResponse, _ = format.CloseUnbalancedTags(processedResponse)
 
 	// Try to execute Python code if present
 	code, result, wasExecuted := e.pythonTool.ExecutePythonCode(ctx, processedResponse, sessionID, nil)
@@ -101,9 +105,22 @@ func sanitizePythonTags(text string) string {
 		"</python\n":  "</python>\n",
 	}
 
-	for old, new := range replacements {
-		text = strings.ReplaceAll(text, old, new)
-	}
+    for old, new := range replacements {
+        text = strings.ReplaceAll(text, old, new)
+    }
 
-	return text
+    // Handle common patterns where the model writes "... something.python\n" before code
+    // 1) Sentence ends with ".python" then a newline before code
+    reDotPython := regexp.MustCompile(`(?m)\.python\s*\n`)
+    text = reDotPython.ReplaceAllString(text, ".\n<python>\n")
+
+    // 2) A label line like "python:" before code
+    reLabelPython := regexp.MustCompile(`(?mi)^[\t ]*python:\s*\n`)
+    text = reLabelPython.ReplaceAllString(text, "<python>\n")
+
+    // 3) A standalone line "python" before code
+    reLinePython := regexp.MustCompile(`(?m)^[\t ]*python\s*\n`)
+    text = reLinePython.ReplaceAllString(text, "<python>\n")
+
+    return text
 }

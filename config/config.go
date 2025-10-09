@@ -33,7 +33,11 @@ const (
 	defaultPDFSentenceBoundaryTruncate      = true
 	defaultPDFExtractorURL                  = "http://localhost:5001"
 	defaultPDFExtractorEnabled              = true
-	defaultPDFExtractorTimeout              = 30 * time.Second
+    defaultPDFExtractorTimeout              = 30 * time.Second
+    // PDF page cleanup defaults
+    defaultPDFHeaderFooterRepeatThreshold   = 0.6
+    defaultPDFReferencesTrimEnabled         = true
+    defaultPDFReferencesCitationDensity     = 0.5
 )
 
 // Config holds the application's configuration
@@ -87,9 +91,22 @@ type Config struct {
 	PDFFirstPagesPriority            int           `mapstructure:"PDF_FIRST_PAGES_PRIORITY"`
 	PDFEnableTableDetection          bool          `mapstructure:"PDF_ENABLE_TABLE_DETECTION"`
 	PDFSentenceBoundaryTruncate      bool          `mapstructure:"PDF_SENTENCE_BOUNDARY_TRUNCATE"`
-	PDFExtractorURL                  string        `mapstructure:"PDF_EXTRACTOR_URL"`
-	PDFExtractorEnabled              bool          `mapstructure:"PDF_EXTRACTOR_ENABLED"`
-	PDFExtractorTimeout              time.Duration `mapstructure:"PDF_EXTRACTOR_TIMEOUT"`
+    PDFExtractorURL                  string        `mapstructure:"PDF_EXTRACTOR_URL"`
+    PDFExtractorEnabled              bool          `mapstructure:"PDF_EXTRACTOR_ENABLED"`
+    PDFExtractorTimeout              time.Duration `mapstructure:"PDF_EXTRACTOR_TIMEOUT"`
+    // PDF extractor tuning params (passed as query params)
+    PDFExtractorMode                 string        `mapstructure:"PDF_EXTRACTOR_MODE"`
+    PDFExtractorWordMargin           float64       `mapstructure:"PDF_EXTRACTOR_WORD_MARGIN"`
+    PDFExtractorCharMargin           float64       `mapstructure:"PDF_EXTRACTOR_CHAR_MARGIN"`
+    PDFExtractorLineMargin           float64       `mapstructure:"PDF_EXTRACTOR_LINE_MARGIN"`
+    PDFExtractorBoxesFlow            float64       `mapstructure:"PDF_EXTRACTOR_BOXES_FLOW"`
+    PDFExtractorUseTextFlow          bool          `mapstructure:"PDF_EXTRACTOR_USE_TEXT_FLOW"`
+    PDFExtractorXTolerance           float64       `mapstructure:"PDF_EXTRACTOR_X_TOLERANCE"`
+    PDFExtractorYTolerance           float64       `mapstructure:"PDF_EXTRACTOR_Y_TOLERANCE"`
+    // PDF page cleanup tuning
+    PDFHeaderFooterRepeatThreshold   float64       `mapstructure:"PDF_HEADER_FOOTER_REPEAT_THRESHOLD"`
+    PDFReferencesTrimEnabled         bool          `mapstructure:"PDF_REFERENCES_TRIM_ENABLED"`
+    PDFReferencesCitationDensity     float64       `mapstructure:"PDF_REFERENCES_CITATION_DENSITY"`
 }
 
 func Load(logger *zap.Logger) *Config {
@@ -148,9 +165,22 @@ func Load(logger *zap.Logger) *Config {
 	viper.SetDefault("PDF_FIRST_PAGES_PRIORITY", defaultPDFFirstPagesPriority)
 	viper.SetDefault("PDF_ENABLE_TABLE_DETECTION", defaultPDFEnableTableDetection)
 	viper.SetDefault("PDF_SENTENCE_BOUNDARY_TRUNCATE", defaultPDFSentenceBoundaryTruncate)
-	viper.SetDefault("PDF_EXTRACTOR_URL", defaultPDFExtractorURL)
-	viper.SetDefault("PDF_EXTRACTOR_ENABLED", defaultPDFExtractorEnabled)
-	viper.SetDefault("PDF_EXTRACTOR_TIMEOUT", defaultPDFExtractorTimeout)
+    viper.SetDefault("PDF_EXTRACTOR_URL", defaultPDFExtractorURL)
+    viper.SetDefault("PDF_EXTRACTOR_ENABLED", defaultPDFExtractorEnabled)
+    viper.SetDefault("PDF_EXTRACTOR_TIMEOUT", defaultPDFExtractorTimeout)
+    // No defaults for tuning params; set in config.yaml when desired
+    viper.SetDefault("PDF_EXTRACTOR_MODE", "")
+    viper.SetDefault("PDF_EXTRACTOR_WORD_MARGIN", 0.0)
+    viper.SetDefault("PDF_EXTRACTOR_CHAR_MARGIN", 0.0)
+    viper.SetDefault("PDF_EXTRACTOR_LINE_MARGIN", 0.0)
+    viper.SetDefault("PDF_EXTRACTOR_BOXES_FLOW", 0.0)
+    viper.SetDefault("PDF_EXTRACTOR_USE_TEXT_FLOW", false)
+    viper.SetDefault("PDF_EXTRACTOR_X_TOLERANCE", 0.0)
+    viper.SetDefault("PDF_EXTRACTOR_Y_TOLERANCE", 0.0)
+    // PDF page cleanup defaults
+    viper.SetDefault("PDF_HEADER_FOOTER_REPEAT_THRESHOLD", defaultPDFHeaderFooterRepeatThreshold)
+    viper.SetDefault("PDF_REFERENCES_TRIM_ENABLED", defaultPDFReferencesTrimEnabled)
+    viper.SetDefault("PDF_REFERENCES_CITATION_DENSITY", defaultPDFReferencesCitationDensity)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if logger != nil {
