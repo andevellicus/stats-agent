@@ -488,6 +488,22 @@ func (h *ChatHandler) StopAgent(c *gin.Context) {
 	c.Status(http.StatusOK)
 }
 
+// Status returns whether the session currently has an active agent run,
+// and if so, the user message ID that initiated it (to allow SSE reattach).
+func (h *ChatHandler) Status(c *gin.Context) {
+    sessionIDStr := c.Query("session_id")
+    if sessionIDStr == "" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Session ID required"})
+        return
+    }
+
+    running, userMsgID := h.chatService.GetActiveRun(sessionIDStr)
+    c.JSON(http.StatusOK, gin.H{
+        "running":          running,
+        "user_message_id":  userMsgID,
+    })
+}
+
 func (h *ChatHandler) StreamResponse(c *gin.Context) {
 	sessionIDStr := c.Query("session_id")
 	userMessageID := c.Query("user_message_id")

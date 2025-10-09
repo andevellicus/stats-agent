@@ -274,6 +274,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (messageInput) {
         messageInput.addEventListener('input', () => autoExpand(messageInput));
     }
+
+    // After initial render, try to reattach to any active run
+    checkAndAttachToActiveRun();
 });
 
 document.body.addEventListener('htmx:afterSwap', function(event) {
@@ -298,7 +301,134 @@ document.body.addEventListener('htmx:afterSwap', function(event) {
         backdrop.classList.add('hidden');
         document.body.style.overflow = '';
     }
+
+    // Try to reattach to any active run after navigation
+    checkAndAttachToActiveRun();
 });
+
+function checkAndAttachToActiveRun() {
+    // If already streaming, do nothing
+    if (activeEventSource) return;
+    const form = document.getElementById('chat-form');
+    if (!form) return;
+    const sessionIdInput = form.querySelector('input[name="session_id"]');
+    const sessionId = sessionIdInput ? sessionIdInput.value : null;
+    if (!sessionId) return;
+
+    fetch(`/chat/status?session_id=${encodeURIComponent(sessionId)}`, { method: 'GET' })
+        .then(resp => resp.ok ? resp.json() : null)
+        .then(data => {
+            if (!data || !data.running || !data.user_message_id) return;
+            // Toggle UI to show stop available
+            const sendIcon = document.getElementById('send-icon');
+            const stopIcon = document.getElementById('stop-icon');
+            const messageInput = document.getElementById('message-input');
+            if (sendIcon && stopIcon) {
+                sendIcon.classList.add('hidden');
+                stopIcon.classList.remove('hidden');
+            }
+            if (messageInput) { messageInput.disabled = true; }
+            // Attach SSE to the active stream
+            attachSSE(sessionId, data.user_message_id);
+        })
+        .catch(() => {});
+}
+
+function attachSSE(sessionId, messageId) {
+    if (activeEventSource) return;
+    const eventSource = new EventSource('/chat/stream?session_id=' + encodeURIComponent(sessionId) + '&user_message_id=' + encodeURIComponent(messageId));
+    activeEventSource = eventSource;
+
+    let contentBuffer = '';
+    let messageContainer = null;
+    let debounceTimer;
+
+    const cleanup = () => {
+        const sendIcon = document.getElementById('send-icon');
+        const stopIcon = document.getElementById('stop-icon');
+        const messageInput = document.getElementById('message-input');
+        if (sendIcon && stopIcon) {
+            stopIcon.classList.add('hidden');
+            sendIcon.classList.remove('hidden');
+        }
+        if(messageInput) { messageInput.disabled = false; }
+        activeEventSource = null;
+    };
+
+    eventSource.onmessage = function(event) {
+        const data = JSON.parse(event.data);
+        switch (data.type) {
+            case 'connection_established':
+                break;
+            case 'remove_loader':
+                const loadingIndicator = document.getElementById(data.content);
+                if (loadingIndicator) { loadingIndicator.remove(); }
+                break;
+            case 'create_container':
+                const agentMessageId = 'agent-msg-' + data.content;
+                messageContainer = document.createElement('div');
+                messageContainer.id = agentMessageId;
+                messageContainer.className = "w-full";
+                messageContainer.innerHTML = `
+                    <div class=\"bg-white rounded-2xl px-5 py-3 w-full shadow-md border border-gray-100 hover:shadow-lg transition-shadow duration-200\">\n
+                        <div class=\"font-semibold text-sm text-primary mb-2 font-display\">Pocket Statistician</div>\n
+                        <div id=\"content-${agentMessageId}\" class=\"prose max-w-none leading-relaxed text-gray-700 font-sans\"></div>\n
+                        <div id=\"file-container-${agentMessageId}\"></div>\n
+                    </div>`;
+                document.getElementById('messages').appendChild(messageContainer);
+                break;
+            case 'sidebar_update':
+                if (data.content) {
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(data.content, 'text/html');
+                    const newLink = doc.body.firstChild;
+                    if (newLink) {
+                        const targetId = newLink.id;
+                        const targetLink = document.getElementById(targetId);
+                        if (targetLink) { targetLink.innerHTML = newLink.innerHTML; }
+                    }
+                }
+                break;
+            case 'file_append_html':
+                if (data.content) {
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(data.content, 'text/html');
+                    const fileContainer = doc.body.firstChild;
+                    if (fileContainer) {
+                        const targetId = fileContainer.id;
+                        const targetDiv = document.getElementById(targetId);
+                        if (targetDiv) { targetDiv.innerHTML = fileContainer.innerHTML; }
+                    }
+                }
+                break;
+            case 'chunk':
+                if (messageContainer && typeof data.content === 'string') {
+                    contentBuffer += data.content;
+                    clearTimeout(debounceTimer);
+                    debounceTimer = setTimeout(() => {
+                        const contentDiv = document.getElementById('content-' + messageContainer.id);
+                        if(contentDiv){ renderAndProcessContent(contentDiv, contentBuffer); }
+                    }, 50);
+                }
+                break;
+            case 'end':
+                eventSource.close();
+                if (messageContainer) {
+                    const contentDiv = document.getElementById('content-' + messageContainer.id);
+                    if (contentDiv) { renderAndProcessContent(contentDiv, contentBuffer); }
+                }
+                cleanup();
+                break;
+            default:
+                break;
+        }
+    };
+
+    eventSource.onerror = function(event) {
+        cleanup();
+        eventSource.close();
+    };
+}
 
 function initiateSSE() {
     const loaders = document.querySelectorAll('.sse-loader:not([data-sse-initialized])');

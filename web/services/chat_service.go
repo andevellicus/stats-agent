@@ -22,8 +22,9 @@ import (
 )
 
 type sessionRun struct {
-	cancel context.CancelFunc
-	token  string
+    cancel        context.CancelFunc
+    token         string
+    userMessageID string
 }
 
 type ChatService struct {
@@ -56,15 +57,15 @@ func NewChatService(
 	}
 }
 
-func (cs *ChatService) registerRun(sessionID string, cancel context.CancelFunc) string {
-	token := uuid.New().String()
-	var previous context.CancelFunc
+func (cs *ChatService) registerRun(sessionID string, cancel context.CancelFunc, userMessageID string) string {
+    token := uuid.New().String()
+    var previous context.CancelFunc
 
 	cs.activeRunsMu.Lock()
 	if existing, ok := cs.activeRuns[sessionID]; ok {
 		previous = existing.cancel
 	}
-	cs.activeRuns[sessionID] = sessionRun{cancel: cancel, token: token}
+    cs.activeRuns[sessionID] = sessionRun{cancel: cancel, token: token, userMessageID: userMessageID}
 	cs.activeRunsMu.Unlock()
 
 	if previous != nil {
@@ -95,6 +96,17 @@ func (cs *ChatService) StopSessionRun(sessionID string) {
 		cs.logger.Info("Cancelling active run for session", zap.String("session_id", sessionID))
 		run.cancel()
 	}
+}
+
+// GetActiveRun returns whether a run is active for the session and, if so,
+// the user message ID that initiated it (used to reattach SSE).
+func (cs *ChatService) GetActiveRun(sessionID string) (bool, string) {
+    cs.activeRunsMu.Lock()
+    defer cs.activeRunsMu.Unlock()
+    if run, ok := cs.activeRuns[sessionID]; ok {
+        return true, run.userMessageID
+    }
+    return false, ""
 }
 
 // InitializeSession initializes a new session by checking for uploaded files
@@ -201,8 +213,8 @@ func (cs *ChatService) StreamAgentResponse(
 ) {
 	agentMessageID := uuid.New().String()
 	var writeMu sync.Mutex
-	runCtx, cancelRun := context.WithCancel(context.Background())
-	token := cs.registerRun(sessionID, cancelRun)
+    runCtx, cancelRun := context.WithCancel(context.Background())
+    token := cs.registerRun(sessionID, cancelRun, userMessageID)
 	defer func() {
 		cancelRun()
 		cs.deregisterRun(sessionID, token)

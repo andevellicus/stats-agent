@@ -118,6 +118,7 @@ func (s *Server) setupRoutes() {
 	s.router.GET("/chat/new", chatHandler.NewChat)
 	s.router.GET("/chat/stream", chatHandler.StreamResponse)
 	s.router.POST("/chat/stop", chatHandler.StopAgent)
+	s.router.GET("/chat/status", chatHandler.Status)
 	s.router.GET("/chat/:sessionID", chatHandler.LoadSession)
 	s.router.DELETE("/chat/:sessionID", chatHandler.DeleteSession)
 }
