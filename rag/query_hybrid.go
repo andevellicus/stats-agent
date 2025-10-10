@@ -1,14 +1,14 @@
 package rag
 
 import (
-    "context"
-    "database/sql"
-    "encoding/json"
-    "errors"
-    "fmt"
-    "sort"
-    "strings"
-    "unicode"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"unicode"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -259,10 +259,10 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		semanticWeight = 1
 	}
 
-    candidateList := make([]*hybridCandidate, 0, len(candidates))
-    for _, cand := range candidates {
-        weighted := 0.0
-        weightSum := 0.0
+	candidateList := make([]*hybridCandidate, 0, len(candidates))
+	for _, cand := range candidates {
+		weighted := 0.0
+		weightSum := 0.0
 		if cand.HasSemantic && maxSemantic > 0 && semanticWeight > 0 {
 			weighted += semanticWeight * (cand.SemanticScore / maxSemantic)
 			weightSum += semanticWeight
@@ -285,11 +285,11 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		if cand.Metadata["type"] == "summary" {
 			combined *= r.cfg.HybridSummaryBoost
 		}
-        if cand.Content != "" && strings.Contains(cand.Content, "Error:") && !isQueryForError {
-            combined *= r.cfg.HybridErrorPenalty
-        }
+		if cand.Content != "" && strings.Contains(cand.Content, "Error:") && !isQueryForError {
+			combined *= r.cfg.HybridErrorPenalty
+		}
 
-        if len(metadataHints) > 0 && cand.Metadata != nil {
+		if len(metadataHints) > 0 && cand.Metadata != nil {
 			metadataBoost := 0.0
 			for key, hint := range metadataHints {
 				hint = strings.TrimSpace(strings.ToLower(hint))
@@ -325,15 +325,15 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 			}
 		}
 
-        // Penalize near-exact echoes of the user query to avoid retrieving
-        // the question itself instead of useful context.
-        if cand.Content != "" && isQueryEcho(query, cand.Content) {
-            combined *= 0.1 // heavy penalty for echoes
-        }
+		// Penalize near-exact echoes of the user query to avoid retrieving
+		// the question itself instead of useful context.
+		if cand.Content != "" && isQueryEcho(query, cand.Content) {
+			combined *= 0.1 // heavy penalty for echoes
+		}
 
-        cand.Score = combined
-        candidateList = append(candidateList, cand)
-    }
+		cand.Score = combined
+		candidateList = append(candidateList, cand)
+	}
 
 	sort.Slice(candidateList, func(i, j int) bool {
 		if candidateList[i].Score == candidateList[j].Score {
@@ -454,48 +454,50 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 // normalizeForEcho lowercases, strips punctuation, and collapses whitespace
 // to enable robust near-equality checks between short queries and candidates.
 func normalizeForEcho(s string) string {
-    s = strings.ToLower(strings.TrimSpace(s))
-    var b strings.Builder
-    b.Grow(len(s))
-    prevSpace := false
-    for _, r := range s {
-        if unicode.IsLetter(r) || unicode.IsNumber(r) {
-            b.WriteRune(r)
-            prevSpace = false
-        } else if unicode.IsSpace(r) {
-            if !prevSpace {
-                b.WriteByte(' ')
-                prevSpace = true
-            }
-        }
-        // drop all other runes (punctuation/symbols)
-    }
-    return strings.TrimSpace(b.String())
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	b.Grow(len(s))
+	prevSpace := false
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			b.WriteRune(r)
+			prevSpace = false
+		} else if unicode.IsSpace(r) {
+			if !prevSpace {
+				b.WriteByte(' ')
+				prevSpace = true
+			}
+		}
+		// drop all other runes (punctuation/symbols)
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // isQueryEcho returns true when the candidate content is an exact or near-exact
 // echo of the query (after simple normalization). This helps down-rank user
 // messages or trivial mirrors of the question.
 func isQueryEcho(query, content string) bool {
-    nq := normalizeForEcho(query)
-    nc := normalizeForEcho(content)
-    if nq == "" || nc == "" {
-        return false
-    }
-    if nq == nc {
-        return true
-    }
-    // If one contains the other and lengths are very close, treat as echo
-    if strings.Contains(nc, nq) || strings.Contains(nq, nc) {
-        lq, lc := len(nq), len(nc)
-        minL := lq
-        maxL := lc
-        if lc < lq { minL, maxL = lc, lq }
-        if minL*100 >= maxL*85 { // >=85% length overlap
-            return true
-        }
-    }
-    return false
+	nq := normalizeForEcho(query)
+	nc := normalizeForEcho(content)
+	if nq == "" || nc == "" {
+		return false
+	}
+	if nq == nc {
+		return true
+	}
+	// If one contains the other and lengths are very close, treat as echo
+	if strings.Contains(nc, nq) || strings.Contains(nq, nc) {
+		lq, lc := len(nq), len(nc)
+		minL := lq
+		maxL := lc
+		if lc < lq {
+			minL, maxL = lc, lq
+		}
+		if minL*100 >= maxL*85 { // >=85% length overlap
+			return true
+		}
+	}
+	return false
 }
 
 func ensureCandidate(candidates map[string]*hybridCandidate, docID string, metadata map[string]string) *hybridCandidate {
@@ -521,12 +523,4 @@ func ensureCandidate(candidates map[string]*hybridCandidate, docID string, metad
 	}
 	candidates[docID] = cand
 	return cand
-}
-
-func totalLength(lines []string) int {
-	total := 0
-	for _, line := range lines {
-		total += len(line)
-	}
-	return total
 }

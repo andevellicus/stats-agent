@@ -1,18 +1,15 @@
 package agent
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"stats-agent/config"
-	"stats-agent/web/format"
-	"stats-agent/web/types"
-	"time"
+    "context"
+    "fmt"
+    "stats-agent/config"
+    "stats-agent/llmclient"
+    "stats-agent/web/format"
+    "stats-agent/web/types"
+    "time"
 
-	"go.uber.org/zap"
+    "go.uber.org/zap"
 )
 
 // MemoryManager handles token counting, context window management, and history trimming.
@@ -31,52 +28,8 @@ func NewMemoryManager(cfg *config.Config, logger *zap.Logger) *MemoryManager {
 
 // CountTokens returns the token count for the given text using the LLM's tokenize endpoint.
 func (m *MemoryManager) CountTokens(ctx context.Context, text string) (int, error) {
-	reqBody := TokenizeRequest{
-		Content: text,
-	}
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return 0, fmt.Errorf("failed to marshal tokenize request body: %w", err)
-	}
-
-	url := fmt.Sprintf("%s/tokenize", m.cfg.MainLLMHost)
-	var resp *http.Response
-
-	// Retry up to 5 times if the endpoint is loading
-	for range 5 {
-		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
-		if err != nil {
-			return 0, fmt.Errorf("failed to create tokenize request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-
-		client := &http.Client{}
-		resp, err = client.Do(req)
-		if err != nil {
-			return 0, fmt.Errorf("failed to send tokenize request to llama.cpp server: %w", err)
-		}
-
-		if resp.StatusCode != http.StatusServiceUnavailable {
-			break
-		}
-
-		resp.Body.Close()
-		m.logger.Warn("Tokenize endpoint is loading, retrying", zap.Duration("retry_delay", 2*time.Second))
-		time.Sleep(2 * time.Second)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return 0, fmt.Errorf("llama.cpp server returned non-200 status for tokenize: %s, body: %s", resp.Status, string(bodyBytes))
-	}
-
-	var tokenizeResponse TokenizeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokenizeResponse); err != nil {
-		return 0, fmt.Errorf("failed to decode tokenize response body: %w", err)
-	}
-
-	return len(tokenizeResponse.Tokens), nil
+    client := llmclient.New(m.cfg, m.logger)
+    return client.Tokenize(ctx, m.cfg.MainLLMHost, text)
 }
 
 // CalculateHistorySize returns the total token count for the entire message history.

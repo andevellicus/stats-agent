@@ -59,13 +59,13 @@ type Client struct {
 }
 
 func New(cfg *config.Config, logger *zap.Logger) *Client {
-	// Use a client with the configured timeout; streaming requests rely on context
-	// cancellation or server closing the stream.
-	return &Client{
-		cfg:        cfg,
-		httpClient: &http.Client{Timeout: cfg.LLMRequestTimeout},
-		logger:     logger,
-	}
+    // Use a client with the configured timeout; streaming requests rely on context
+    // cancellation or server closing the stream.
+    return &Client{
+        cfg:        cfg,
+        httpClient: &http.Client{Timeout: cfg.LLMRequestTimeout},
+        logger:     logger,
+    }
 }
 
 // Chat performs a non-streaming chat completion call.

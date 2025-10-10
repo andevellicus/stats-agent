@@ -291,13 +291,10 @@ func (r *RAG) persistPreparedDocument(ctx context.Context, data *ragDocumentData
 		tokenCount = 0
 	}
 
-	tokenLimit := r.maxEmbeddingTokens
-	if tokenLimit <= 0 {
-		tokenLimit = r.cfg.MaxEmbeddingTokens
-	}
-	if tokenLimit <= 0 {
-		tokenLimit = 480
-	}
+    tokenLimit := r.embeddingTokenTarget
+    if tokenLimit <= 0 {
+        tokenLimit = 480
+    }
 
 	if tokenCount > tokenLimit {
 		// Content exceeds limit - CHUNK IT instead of truncating

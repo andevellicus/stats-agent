@@ -17,10 +17,9 @@ const (
 	defaultPythonExecutorIOTimeoutSeconds   = 60 * time.Second
 	defaultPythonExecutorMaxConnections     = 4
 	defaultMaxEmbeddingChars                = 1000
-	defaultMaxEmbeddingTokens               = 250
-	defaultEmbeddingTokenSoftLimit          = 450
-	defaultEmbeddingTokenTarget             = 400
-	defaultMinTokenCheckCharThreshold       = 100
+    defaultEmbeddingTokenSoftLimit          = 450
+    defaultEmbeddingTokenTarget             = 400
+    defaultMinTokenCheckCharThreshold       = 100
 	defaultMaxHybridCandidates              = 100
 	defaultHybridSemanticWeight             = 0.7
 	defaultHybridBM25Weight                 = 0.3
@@ -73,10 +72,9 @@ type Config struct {
 	PythonExecutorIOTimeoutSeconds   time.Duration `mapstructure:"PYTHON_EXECUTOR_IO_TIMEOUT_SECONDS"`
 	PythonExecutorMaxConnections     int           `mapstructure:"PYTHON_EXECUTOR_MAX_CONNECTIONS"`
 	MaxEmbeddingChars                int           `mapstructure:"MAX_EMBEDDING_CHARS"`
-	MaxEmbeddingTokens               int           `mapstructure:"MAX_EMBEDDING_TOKENS"`
-	EmbeddingTokenSoftLimit          int           `mapstructure:"EMBEDDING_TOKEN_SOFT_LIMIT"`
-	EmbeddingTokenTarget             int           `mapstructure:"EMBEDDING_TOKEN_TARGET"`
-	MinTokenCheckCharThreshold       int           `mapstructure:"MIN_TOKEN_CHECK_CHAR_THRESHOLD"`
+    EmbeddingTokenSoftLimit          int           `mapstructure:"EMBEDDING_TOKEN_SOFT_LIMIT"`
+    EmbeddingTokenTarget             int           `mapstructure:"EMBEDDING_TOKEN_TARGET"`
+    MinTokenCheckCharThreshold       int           `mapstructure:"MIN_TOKEN_CHECK_CHAR_THRESHOLD"`
 	ConversationChunkSize            int           `mapstructure:"CONVERSATION_CHUNK_SIZE"`
 	ConversationChunkOverlap         float64       `mapstructure:"CONVERSATION_CHUNK_OVERLAP"`
 	DocumentChunkSize                int           `mapstructure:"DOCUMENT_CHUNK_SIZE"`
@@ -147,10 +145,9 @@ func Load(logger *zap.Logger) *Config {
 	viper.SetDefault("PYTHON_EXECUTOR_IO_TIMEOUT_SECONDS", 60)
 	viper.SetDefault("PYTHON_EXECUTOR_MAX_CONNECTIONS", 4)
 	viper.SetDefault("MAX_EMBEDDING_CHARS", 1000)
-	viper.SetDefault("MAX_EMBEDDING_TOKENS", 250)
-	viper.SetDefault("EMBEDDING_TOKEN_SOFT_LIMIT", 450)
-	viper.SetDefault("EMBEDDING_TOKEN_TARGET", 400)
-	viper.SetDefault("MIN_TOKEN_CHECK_CHAR_THRESHOLD", 100)
+    viper.SetDefault("EMBEDDING_TOKEN_SOFT_LIMIT", 450)
+    viper.SetDefault("EMBEDDING_TOKEN_TARGET", 400)
+    viper.SetDefault("MIN_TOKEN_CHECK_CHAR_THRESHOLD", 100)
 	viper.SetDefault("MAX_HYBRID_CANDIDATES", 100)
 	viper.SetDefault("HYBRID_SEMANTIC_WEIGHT", defaultHybridSemanticWeight)
 	viper.SetDefault("HYBRID_BM25_WEIGHT", defaultHybridBM25Weight)
@@ -254,12 +251,9 @@ func Load(logger *zap.Logger) *Config {
 	if config.MaxEmbeddingChars <= 0 {
 		config.MaxEmbeddingChars = defaultMaxEmbeddingChars
 	}
-	if config.MaxEmbeddingTokens <= 0 {
-		config.MaxEmbeddingTokens = defaultMaxEmbeddingTokens
-	}
-	if config.EmbeddingTokenSoftLimit <= 0 {
-		config.EmbeddingTokenSoftLimit = defaultEmbeddingTokenSoftLimit
-	}
+    if config.EmbeddingTokenSoftLimit <= 0 {
+        config.EmbeddingTokenSoftLimit = defaultEmbeddingTokenSoftLimit
+    }
 	if config.EmbeddingTokenTarget <= 0 {
 		config.EmbeddingTokenTarget = defaultEmbeddingTokenTarget
 	}

@@ -1,18 +1,17 @@
 package database
 
 import (
-	"context"
-	"database/sql"
-	"errors"
-	"fmt"
-	"path/filepath"
-	"time"
+    "context"
+    "database/sql"
+    "errors"
+    "fmt"
+    "path/filepath"
+    "time"
 
-	"stats-agent/web/types"
+    "stats-agent/web/types"
 
-	"github.com/google/uuid"
-	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/lib/pq"
+    "github.com/google/uuid"
+    _ "github.com/jackc/pgx/v5/stdlib"
 )
 
 type PostgresStore struct {
@@ -429,37 +428,7 @@ func (s *PostgresStore) GetMessagesBySession(ctx context.Context, sessionID uuid
 	return messages, nil
 }
 
-func (s *PostgresStore) GetRenderedFiles(ctx context.Context, sessionID uuid.UUID) (map[string]bool, error) {
-	var files pq.StringArray
-	query := `SELECT rendered_files FROM sessions WHERE id = $1`
-
-	err := s.DB.QueryRowContext(ctx, query, sessionID).Scan(&files)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return make(map[string]bool), nil // No session found, return empty map
-		}
-		return nil, fmt.Errorf("failed to get rendered files: %w", err)
-	}
-
-	rendered := make(map[string]bool)
-	for _, f := range files {
-		rendered[f] = true
-	}
-	return rendered, nil
-}
-
-func (s *PostgresStore) AddRenderedFile(ctx context.Context, sessionID uuid.UUID, filename string) error {
-	query := `
-        UPDATE sessions
-        SET rendered_files = array_append(rendered_files, $1)
-        WHERE id = $2
-    `
-	_, err := s.DB.ExecContext(ctx, query, filename, sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to add rendered file: %w", err)
-	}
-	return nil
-}
+// Note: legacy rendered_files helpers removed; feature no longer supported.
 
 func (s *PostgresStore) GetStaleSessions(ctx context.Context, lastActiveBefore time.Time) ([]uuid.UUID, error) {
 	query := `

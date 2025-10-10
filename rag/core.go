@@ -16,10 +16,7 @@ import (
 	"go.uber.org/zap"
 )
 
-const (
-	// BGE-large-en-v1.5 has a 512 token hard limit
-	defaultMaxEmbeddingTokens = 480 // Safe default (512 - 32 buffer)
-)
+// BGE-large-en-v1.5 has a 512 token hard limit; target and soft limits in config handle sizing.
 
 // EmbeddingFunc is a function that generates embeddings for text.
 type EmbeddingFunc func(ctx context.Context, text string) ([]float32, error)
@@ -29,10 +26,9 @@ type RAG struct {
 	store                      *database.PostgresStore
 	embedder                   EmbeddingFunc
 	logger                     *zap.Logger
-	maxEmbeddingTokens         int
-	embeddingTokenSoftLimit    int
-	embeddingTokenTarget       int
-	minTokenCheckCharThreshold int
+    embeddingTokenSoftLimit    int
+    embeddingTokenTarget       int
+    minTokenCheckCharThreshold int
 	maxHybridCandidates        int
 	datasetMu                  sync.RWMutex
 	sessionDatasets            map[string]string
@@ -82,24 +78,19 @@ func New(cfg *config.Config, store *database.PostgresStore, logger *zap.Logger) 
 
 	embedder := createLlamaCppEmbedding(cfg, logger)
 
-	maxEmbeddingTokens := cfg.MaxEmbeddingTokens
-	if maxEmbeddingTokens <= 0 {
-		maxEmbeddingTokens = defaultMaxEmbeddingTokens
-	}
-	embeddingSoftLimit := cfg.EmbeddingTokenSoftLimit
-	embeddingTarget := cfg.EmbeddingTokenTarget
-	minTokenThreshold := cfg.MinTokenCheckCharThreshold
-	hybridCandidates := cfg.MaxHybridCandidates
+    embeddingSoftLimit := cfg.EmbeddingTokenSoftLimit
+    embeddingTarget := cfg.EmbeddingTokenTarget
+    minTokenThreshold := cfg.MinTokenCheckCharThreshold
+    hybridCandidates := cfg.MaxHybridCandidates
 
 	r := &RAG{
 		cfg:                        cfg,
 		store:                      store,
 		embedder:                   embedder,
 		logger:                     logger,
-		maxEmbeddingTokens:         maxEmbeddingTokens,
-		embeddingTokenSoftLimit:    embeddingSoftLimit,
-		embeddingTokenTarget:       embeddingTarget,
-		minTokenCheckCharThreshold: minTokenThreshold,
+        embeddingTokenSoftLimit:    embeddingSoftLimit,
+        embeddingTokenTarget:       embeddingTarget,
+        minTokenCheckCharThreshold: minTokenThreshold,
 		maxHybridCandidates:        hybridCandidates,
 		sessionDatasets:            make(map[string]string),
 		sentenceSplitter:           NewRegexSentenceSplitter(),

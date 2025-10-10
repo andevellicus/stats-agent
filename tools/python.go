@@ -17,11 +17,11 @@ import (
 )
 
 const (
-	EOM_TOKEN                        = "<|EOM|>"
-	defaultExecutorCooldown          = 5 * time.Second
-	defaultDialTimeout               = 3 * time.Second
-	defaultIOTImeout                 = 60 * time.Second
-	defaultMaxConnectionsPerExecutor = 4
+    EOM_TOKEN                        = "<|EOM|>"
+    defaultExecutorCooldown          = 5 * time.Second
+    defaultDialTimeout               = 3 * time.Second
+    defaultIOTimeout                 = 60 * time.Second
+    defaultMaxConnectionsPerExecutor = 4
 )
 
 type executorNode struct {
@@ -240,10 +240,10 @@ func NewStatefulPythonTool(ctx context.Context, cfg *config.Config, logger *zap.
 	if dialTimeout <= 0 {
 		dialTimeout = defaultDialTimeout
 	}
-	ioTimeout := cfg.PythonExecutorIOTimeoutSeconds
-	if ioTimeout <= 0 {
-		ioTimeout = defaultIOTImeout
-	}
+    ioTimeout := cfg.PythonExecutorIOTimeoutSeconds
+    if ioTimeout <= 0 {
+        ioTimeout = defaultIOTimeout
+    }
 	maxConnections := cfg.PythonExecutorMaxConnections
 	if maxConnections <= 0 {
 		maxConnections = defaultMaxConnectionsPerExecutor
