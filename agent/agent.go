@@ -1,15 +1,16 @@
 package agent
 
 import (
-	"context"
-	"fmt"
-	"strings"
+    "context"
+    "fmt"
+    "strings"
 
-	"stats-agent/config"
-	"stats-agent/llmclient"
-	"stats-agent/rag"
-	"stats-agent/tools"
-	"stats-agent/web/types"
+    "stats-agent/config"
+    "stats-agent/prompts"
+    "stats-agent/llmclient"
+    "stats-agent/rag"
+    "stats-agent/tools"
+    "stats-agent/web/types"
 
 	"go.uber.org/zap"
 )
@@ -217,13 +218,7 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 }
 
 func (a *Agent) GenerateTitle(ctx context.Context, content string) (string, error) {
-	systemPrompt := `You create concise titles that summarize a user's message.
-
-Guidelines:
-1. Output only the title text with no labels or commentary.
-2. Use at most five words.
-3. Base the title entirely on the message content; never repeat the instructions or phrases like "Create a 5 word title".
-4. Avoid quotation marks unless they belong in the title.`
+    systemPrompt := prompts.TitleGenerator()
 
 	userPrompt := fmt.Sprintf(`User message:
 %s

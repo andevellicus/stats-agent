@@ -1,12 +1,13 @@
 package rag
 
 import (
-	"context"
-	"fmt"
-	"strings"
+    "context"
+    "fmt"
+    "strings"
 
-	"stats-agent/llmclient"
-	"stats-agent/web/types"
+    "stats-agent/llmclient"
+    "stats-agent/prompts"
+    "stats-agent/web/types"
 
 	"go.uber.org/zap"
 )
@@ -50,46 +51,7 @@ func buildMetadataTagsForPrompt(metadata map[string]string) string {
 func (r *RAG) SummarizeLongTermMemory(ctx context.Context, context, latestUserMessage string) (string, error) {
 	latestUserMessage = strings.TrimSpace(latestUserMessage)
 
-	systemPrompt := `You are a technical summarization expert specializing in data analysis and statistics.
-
-Your task: Extract key facts from conversation history that are relevant to the user's current question.
-
-CRITICAL RULES:
-1. Focus on DATA FINDINGS, not process descriptions
-2. ALWAYS preserve: numbers, statistical measures, column names, file names, variable names
-3. Extract MULTIPLE facts if relevant (1-3 facts maximum)
-4. Each fact should be ONE concise sentence
-5. Ignore: instructions, system messages, casual chat, failed attempts
-6. If no relevant facts exist, output: "No relevant prior analysis found."
-
-WHAT TO EXTRACT:
-- Statistical results (correlations, p-values, test results, effect sizes)
-- Data characteristics (sample size, distributions, outliers)
-- Analysis decisions (which test used, which variables, transformations applied)
-- Key findings (patterns discovered, significant differences, trends)
-- File/dataset information (which data was analyzed)
-
-DON'T EXTRACT:
-- How-to instructions or explanations
-- Error messages or debugging steps
-- Casual conversation or greetings
-- Process descriptions ("I used pandas to...")
-
-EXAMPLES:
-
-Example 1:
-Memory: "Let me help you analyze that. First, I loaded the data. Then I checked for missing values - found 23 missing values in the income column. I dropped those rows and proceeded with the t-test. Independent samples t-test comparing male vs female salaries showed t=2.34, df=198, p=0.021, Cohen's d=0.33."
-User question: "What were the results of the gender salary comparison?"
-Output:
-Dataset had 23 missing values in income column which were removed. Independent t-test found statistically significant salary difference between genders (t=2.34, df=198, p=0.021) with small effect size (d=0.33).
-
-Example 2:
-Memory: "Hi! How can I help you today? What kind of analysis would you like to perform?"
-User question: "What did we discuss about regression?"
-Output:
-No relevant prior analysis found.
-
-Remember: Be SPECIFIC. Include actual numbers, variable names, and technical details. Vague summaries are useless.`
+    systemPrompt := prompts.SummarizeMemory()
 
 	if latestUserMessage == "" {
 		latestUserMessage = "(no specific question provided)"
@@ -138,7 +100,7 @@ func (r *RAG) generateFactSummary(ctx context.Context, code, result string, meta
 		finalResult = compressMiddle(result, 800, 200, 200)
 	}
 
-	systemPrompt := `You are an expert at extracting statistical facts from code execution results. Your task is to create searchable, information-dense summaries that preserve methodological details and numerical results. Focus on what was done, what was found, and what it means statistically.`
+    systemPrompt := prompts.FactSummary()
 
 	// Build metadata tags string for the prompt
 	metadataTags := buildMetadataTagsForPrompt(metadata)
@@ -230,7 +192,7 @@ Respond with only the fact, ending with metadata tags in square brackets.
 }
 
 func (r *RAG) generateSearchableSummary(ctx context.Context, content string) (string, error) {
-	systemPrompt := `You are an expert at creating concise, searchable summaries of user messages. Your task is to distill the user's message into a single sentence that captures the core question, action, or intent.`
+    systemPrompt := prompts.SearchableSummary()
 
 	userPrompt := fmt.Sprintf(`Create a single-sentence summary of the following user message. Focus on key entities, variable names, and statistical concepts.
 
@@ -255,4 +217,41 @@ func (r *RAG) generateSearchableSummary(ctx context.Context, content string) (st
 	}
 
 	return strings.TrimSpace(summary), nil
+}
+
+// SummarizePDFKeyFacts produces a short, searchable "Key Facts" summary from page 1 text.
+// It is generic across document types and avoids hallucinating missing fields.
+func (r *RAG) SummarizePDFKeyFacts(ctx context.Context, filename string, pageOneText string) (string, error) {
+    filename = strings.TrimSpace(filename)
+    pageOneText = strings.TrimSpace(pageOneText)
+    if pageOneText == "" {
+        return "", fmt.Errorf("page 1 text is empty")
+    }
+
+    system := prompts.PDFKeyFacts()
+
+    var user strings.Builder
+    if filename != "" {
+        user.WriteString("Document: ")
+        user.WriteString(filename)
+        user.WriteString("\n")
+    }
+    user.WriteString("Page 1 text (verbatim):\n")
+    user.WriteString(pageOneText)
+    user.WriteString("\n\nReturn only the Key Facts.")
+
+    msgs := []types.AgentMessage{
+        {Role: "system", Content: system},
+        {Role: "user", Content: user.String()},
+    }
+
+    summary, err := llmclient.New(r.cfg, r.logger).Chat(ctx, r.cfg.SummarizationLLMHost, msgs)
+    if err != nil {
+        return "", fmt.Errorf("llm chat for pdf key facts failed: %w", err)
+    }
+    summary = strings.TrimSpace(summary)
+    if summary == "" {
+        return "", fmt.Errorf("empty key facts summary")
+    }
+    return summary, nil
 }
