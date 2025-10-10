@@ -10,6 +10,7 @@ import (
     "stats-agent/llmclient"
     "stats-agent/rag"
     "stats-agent/tools"
+    "stats-agent/web/format"
     "stats-agent/web/types"
 
 	"go.uber.org/zap"
@@ -129,26 +130,69 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 			longTermContext = "" // Ensure empty on error
 		}
 
-		// Check if long-term context itself is too large
-		if longTermContext != "" {
-			contextTokens, err := a.memoryManager.CountTokens(ctx, longTermContext)
-			softLimitTokens := a.cfg.ContextSoftLimitTokens()
-            if err == nil && contextTokens > softLimitTokens {
-                a.logger.Info("RAG context is too large, summarizing",
-                    zap.Int("context_tokens", contextTokens),
-                    zap.Int("turn", turn))
-                _ = stream.Status("Compressing memory....")
-                sumCtx, sumCancel := context.WithTimeout(ctx, a.cfg.LLMRequestTimeout)
-                summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(sumCtx, longTermContext, input)
-                sumCancel()
-                if summaryErr == nil {
-                    longTermContext = summarizedContext
-                }
-            }
-        }
+
 
 		// Build messages for LLM (combine long-term context + history)
 		messagesForLLM := a.responseHandler.BuildMessagesForLLM(longTermContext, currentHistory)
+
+		// Ensure combined system context + history fits within context window
+		{
+			softLimitTokens := a.cfg.ContextSoftLimitTokens()
+			// Build a temporary slice to measure combined token count
+			combined := make([]types.AgentMessage, 0, len(currentHistory)+1)
+			if longTermContext != "" {
+				combined = append(combined, types.AgentMessage{Role: "system", Content: longTermContext})
+			}
+			combined = append(combined, currentHistory...)
+
+			totalTokens, err := a.memoryManager.CalculateHistorySize(ctx, combined)
+			if err != nil {
+				a.logger.Warn("Failed to count tokens for combined context; proceeding optimistically", zap.Error(err))
+			} else if totalTokens > softLimitTokens {
+				_ = stream.Status("Compressing memory to fit context window....")
+				// First, attempt to further summarize long-term context if present
+				if longTermContext != "" {
+					sumCtx, sumCancel := context.WithTimeout(ctx, a.cfg.LLMRequestTimeout)
+					summarizedContext, summaryErr := a.rag.SummarizeLongTermMemory(sumCtx, longTermContext, input)
+					sumCancel()
+					if summaryErr == nil && summarizedContext != "" {
+						longTermContext = summarizedContext
+						// Recompute combined count with summarized context
+						combined = combined[:0]
+						combined = append(combined, types.AgentMessage{Role: "system", Content: longTermContext})
+						combined = append(combined, currentHistory...)
+						totalTokens, err = a.memoryManager.CalculateHistorySize(ctx, combined)
+						if err != nil {
+							a.logger.Warn("Token recount after summarization failed", zap.Error(err))
+						}
+					}
+				}
+
+				// If still over the limit, trim oldest history messages until it fits
+				for (err == nil && totalTokens > softLimitTokens) && len(currentHistory) > 1 {
+					// Avoid splitting assistant-tool pairs when trimming
+					if currentHistory[0].Role == "assistant" && format.HasTag(currentHistory[0].Content, format.PythonTag) && len(currentHistory) > 1 && currentHistory[1].Role == "tool" {
+						currentHistory = currentHistory[2:]
+					} else {
+						currentHistory = currentHistory[1:]
+					}
+
+					combined = combined[:0]
+					if longTermContext != "" {
+						combined = append(combined, types.AgentMessage{Role: "system", Content: longTermContext})
+					}
+					combined = append(combined, currentHistory...)
+					totalTokens, err = a.memoryManager.CalculateHistorySize(ctx, combined)
+					if err != nil {
+						a.logger.Warn("Token recount during trimming failed", zap.Error(err))
+						break
+					}
+				}
+
+				// Rebuild messages for LLM after any compression/trimming
+				messagesForLLM = a.responseHandler.BuildMessagesForLLM(longTermContext, currentHistory)
+			}
+		}
 
 		// Get LLM response - critical operation, break loop on failure
 		responseChan, err := getLLMResponse(ctx, a.cfg.MainLLMHost, messagesForLLM, a.cfg, a.logger)

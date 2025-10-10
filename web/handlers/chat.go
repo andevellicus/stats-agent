@@ -1,29 +1,29 @@
 package handlers
 
 import (
-	"context"
-	"database/sql"
-	"errors"
-	"fmt"
-	"net/http"
-	"os"
-	"path/filepath"
-	"stats-agent/agent"
-	"stats-agent/config"
-	"stats-agent/database"
-	"stats-agent/rag"
-	"stats-agent/web/middleware"
-	"stats-agent/web/services"
-	"stats-agent/web/templates/components"
-	"stats-agent/web/templates/pages"
-	"stats-agent/web/types"
-	"strings"
-	"sync"
-	"time"
+    "context"
+    "database/sql"
+    "errors"
+    "fmt"
+    "net/http"
+    "os"
+    "path/filepath"
+    "stats-agent/agent"
+    "stats-agent/config"
+    "stats-agent/database"
+    "stats-agent/rag"
+    "stats-agent/web/middleware"
+    "stats-agent/web/services"
+    "stats-agent/web/templates/components"
+    "stats-agent/web/templates/pages"
+    "stats-agent/web/types"
+    "strings"
+    "sync"
+    "time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
-	"go.uber.org/zap"
+    "github.com/gin-gonic/gin"
+    "github.com/google/uuid"
+    "go.uber.org/zap"
 )
 
 type ChatHandler struct {
@@ -523,19 +523,19 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 	c.Header("Connection", "keep-alive")
 	c.Header("Access-Control-Allow-Origin", "*")
 
-	// Use a single mutex for all SSE writes in this request
-	var mu sync.Mutex
+    // Use a single mutex for all SSE writes in this request
+    var mu sync.Mutex
 
 	ctx := c.Request.Context()
 
 	// Use the service layer method
 	h.streamService.WriteSSEData(ctx, c.Writer, services.StreamData{Type: "connection_established"}, &mu)
 
-	messages, err := h.store.GetMessagesBySession(ctx, sessionID)
-	if err != nil {
-		h.streamService.WriteSSEData(ctx, c.Writer, services.StreamData{Type: "error", Content: "Error fetching messages"}, &mu)
-		return
-	}
+    messages, err := h.store.GetMessagesBySession(ctx, sessionID)
+    if err != nil {
+        h.streamService.WriteSSEData(ctx, c.Writer, services.StreamData{Type: "error", Content: "Error fetching messages"}, &mu)
+        return
+    }
 
 	var userMessage *types.ChatMessage
 	for i := range messages {
@@ -568,11 +568,84 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 		}
 	}
 
-	// Convert messages to agent history format
-	agentHistory := toAgentMessages(messages)
+    // Document-ready gating: if user asks a document question but no PDF embeddings exist yet,
+    // return a short assistant response and do not start the agent. Applies only to PDFs.
+    if userMessage != nil {
+        // Check if session has any tracked PDFs
+        files, _ := h.store.GetFilesBySession(ctx, sessionID)
+        hasPDF := false
+        for _, f := range files {
+            if strings.EqualFold(f.FileType, "pdf") || strings.HasSuffix(strings.ToLower(f.Filename), ".pdf") {
+                hasPDF = true
+                break
+            }
+        }
+        if hasPDF {
+            ready, err := h.store.HasSessionPDFEmbeddings(ctx, sessionID)
+            if err != nil {
+                h.logger.Warn("Failed to check PDF embedding readiness", zap.Error(err), zap.String("session_id", sessionID.String()))
+            }
+            if !ready && isDocumentQuestion(userMessage.Content) {
+                // Create and persist a brief assistant message
+                assistantID := uuid.New().String()
+                content := "I’m still indexing your PDF. Please wait a few seconds and ask again. I’ll use the document once it’s ready."
+                if err := h.store.CreateMessage(ctx, types.ChatMessage{
+                    ID:        assistantID,
+                    SessionID: sessionID.String(),
+                    Role:      "assistant",
+                    Content:   content,
+                    Rendered:  content,
+                }); err != nil {
+                    h.logger.Warn("Failed to persist gating assistant message", zap.Error(err))
+                }
+                // Stream minimal response to replace loader and show message
+                h.streamService.WriteSSEData(ctx, c.Writer, services.StreamData{Type: "remove_loader", Content: "loading-" + userMessageID}, &mu)
+                h.streamService.WriteSSEData(ctx, c.Writer, services.StreamData{Type: "create_container", Content: assistantID}, &mu)
+                h.streamService.WriteSSEData(ctx, c.Writer, services.StreamData{Type: "chunk", Content: content}, &mu)
+                h.streamService.WriteSSEData(ctx, c.Writer, services.StreamData{Type: "end"}, &mu)
+                return
+            }
+        }
+    }
+
+    // Convert messages to agent history format
+    agentHistory := toAgentMessages(messages)
 
 	// Stream agent response using ChatService
 	h.chatService.StreamAgentResponse(ctx, c.Writer, userMessage.Content, userMessageID, sessionID.String(), agentHistory)
+}
+
+// isDocumentQuestion heuristically detects questions about PDF documents (not datasets).
+// It looks for common terms that refer to paper content and structure.
+func isDocumentQuestion(s string) bool {
+    // Heuristic: only trigger for explicitly document-oriented queries
+    // Avoid false positives for dataset analysis (tables, results, etc.).
+    ls := strings.ToLower(s)
+
+    // If the message is an upload notice for a non-PDF, do not treat as document question
+    if strings.Contains(ls, "[📎 file uploaded:") {
+        if strings.Contains(ls, ".csv]") || strings.Contains(ls, ".xlsx]") || strings.Contains(ls, ".xls]") {
+            return false
+        }
+    }
+
+    // Strong document signals
+    strong := []string{
+        "author", "authors", "title", "abstract", "doi", "journal", "manuscript", "paper", "pdf",
+        "in the paper", "from the paper", "in the pdf", "from the pdf", "citation",
+    }
+    for _, k := range strong {
+        if strings.Contains(ls, k) {
+            return true
+        }
+    }
+
+    // Page reference like "page 3" or "on page 10"
+    if strings.Contains(ls, "page ") || strings.Contains(ls, "on page ") {
+        return true
+    }
+
+    return false
 }
 
 // Helper functions that remain in the handler for presentation logic

@@ -94,7 +94,11 @@ func (ms *MessageService) AppendFilesToMessage(ctx context.Context, messageID st
 }
 
 func (ms *MessageService) processContentForDB(ctx context.Context, rawContent string) (string, error) {
-	return format.ConvertToHTML(ctx, rawContent)
+    // Normalize common LLM quirks (e.g., python> prompts, ```python, curly quotes)
+    preprocessed := format.PreprocessAssistantText(rawContent)
+    // Ensure tags are balanced before converting to HTML
+    preprocessed, _ = format.CloseUnbalancedTags(preprocessed)
+    return format.ConvertToHTML(ctx, preprocessed)
 }
 
 func (ms *MessageService) renderToolContent(ctx context.Context, result string) (string, error) {

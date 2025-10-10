@@ -10,7 +10,6 @@ require (
 	github.com/jackc/pgx/v5 v5.7.6
 	github.com/jdkato/prose/v2 v2.0.0
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
-	github.com/lib/pq v1.10.9
 	github.com/pgvector/pgvector-go v0.3.0
 	github.com/spf13/viper v1.21.0
 	go.uber.org/zap v1.27.0

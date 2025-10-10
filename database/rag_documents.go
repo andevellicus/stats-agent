@@ -1,14 +1,14 @@
 package database
 
 import (
-	"context"
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"strconv"
-	"strings"
-	"time"
+    "context"
+    "database/sql"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "strconv"
+    "strings"
+    "time"
 
 	"github.com/google/uuid"
 	"github.com/pgvector/pgvector-go"
@@ -245,6 +245,32 @@ func (s *PostgresStore) ListRAGDocuments(ctx context.Context) ([]StoredRAGDocume
 	return documents, nil
 }
 
+// HasSessionPDFEmbeddings returns true if there is at least one embedding row
+// for documents of type 'pdf' associated with the given session.
+func (s *PostgresStore) HasSessionPDFEmbeddings(ctx context.Context, sessionID uuid.UUID) (bool, error) {
+    // Consider embeddings ready if we have any embeddings for PDF-derived documents:
+    // - type = 'pdf' (single-page windows)
+    // - type = 'document_chunk' with a filename (chunked PDF pages)
+    // - type = 'pdf_summary' (key facts summary)
+    const query = `
+        SELECT EXISTS (
+            SELECT 1
+            FROM rag_embeddings e
+            JOIN rag_documents d ON d.id = e.document_id
+            WHERE (d.metadata ->> 'session_id') = $1
+              AND (
+                    (d.metadata ->> 'type') IN ('pdf', 'pdf_summary')
+                 OR ((d.metadata ->> 'type') = 'document_chunk' AND (d.metadata ->> 'filename') IS NOT NULL AND (d.metadata ->> 'filename') <> '')
+              )
+        )
+    `
+    var exists bool
+    if err := s.DB.QueryRowContext(ctx, query, sessionID.String()).Scan(&exists); err != nil {
+        return false, fmt.Errorf("failed to check session pdf embeddings: %w", err)
+    }
+    return exists, nil
+}
+
 // GetRAGDocumentContent returns the stored content for a given document ID.
 func (s *PostgresStore) GetRAGDocumentContent(ctx context.Context, documentID uuid.UUID) (string, error) {
 	const query = `SELECT content FROM rag_documents WHERE id = $1`
@@ -337,82 +363,97 @@ func (s *PostgresStore) FindRAGDocumentByHash(ctx context.Context, sessionID, ro
 // SearchRAGDocumentsBM25 performs a BM25-style full-text search over the stored RAG documents.
 // It returns ranked results ordered by their textual relevance to the provided query.
 func (s *PostgresStore) SearchRAGDocumentsBM25(ctx context.Context, query string, limit int, sessionID string) ([]BM25SearchResult, error) {
-	trimmed := strings.TrimSpace(query)
-	if trimmed == "" || limit <= 0 {
-		return nil, nil
-	}
+    trimmed := strings.TrimSpace(query)
+    if trimmed == "" || limit <= 0 {
+        return nil, nil
+    }
 
-	const searchableTextExpr = "rd.content || ' ' || COALESCE(meta.metadata_text, '')"
-	const rankExpr = "ts_rank_cd(to_tsvector('english', " + searchableTextExpr + "), websearch_to_tsquery('english', $1))"
-	const positionExpr = "position(lower($1) in lower(" + searchableTextExpr + "))"
-	const bonusExpr = "CASE WHEN " + positionExpr + " > 0 THEN 0.2 ELSE 0 END"
+    // Try rich websearch_to_tsquery first, then fallback to simpler plainto_tsquery on error
+    results, err := s.searchBM25With(ctx, trimmed, limit, sessionID, "websearch_to_tsquery")
+    if err == nil {
+        return results, nil
+    }
+    // Fallback attempt
+    fallback, fbErr := s.searchBM25With(ctx, trimmed, limit, sessionID, "plainto_tsquery")
+    if fbErr == nil {
+        return fallback, nil
+    }
+    return nil, fmt.Errorf("failed BM25 search: %v; fallback failed: %w", err, fbErr)
+}
 
-	var builder strings.Builder
-	args := []any{trimmed}
+// searchBM25With builds and executes a BM25-like query using the provided tsquery function name
+// (e.g., "websearch_to_tsquery" or "plainto_tsquery").
+func (s *PostgresStore) searchBM25With(ctx context.Context, trimmed string, limit int, sessionID string, tsFunc string) ([]BM25SearchResult, error) {
+    const searchableTextExpr = "rd.content || ' ' || COALESCE(meta.metadata_text, '')"
+    rankExpr := "ts_rank_cd(to_tsvector('english', " + searchableTextExpr + "), " + tsFunc + "('english', $1))"
+    positionExpr := "position(lower($1) in lower(" + searchableTextExpr + "))"
+    bonusExpr := "CASE WHEN " + positionExpr + " > 0 THEN 0.2 ELSE 0 END"
 
-	builder.WriteString("SELECT rd.id, rd.metadata, rd.content, ")
-	builder.WriteString(rankExpr)
-	builder.WriteString(" AS rank, ")
-	builder.WriteString(bonusExpr)
-	builder.WriteString(" AS exact_bonus FROM rag_documents rd")
-	builder.WriteString(" LEFT JOIN LATERAL (SELECT string_agg(replace(j.key, '_', ' ') || ' ' || j.value || ' ' || replace(j.value, '_', ' '), ' ') AS metadata_text FROM jsonb_each_text(rd.metadata) AS j(key, value)) AS meta ON TRUE")
+    var builder strings.Builder
+    args := []any{trimmed}
 
-	// Apply session-specific filtering when provided.
-	if sessionID != "" {
-		builder.WriteString(" WHERE COALESCE(rd.metadata ->> 'session_id', '') = $")
-		builder.WriteString(strconv.Itoa(len(args) + 1))
-		args = append(args, sessionID)
-		builder.WriteString(" AND (" + rankExpr + " > 0 OR " + positionExpr + " > 0)")
-	} else {
-		builder.WriteString(" WHERE " + rankExpr + " > 0 OR " + positionExpr + " > 0")
-	}
+    builder.WriteString("SELECT rd.id, rd.metadata, rd.content, ")
+    builder.WriteString(rankExpr)
+    builder.WriteString(" AS rank, ")
+    builder.WriteString(bonusExpr)
+    builder.WriteString(" AS exact_bonus FROM rag_documents rd")
+    builder.WriteString(" LEFT JOIN LATERAL (SELECT string_agg(replace(j.key, '_', ' ') || ' ' || j.value || ' ' || replace(j.value, '_', ' '), ' ') AS metadata_text FROM jsonb_each_text(rd.metadata) AS j(key, value)) AS meta ON TRUE")
 
-	builder.WriteString(" ORDER BY (" + rankExpr + " + " + bonusExpr + ") DESC LIMIT $")
-	builder.WriteString(strconv.Itoa(len(args) + 1))
-	args = append(args, limit)
+    if sessionID != "" {
+        builder.WriteString(" WHERE COALESCE(rd.metadata ->> 'session_id', '') = $")
+        builder.WriteString(strconv.Itoa(len(args) + 1))
+        args = append(args, sessionID)
+        builder.WriteString(" AND (" + rankExpr + " > 0 OR " + positionExpr + " > 0)")
+    } else {
+        builder.WriteString(" WHERE " + rankExpr + " > 0 OR " + positionExpr + " > 0")
+    }
 
-	rows, err := s.DB.QueryContext(ctx, builder.String(), args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to execute BM25 search: %w", err)
-	}
-	defer rows.Close()
+    builder.WriteString(" ORDER BY (" + rankExpr + " + " + bonusExpr + ") DESC LIMIT $")
+    builder.WriteString(strconv.Itoa(len(args) + 1))
+    args = append(args, limit)
 
-	var results []BM25SearchResult
-	for rows.Next() {
-		var (
-			documentID   uuid.UUID
-			metadataJSON []byte
-			content      string
-			rank         float64
-			exactBonus   float64
-		)
+    rows, err := s.DB.QueryContext(ctx, builder.String(), args...)
+    if err != nil {
+        return nil, fmt.Errorf("failed to execute BM25 search (%s): %w", tsFunc, err)
+    }
+    defer rows.Close()
 
-		if err := rows.Scan(&documentID, &metadataJSON, &content, &rank, &exactBonus); err != nil {
-			return nil, fmt.Errorf("failed to scan BM25 search result: %w", err)
-		}
+    var results []BM25SearchResult
+    for rows.Next() {
+        var (
+            documentID   uuid.UUID
+            metadataJSON []byte
+            content      string
+            rank         float64
+            exactBonus   float64
+        )
 
-		metadata := make(map[string]string)
-		if len(metadataJSON) > 0 {
-			if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal BM25 metadata: %w", err)
-			}
-		}
+        if err := rows.Scan(&documentID, &metadataJSON, &content, &rank, &exactBonus); err != nil {
+            return nil, fmt.Errorf("failed to scan BM25 search result: %w", err)
+        }
 
-		results = append(results, BM25SearchResult{
-			DocumentID:       documentID,
-			Metadata:         metadata,
-			Content:          content,
-			EmbeddingContent: "",
-			BM25Score:        rank,
-			ExactMatchBonus:  exactBonus,
-		})
-	}
+        metadata := make(map[string]string)
+        if len(metadataJSON) > 0 {
+            if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
+                return nil, fmt.Errorf("failed to unmarshal BM25 metadata: %w", err)
+            }
+        }
 
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating BM25 search results: %w", err)
-	}
+        results = append(results, BM25SearchResult{
+            DocumentID:       documentID,
+            Metadata:         metadata,
+            Content:          content,
+            EmbeddingContent: "",
+            BM25Score:        rank,
+            ExactMatchBonus:  exactBonus,
+        })
+    }
 
-	return results, nil
+    if err := rows.Err(); err != nil {
+        return nil, fmt.Errorf("error iterating BM25 search results: %w", err)
+    }
+
+    return results, nil
 }
 
 // VectorSearchResult represents a vector similarity search hit from pgvector.

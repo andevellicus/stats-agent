@@ -21,7 +21,7 @@ MAIN_LLM_HOST: "http://localhost:8080"
 EMBEDDING_LLM_HOST: "http://localhost:8081"
 SUMMARIZATION_LLM_HOST: "http://localhost:8082"
 MAX_TURNS: 30
-RAG_RESULTS: 10
+RAG_RESULTS: 5
 CONTEXT_LENGTH: 16384
 #CONTEXT_LENGTH: 2048
 CONTEXT_SOFT_LIMIT_RATIO: 0.75
@@ -59,7 +59,7 @@ HYBRID_BM25_WEIGHT: 0.3                # Weight assigned to BM25 during hybrid s
 HYBRID_FACT_BOOST: 1.3                 # Multiplier applied to fact documents
 HYBRID_SUMMARY_BOOST: 1.2              # Multiplier applied to summary documents
 HYBRID_ERROR_PENALTY: 0.8              # Multiplier applied when content contains error text
-SEMANTIC_SIMILARITY_THRESHOLD: 0.45  # Minimum cosine similarity for vector hits
+SEMANTIC_SIMILARITY_THRESHOLD: 0.5  # Minimum cosine similarity for vector hits
 BM25_SCORE_THRESHOLD: 0.10           # Minimum BM25+bonus score for text hits
 ENABLE_METADATA_FALLBACK: true      # Enable metadata-based fallback search when hybrid results are empty
 METADATA_FALLBACK_MAX_FILTERS: 3     # Limit number of auto-derived metadata filters

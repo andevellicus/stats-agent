@@ -1,12 +1,13 @@
 package rag
 
 import (
-	"context"
-	"fmt"
-	"stats-agent/pdf"
+    "context"
+    "fmt"
+    "strings"
+    "stats-agent/pdf"
 
-	"github.com/google/uuid"
-	"go.uber.org/zap"
+    "github.com/google/uuid"
+    "go.uber.org/zap"
 )
 
 // AddPDFPagesToRAG stores PDF pages in RAG for retrieval
@@ -16,16 +17,22 @@ func (r *RAG) AddPDFPagesToRAG(ctx context.Context, sessionID, filename string, 
 		return nil
 	}
 
-	pagesAdded := 0
-	chunksCreated := 0
+    pagesAdded := 0
+    chunksCreated := 0
+    var pageOneText string
 
 	for _, page := range pages {
 		if page.Text == "" {
 			continue // Skip empty pages
 		}
 
-		// Create document ID and content hash
-		docID := uuid.New()
+        // Capture page 1 text for a key-facts summary later
+        if page.PageNumber == 1 {
+            pageOneText = page.Text
+        }
+
+        // Create document ID and content hash
+        docID := uuid.New()
 		contentHash := hashContent(fmt.Sprintf("pdf:%s:page:%d:%s", filename, page.PageNumber, page.Text))
 
 		// Prepare metadata
@@ -111,15 +118,43 @@ func (r *RAG) AddPDFPagesToRAG(ctx context.Context, sessionID, filename string, 
 		}
 	}
 
-	if pagesAdded == 0 && chunksCreated == 0 {
-		r.logger.Warn("No PDF pages could be embedded", zap.String("filename", filename))
-		return nil
-	}
+    if pagesAdded == 0 && chunksCreated == 0 {
+        r.logger.Warn("No PDF pages could be embedded", zap.String("filename", filename))
+        return nil
+    }
 
-	r.logger.Info("Added PDF pages to RAG",
-		zap.String("filename", filename),
-		zap.Int("pages", pagesAdded),
-		zap.Int("chunked_pages", chunksCreated))
+    // After we have embedded, generate and persist a short Key Facts summary from page 1
+    if strings.TrimSpace(pageOneText) != "" {
+        sumCtx, cancel := context.WithTimeout(ctx, r.cfg.LLMRequestTimeout)
+        summary, err := r.SummarizePDFKeyFacts(sumCtx, filename, pageOneText)
+        cancel()
+        if err != nil {
+            r.logger.Warn("Failed to generate PDF key facts summary", zap.Error(err), zap.String("filename", filename))
+        } else {
+            summaryID := uuid.New()
+            meta := map[string]string{
+                "session_id":  sessionID,
+                "document_id": summaryID.String(),
+                "role":        "summary",
+                "type":        "pdf_summary",
+                "filename":    filename,
+                "page_number": "1",
+            }
+            r.persistSummaryDocument(ctx, &summaryDocument{
+                ID:       summaryID.String(),
+                Content:  summary,
+                Metadata: meta,
+            })
+            r.logger.Info("Stored PDF key facts summary",
+                zap.String("filename", filename),
+                zap.String("summary_id", summaryID.String()))
+        }
+    }
 
-	return nil
+    r.logger.Info("Added PDF pages to RAG",
+        zap.String("filename", filename),
+        zap.Int("pages", pagesAdded),
+        zap.Int("chunked_pages", chunksCreated))
+
+    return nil
 }

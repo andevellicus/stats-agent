@@ -36,10 +36,13 @@ func NewExecutionCoordinator(pythonTool *tools.StatefulPythonTool, logger *zap.L
 // ProcessResponse checks if the LLM response contains Python code, executes it if found,
 // and returns the execution result.
 func (e *ExecutionCoordinator) ProcessResponse(ctx context.Context, llmResponse, sessionID string, stream *Stream) (*ExecutionResult, error) {
-	// Normalize malformed tag fragments before further processing
-	sanitizedResponse := sanitizePythonTags(llmResponse)
+    // Preprocess assistant text into our canonical XML tag format
+    pre := format.PreprocessAssistantText(llmResponse)
 
-    // Convert markdown code blocks to XML tags first
+    // Additional sanitation of python tag variants
+    sanitizedResponse := sanitizePythonTags(pre)
+
+    // Convert markdown code blocks to XML tags (idempotent if already converted)
     processedResponse := e.ConvertMarkdownToXML(sanitizedResponse)
 
     // Ensure any unbalanced tags are closed so execution can proceed
