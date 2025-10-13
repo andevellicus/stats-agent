@@ -2,7 +2,6 @@ package agent
 
 import (
     "context"
-    "regexp"
     "strings"
 
     "stats-agent/tools"
@@ -35,17 +34,12 @@ func NewExecutionCoordinator(pythonTool *tools.StatefulPythonTool, logger *zap.L
 
 // ProcessResponse checks if the LLM response contains Python code, executes it if found,
 // and returns the execution result.
+// Simplified for fine-tuned models that emit proper <python> tags.
 func (e *ExecutionCoordinator) ProcessResponse(ctx context.Context, llmResponse, sessionID string, stream *Stream) (*ExecutionResult, error) {
-    // Preprocess assistant text into our canonical XML tag format
-    pre := format.PreprocessAssistantText(llmResponse)
+    // Minimal preprocessing - fine-tuned model emits correct tags
+    processedResponse := format.PreprocessAssistantText(llmResponse)
 
-    // Additional sanitation of python tag variants
-    sanitizedResponse := sanitizePythonTags(pre)
-
-    // Convert markdown code blocks to XML tags (idempotent if already converted)
-    processedResponse := e.ConvertMarkdownToXML(sanitizedResponse)
-
-    // Ensure any unbalanced tags are closed so execution can proceed
+    // Safety: ensure any unbalanced tags are closed
     processedResponse, _ = format.CloseUnbalancedTags(processedResponse)
 
 	// Try to execute Python code if present
@@ -81,49 +75,7 @@ func (e *ExecutionCoordinator) ProcessResponse(ctx context.Context, llmResponse,
 	}, nil
 }
 
-// ConvertMarkdownToXML converts markdown code blocks (```python) to XML tags (<python>).
-// This handles cases where the LLM outputs markdown format instead of the expected XML format.
-// Delegates to the format package for consistent conversion logic.
-func (e *ExecutionCoordinator) ConvertMarkdownToXML(text string) string {
-	return format.MarkdownToXML(text)
-}
-
 // DetectError checks if the execution result contains error indicators.
 func (e *ExecutionCoordinator) DetectError(result string) bool {
 	return strings.Contains(result, "Error:")
-}
-
-// sanitizePythonTags repairs minor formatting issues (extra spaces/newlines) around python tags.
-func sanitizePythonTags(text string) string {
-	replacements := map[string]string{
-		"< python>":   "<python>",
-		"<python >":   "<python>",
-		"< python >":  "<python>",
-		"</ python>":  "</python>",
-		"</python >":  "</python>",
-		"</ python >": "</python>",
-		"<python\n":   "<python>\n",
-		"\npython>":   "\n<python>",
-		"\n/python>":  "\n</python>",
-		"</python\n":  "</python>\n",
-	}
-
-    for old, new := range replacements {
-        text = strings.ReplaceAll(text, old, new)
-    }
-
-    // Handle common patterns where the model writes "... something.python\n" before code
-    // 1) Sentence ends with ".python" then a newline before code
-    reDotPython := regexp.MustCompile(`(?m)\.python\s*\n`)
-    text = reDotPython.ReplaceAllString(text, ".\n<python>\n")
-
-    // 2) A label line like "python:" before code
-    reLabelPython := regexp.MustCompile(`(?mi)^[\t ]*python:\s*\n`)
-    text = reLabelPython.ReplaceAllString(text, "<python>\n")
-
-    // 3) A standalone line "python" before code
-    reLinePython := regexp.MustCompile(`(?m)^[\t ]*python\s*\n`)
-    text = reLinePython.ReplaceAllString(text, "<python>\n")
-
-    return text
 }

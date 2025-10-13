@@ -78,6 +78,47 @@ func ExtractTagContent(text string, tag Tag) (content string, found bool) {
 	return strings.TrimSpace(text[contentStart:contentEnd]), true
 }
 
+// HasCodeBlock checks if text contains Python code in markdown format.
+// Retrained model outputs ```python blocks natively.
+func HasCodeBlock(text string) bool {
+	return strings.Contains(text, "```python")
+}
+
+// ExtractCodeContent extracts Python code from markdown format.
+// Returns the code and true if found, empty string and false otherwise.
+func ExtractCodeContent(text string) (string, bool) {
+	if code := extractMarkdownCodeInternal(text); code != "" {
+		return code, true
+	}
+	return "", false
+}
+
+// extractMarkdownCodeInternal extracts code from ```python ... ``` blocks.
+// This is an internal helper that matches the logic in tools/python.go
+func extractMarkdownCodeInternal(text string) string {
+	startMarker := "```python"
+	startIdx := strings.Index(text, startMarker)
+	if startIdx == -1 {
+		return ""
+	}
+
+	// Skip past opening marker and optional newline
+	codeStart := startIdx + len(startMarker)
+	if codeStart < len(text) && text[codeStart] == '\n' {
+		codeStart++
+	}
+
+	// Find closing ```
+	endMarker := "```"
+	endIdx := strings.Index(text[codeStart:], endMarker)
+	if endIdx == -1 {
+		return ""
+	}
+
+	code := text[codeStart : codeStart+endIdx]
+	return strings.TrimSpace(code)
+}
+
 // StripTag removes a specific tag (both opening and closing) from text.
 func StripTag(text string, tag Tag) string {
 	text = strings.ReplaceAll(text, tag.OpenTag, "")

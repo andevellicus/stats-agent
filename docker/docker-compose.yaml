@@ -41,11 +41,10 @@ services:
       --host 0.0.0.0
       --port ${MAIN_LLM_PORT}
       -ngl ${N_GPU_LAYERS}
-      -c 16384
-      --temp 0.5
-      --top_p 0.85
-      --top-k 30
-      --repeat-penalty 1.1
+      -c 14336
+      --top_p 0.9
+      --top-k 40
+      --repeat-penalty 1.2
 
   embedding-llm:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda

@@ -171,7 +171,7 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 				// If still over the limit, trim oldest history messages until it fits
 				for (err == nil && totalTokens > softLimitTokens) && len(currentHistory) > 1 {
 					// Avoid splitting assistant-tool pairs when trimming
-					if currentHistory[0].Role == "assistant" && format.HasTag(currentHistory[0].Content, format.PythonTag) && len(currentHistory) > 1 && currentHistory[1].Role == "tool" {
+					if currentHistory[0].Role == "assistant" && format.HasCodeBlock(currentHistory[0].Content) && len(currentHistory) > 1 && currentHistory[1].Role == "tool" {
 						currentHistory = currentHistory[2:]
 					} else {
 						currentHistory = currentHistory[1:]
@@ -194,8 +194,9 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 			}
 		}
 
-		// Get LLM response - critical operation, break loop on failure
-		responseChan, err := getLLMResponse(ctx, a.cfg.MainLLMHost, messagesForLLM, a.cfg, a.logger)
+		// Get LLM response with dynamic temperature - critical operation, break loop on failure
+		currentTemp := loop.GetCurrentTemperature()
+		responseChan, err := getLLMResponse(ctx, a.cfg.MainLLMHost, messagesForLLM, a.cfg, a.logger, &currentTemp)
 		if err != nil {
 			a.logger.Error("Failed to get LLM response, aborting turn",
 				zap.Error(err),
@@ -275,7 +276,7 @@ Respond with only the title.`, content)
 	}
 
 	client := llmclient.New(a.cfg, a.logger)
-	title, err := client.Chat(ctx, a.cfg.SummarizationLLMHost, messages)
+	title, err := client.Chat(ctx, a.cfg.SummarizationLLMHost, messages, nil) // nil = use server default temp
 	if err != nil {
 		return "", fmt.Errorf("llm chat call failed for title generation: %w", err)
 	}

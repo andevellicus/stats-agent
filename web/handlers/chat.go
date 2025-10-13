@@ -608,8 +608,17 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
         }
     }
 
-    // Convert messages to agent history format
-    agentHistory := toAgentMessages(messages)
+    // Convert messages to agent history format, excluding the current user message
+    // because agent.Run() appends the incoming input again. This prevents
+    // duplicating the latest user message in the LLM history.
+    filtered := make([]types.ChatMessage, 0, len(messages))
+    for _, m := range messages {
+        if m.ID == userMessageID {
+            continue
+        }
+        filtered = append(filtered, m)
+    }
+    agentHistory := toAgentMessages(filtered)
 
 	// Stream agent response using ChatService
 	h.chatService.StreamAgentResponse(ctx, c.Writer, userMessage.Content, userMessageID, sessionID.String(), agentHistory)

@@ -33,8 +33,10 @@ type streamResponse struct {
 }
 
 type chatRequest struct {
-	Messages []types.AgentMessage `json:"messages"`
-	Stream   bool                 `json:"stream"`
+	Messages    []types.AgentMessage `json:"messages"`
+	Stream      bool                 `json:"stream"`
+	Stop        []string             `json:"stop,omitempty"`  // Stop sequences to halt generation
+	Temperature *float64             `json:"temperature,omitempty"` // Per-request temperature override
 }
 
 type chatResponse struct {
@@ -69,8 +71,18 @@ func New(cfg *config.Config, logger *zap.Logger) *Client {
 }
 
 // Chat performs a non-streaming chat completion call.
-func (c *Client) Chat(ctx context.Context, host string, messages []types.AgentMessage) (string, error) {
-	reqBody := chatRequest{Messages: messages, Stream: false}
+// temperature is optional; pass nil to use server default.
+func (c *Client) Chat(ctx context.Context, host string, messages []types.AgentMessage, temperature *float64) (string, error) {
+    // Note: Do not pass a stop sequence here. Some backends aggressively strip
+    // stop strings from the entire output (not just the terminal match), which
+    // has been observed to remove Markdown code fences (```python ... ```),
+    // leading to broken rendering like "...median.python" in the webapp.
+    // We rely on model behavior + downstream fence repair to ensure completeness.
+    reqBody := chatRequest{
+        Messages:    messages,
+        Stream:      false,
+        Temperature: temperature,
+    }
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
 		return "", fmt.Errorf("marshal chat request: %w", err)
@@ -132,8 +144,16 @@ func (c *Client) Chat(ctx context.Context, host string, messages []types.AgentMe
 }
 
 // ChatStream performs a streaming chat completion call and returns a channel of chunks.
-func (c *Client) ChatStream(ctx context.Context, host string, messages []types.AgentMessage) (<-chan string, error) {
-	reqBody := chatRequest{Messages: messages, Stream: true}
+// temperature is optional; pass nil to use server default.
+func (c *Client) ChatStream(ctx context.Context, host string, messages []types.AgentMessage, temperature *float64) (<-chan string, error) {
+    // See rationale in Chat(): omit stop sequence to avoid backends removing
+    // Markdown backticks from the output. The agent will still add a missing
+    // closing fence if needed for robustness.
+    reqBody := chatRequest{
+        Messages:    messages,
+        Stream:      true,
+        Temperature: temperature,
+    }
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("marshal chat request: %w", err)
@@ -196,22 +216,72 @@ func (c *Client) ChatStream(ctx context.Context, host string, messages []types.A
 			return
 		}
 
-		scanner := bufio.NewScanner(resp.Body)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.HasPrefix(line, "data: ") {
-				data := strings.TrimPrefix(line, "data: ")
-				if data == "[DONE]" {
-					break
-				}
-				var sr streamResponse
-				if err := json.Unmarshal([]byte(data), &sr); err == nil {
-					if len(sr.Choices) > 0 {
-						out <- sr.Choices[0].Delta.Content
-					}
-				}
-			}
-		}
+        scanner := bufio.NewScanner(resp.Body)
+        // Fence-aware stop: detect first complete ```python ... ``` block and stop thereafter
+        var window string
+        var opened bool
+        openAbs := -1
+        total := 0
+        for scanner.Scan() {
+            line := scanner.Text()
+            if strings.HasPrefix(line, "data: ") {
+                data := strings.TrimPrefix(line, "data: ")
+                if data == "[DONE]" {
+                    break
+                }
+                var sr streamResponse
+                if err := json.Unmarshal([]byte(data), &sr); err == nil {
+                    if len(sr.Choices) > 0 {
+                        chunk := sr.Choices[0].Delta.Content
+                        // Debug log each raw delta chunk as received from the LLM server
+                        c.logger.Debug("llm stream delta", zap.String("delta", chunk))
+
+                        // Update detection window/state before emitting
+                        total += len(chunk)
+                        window += chunk
+                        // Cap window to a reasonable size for detection across chunk boundaries
+                        if len(window) > 2048 {
+                            window = window[len(window)-2048:]
+                        }
+                        if !opened {
+                            if idx := strings.Index(window, "```python"); idx != -1 {
+                                opened = true
+                                openAbs = total - (len(window) - idx)
+                                c.logger.Debug("llm stream: detected code fence open")
+                            }
+                        }
+
+                        // Decide what to emit and whether to stop (on closing fence)
+                        toEmit := chunk
+                        shouldStop := false
+                        if opened {
+                            if idx := strings.LastIndex(window, "```"); idx != -1 {
+                                closeAbs := total - (len(window) - idx)
+                                if closeAbs > openAbs {
+                                    // If closing fence falls within this chunk, trim to it
+                                    chunkStartAbs := total - len(chunk)
+                                    if closeAbs >= chunkStartAbs {
+                                        cut := closeAbs - chunkStartAbs + 3 // include "```"
+                                        if cut > 0 && cut <= len(chunk) {
+                                            toEmit = chunk[:cut]
+                                        }
+                                    }
+                                    shouldStop = true
+                                }
+                            }
+                        }
+
+                        if len(toEmit) > 0 {
+                            out <- toEmit
+                        }
+                        if shouldStop {
+                            c.logger.Debug("llm stream: detected code fence close; stopping stream")
+                            break
+                        }
+                    }
+                }
+            }
+        }
 		if err := scanner.Err(); err != nil {
 			c.logger.Error("read chat stream", zap.Error(err))
 		}

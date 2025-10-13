@@ -510,23 +510,15 @@ func (t *StatefulPythonTool) CleanupSession(sessionID string) {
 }
 
 // ExecutePythonCode now requires a sessionID to be passed.
+// Supports markdown code blocks (```python) and XML tags (<python>) for backward compatibility.
 func (t *StatefulPythonTool) ExecutePythonCode(ctx context.Context, text string, sessionID string, output io.Writer) (string, string, bool) {
-	startTag := "<python>"
-	endTag := "</python>"
+	// Try markdown format first (proper ```python fence)
+	pythonCode := extractMarkdownCode(text)
 
-	startIdx := strings.Index(text, startTag)
-	if startIdx == -1 {
-		return "", "", false
+	// Fall back to XML tags (backward compatibility with old database messages)
+	if pythonCode == "" {
+		pythonCode = extractXMLCode(text)
 	}
-
-	endIdx := strings.Index(text[startIdx:], endTag)
-	if endIdx == -1 {
-		return "", "", false
-	}
-
-	codeStart := startIdx + len(startTag)
-	codeEnd := startIdx + endIdx
-	pythonCode := strings.TrimSpace(text[codeStart:codeEnd])
 
 	if pythonCode == "" {
 		return "", "", false
@@ -543,4 +535,53 @@ func (t *StatefulPythonTool) ExecutePythonCode(ctx context.Context, text string,
 	}
 
 	return pythonCode, execResult, true
+}
+
+// extractMarkdownCode extracts Python code from markdown code blocks (```python ... ```)
+func extractMarkdownCode(text string) string {
+	// Find ```python
+	startMarker := "```python"
+	startIdx := strings.Index(text, startMarker)
+	if startIdx == -1 {
+		return ""
+	}
+
+	// Skip past the opening marker and any immediate newline
+	codeStart := startIdx + len(startMarker)
+	if codeStart < len(text) && text[codeStart] == '\n' {
+		codeStart++
+	}
+
+	// Find closing ```
+	endMarker := "```"
+	endIdx := strings.Index(text[codeStart:], endMarker)
+	if endIdx == -1 {
+		return ""
+	}
+
+	code := text[codeStart : codeStart+endIdx]
+	return strings.TrimSpace(code)
+}
+
+// extractXMLCode extracts Python code from XML tags (<python> ... </python>)
+// Kept for backward compatibility with old messages.
+func extractXMLCode(text string) string {
+	startTag := "<python>"
+	endTag := "</python>"
+
+	startIdx := strings.Index(text, startTag)
+	if startIdx == -1 {
+		return ""
+	}
+
+	endIdx := strings.Index(text[startIdx:], endTag)
+	if endIdx == -1 {
+		return ""
+	}
+
+	codeStart := startIdx + len(startTag)
+	codeEnd := startIdx + endIdx
+	code := text[codeStart:codeEnd]
+
+	return strings.TrimSpace(code)
 }

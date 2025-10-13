@@ -28,6 +28,11 @@ CONTEXT_SOFT_LIMIT_RATIO: 0.75
 CONSECUTIVE_ERRORS: 5
 LLM_REQUEST_TIMEOUT: 300
 
+# --- Dynamic Temperature Adjustment ---
+BASE_TEMPERATURE: 0.25    # Starting temperature for fine-tuned model (deterministic)
+MAX_TEMPERATURE: 0.5      # Maximum temperature cap (prevents wild outputs)
+TEMPERATURE_STEP: 0.1     # Increase per consecutive error (encourages exploration)
+
 # --- Retry Logic For Connecting to Llama.CPP ---
 MAX_RETRIES: 5
 RETRY_DELAY_SECONDS: 2

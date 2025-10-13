@@ -104,8 +104,8 @@ func (r *RAG) prepareDocumentForMessage(
 
 		// Extract statistical metadata FIRST (before fact generation)
 		var statMeta map[string]string
-		if format.HasTag(message.Content, format.PythonTag) {
-			code, _ := format.ExtractTagContent(message.Content, format.PythonTag)
+		if format.HasCodeBlock(message.Content) {
+			code, _ := format.ExtractCodeContent(message.Content)
 			statMeta = ExtractStatisticalMetadata(code, toolContent)
 			r.ensureDatasetMetadata(sessionID, metadata, code, toolContent)
 		}
@@ -134,10 +134,16 @@ func (r *RAG) prepareDocumentForMessage(
 			storedContent = string(factJSON)
 		}
 
-		re := regexp.MustCompile(`(?s)<python>(.*)</python>`)
+		// Extract code from markdown format (retrained model outputs ```python natively)
+		re := regexp.MustCompile("(?s)" + "```python\n(.*?)\n```")
 		matches := re.FindStringSubmatch(message.Content)
+
+		var code string
 		if len(matches) > 1 {
-			code := strings.TrimSpace(matches[1])
+			code = strings.TrimSpace(matches[1])
+		}
+
+		if code != "" {
 			result := strings.TrimSpace(toolMessage.Content)
 			// Pass statistical metadata to fact generator
 			summary, err := r.generateFactSummary(ctx, code, result, statMeta)

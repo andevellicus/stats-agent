@@ -6,19 +6,21 @@ import (
 	"go.uber.org/zap"
 )
 
-// ConversationLoop manages the agent's turn loop, error tracking, and breaking conditions.
+// ConversationLoop manages the agent's turn loop, error tracking, temperature adjustment, and breaking conditions.
 type ConversationLoop struct {
-	cfg               *config.Config
-	consecutiveErrors int
-	logger            *zap.Logger
+	cfg                *config.Config
+	consecutiveErrors  int
+	currentTemperature float64 // Dynamic temperature based on error count
+	logger             *zap.Logger
 }
 
 // NewConversationLoop creates a new conversation loop instance.
 func NewConversationLoop(cfg *config.Config, logger *zap.Logger) *ConversationLoop {
 	return &ConversationLoop{
-		cfg:               cfg,
-		consecutiveErrors: 0,
-		logger:            logger,
+		cfg:                cfg,
+		consecutiveErrors:  0,
+		currentTemperature: cfg.BaseTemperature,
+		logger:             logger,
 	}
 }
 
@@ -42,18 +44,37 @@ func (c *ConversationLoop) ShouldContinue(turn int) (bool, string) {
 	return true, ""
 }
 
-// RecordError increments the consecutive error counter and logs it.
-func (c *ConversationLoop) RecordError() {
-	c.consecutiveErrors++
-	c.logger.Debug("Recorded execution error",
-		zap.Int("consecutive_errors", c.consecutiveErrors))
+// GetCurrentTemperature returns the current temperature based on consecutive errors.
+// Temperature increases linearly with each error, capped at MaxTemperature.
+func (c *ConversationLoop) GetCurrentTemperature() float64 {
+	return c.currentTemperature
 }
 
-// RecordSuccess resets the consecutive error counter.
+// RecordError increments the consecutive error counter, increases temperature, and logs it.
+func (c *ConversationLoop) RecordError() {
+	c.consecutiveErrors++
+
+	// Calculate new temperature: base + (errors * step), capped at max
+	newTemp := c.cfg.BaseTemperature + (float64(c.consecutiveErrors) * c.cfg.TemperatureStep)
+	if newTemp > c.cfg.MaxTemperature {
+		newTemp = c.cfg.MaxTemperature
+	}
+	c.currentTemperature = newTemp
+
+	c.logger.Debug("Recorded execution error, increasing temperature",
+		zap.Int("consecutive_errors", c.consecutiveErrors),
+		zap.Float64("new_temperature", c.currentTemperature))
+}
+
+// RecordSuccess resets the consecutive error counter and temperature to baseline.
 func (c *ConversationLoop) RecordSuccess() {
 	if c.consecutiveErrors > 0 {
-		c.logger.Debug("Resetting consecutive error count after successful execution")
+		c.logger.Debug("Resetting consecutive error count and temperature after successful execution",
+			zap.Int("previous_errors", c.consecutiveErrors),
+			zap.Float64("previous_temperature", c.currentTemperature),
+			zap.Float64("reset_to", c.cfg.BaseTemperature))
 		c.consecutiveErrors = 0
+		c.currentTemperature = c.cfg.BaseTemperature
 	}
 }
 

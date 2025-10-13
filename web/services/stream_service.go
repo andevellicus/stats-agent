@@ -64,43 +64,58 @@ func (ss *StreamService) ProcessStreamByWord(ctx context.Context, r io.Reader, w
 	var currentWord strings.Builder
 	var openTagStack []format.Tag
 
-	var processToken func(string)
-	processToken = func(token string) {
-		if token == "" {
-			return
-		}
+    var processToken func(string)
+    processToken = func(token string) {
+        if token == "" {
+            return
+        }
 
 		// Check each known tag for opening tags
 		for _, tag := range format.AllTags {
-			if strings.Contains(token, tag.OpenTag) {
-				parts := strings.SplitN(token, tag.OpenTag, 2)
-				transform := format.GetStreamTransform(tag)
-				writeFunc(StreamData{Type: "chunk", Content: parts[0]})
-				writeFunc(StreamData{Type: "chunk", Content: transform.OpenReplace})
-				openTagStack = append(openTagStack, tag)
-				processToken(parts[1])
-				return
-			}
-		}
+            if strings.Contains(token, tag.OpenTag) {
+                parts := strings.SplitN(token, tag.OpenTag, 2)
+                transform := format.GetStreamTransform(tag)
+                writeFunc(StreamData{Type: "chunk", Content: parts[0]})
+                writeFunc(StreamData{Type: "chunk", Content: transform.OpenReplace})
+                if ss.logger != nil {
+                    ss.logger.Debug("sse transform open",
+                        zap.String("tag", tag.Name),
+                        zap.String("emit", transform.OpenReplace))
+                }
+                openTagStack = append(openTagStack, tag)
+                processToken(parts[1])
+                return
+            }
+        }
 
 		// Check each known tag for closing tags
 		for _, tag := range format.AllTags {
-			if strings.Contains(token, tag.CloseTag) {
-				parts := strings.SplitN(token, tag.CloseTag, 2)
-				transform := format.GetStreamTransform(tag)
-				writeFunc(StreamData{Type: "chunk", Content: parts[0]})
-				writeFunc(StreamData{Type: "chunk", Content: transform.CloseReplace})
-				if len(openTagStack) > 0 && openTagStack[len(openTagStack)-1].Name == tag.Name {
-					openTagStack = openTagStack[:len(openTagStack)-1]
-				}
-				processToken(parts[1])
-				return
-			}
-		}
+            if strings.Contains(token, tag.CloseTag) {
+                parts := strings.SplitN(token, tag.CloseTag, 2)
+                transform := format.GetStreamTransform(tag)
+                writeFunc(StreamData{Type: "chunk", Content: parts[0]})
+                writeFunc(StreamData{Type: "chunk", Content: transform.CloseReplace})
+                if ss.logger != nil {
+                    ss.logger.Debug("sse transform close",
+                        zap.String("tag", tag.Name),
+                        zap.String("emit", transform.CloseReplace))
+                }
+                if len(openTagStack) > 0 && openTagStack[len(openTagStack)-1].Name == tag.Name {
+                    openTagStack = openTagStack[:len(openTagStack)-1]
+                }
+                processToken(parts[1])
+                return
+            }
+        }
 
-		// No tags found, write token as-is
-		writeFunc(StreamData{Type: "chunk", Content: token})
-	}
+        // No tags found, write token as-is
+        if ss.logger != nil {
+            if strings.Contains(token, "```") || strings.Contains(token, "python") {
+                ss.logger.Debug("sse emit token", zap.String("token", token))
+            }
+        }
+        writeFunc(StreamData{Type: "chunk", Content: token})
+    }
 
 	for {
 		select {

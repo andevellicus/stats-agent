@@ -124,7 +124,7 @@ func (m *MemoryManager) ManageHistory(ctx context.Context, sessionID string, his
 		firstMessageOutOfBatch := (*history)[cutoff]
 
 		// If we're about to split an assistant-tool pair, move cutoff forward
-		if lastMessageInBatch.Role == "assistant" && format.HasTag(lastMessageInBatch.Content, format.PythonTag) && firstMessageOutOfBatch.Role == "tool" {
+		if lastMessageInBatch.Role == "assistant" && format.HasCodeBlock(lastMessageInBatch.Content) && firstMessageOutOfBatch.Role == "tool" {
 			cutoff++
 			m.logger.Info("Adjusted memory cutoff to prevent splitting an assistant-tool pair")
 		}

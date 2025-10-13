@@ -70,8 +70,8 @@ Extract relevant facts following the rules and examples above:`, latestUserMessa
 		{Role: "user", Content: userPrompt},
 	}
 
-	// Non-streaming summarization
-	summary, err := llmclient.New(r.cfg, r.logger).Chat(ctx, r.cfg.SummarizationLLMHost, messages)
+	// Non-streaming summarization (use server default temperature)
+	summary, err := llmclient.New(r.cfg, r.logger).Chat(ctx, r.cfg.SummarizationLLMHost, messages, nil)
 	if err != nil {
 		return "", fmt.Errorf("llm chat call failed for memory summary: %w", err)
 	}
@@ -181,7 +181,7 @@ Respond with only the fact, ending with metadata tags in square brackets.
 		{Role: "user", Content: userPrompt},
 	}
 
-	summary, err := llmclient.New(r.cfg, r.logger).Chat(ctx, r.cfg.SummarizationLLMHost, messages)
+	summary, err := llmclient.New(r.cfg, r.logger).Chat(ctx, r.cfg.SummarizationLLMHost, messages, nil)
 	if err != nil {
 		return "", fmt.Errorf("llm chat call failed for summary: %w", err)
 	}
@@ -207,7 +207,7 @@ func (r *RAG) generateSearchableSummary(ctx context.Context, content string) (st
 		{Role: "user", Content: userPrompt},
 	}
 
-	summary, err := llmclient.New(r.cfg, r.logger).Chat(ctx, r.cfg.SummarizationLLMHost, messages)
+	summary, err := llmclient.New(r.cfg, r.logger).Chat(ctx, r.cfg.SummarizationLLMHost, messages, nil)
 	if err != nil {
 		return "", fmt.Errorf("llm chat call failed for searchable summary: %w", err)
 	}
@@ -245,7 +245,7 @@ func (r *RAG) SummarizePDFKeyFacts(ctx context.Context, filename string, pageOne
         {Role: "user", Content: user.String()},
     }
 
-    summary, err := llmclient.New(r.cfg, r.logger).Chat(ctx, r.cfg.SummarizationLLMHost, msgs)
+    summary, err := llmclient.New(r.cfg, r.logger).Chat(ctx, r.cfg.SummarizationLLMHost, msgs, nil)
     if err != nil {
         return "", fmt.Errorf("llm chat for pdf key facts failed: %w", err)
     }

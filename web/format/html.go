@@ -11,12 +11,12 @@ import (
 	"github.com/gomarkdown/markdown"
 )
 
-// ConvertToHTML converts text with XML tags to HTML for storage.
-// It processes markdown text and renders custom XML tags as HTML components.
+// ConvertToHTML converts text with XML tags OR markdown code blocks to HTML for storage.
+// It processes markdown text and renders custom XML tags / code blocks as HTML components.
 // This function is ONLY called when saving to the database, NOT during streaming.
 func ConvertToHTML(ctx context.Context, rawContent string) (string, error) {
-	// Combined regex to find all custom tags
-	tagPattern := `(?s)(<python>.*?</python>|<agent_status>.*?</agent_status>)`
+	// Combined regex to find markdown code blocks and agent status tags
+	tagPattern := `(?s)(` + "```python.*?```" + `|<agent_status>.*?</agent_status>)`
 	re := regexp.MustCompile(tagPattern)
 
 	// Step 1: Find all custom tags and their positions
@@ -126,12 +126,18 @@ func normalizeMarkdownLists(text string) string {
 	return strings.Join(result, "\n")
 }
 
-// renderTagComponent renders a tagged content section as an HTML component.
+// renderTagComponent renders a tagged content section (XML or markdown) as an HTML component.
 func renderTagComponent(ctx context.Context, taggedContent string) (string, error) {
 	var buf bytes.Buffer
 
-	// Determine which tag and render appropriate component
-	if after, ok := strings.CutPrefix(taggedContent, PythonTag.OpenTag); ok {
+	// Check for markdown code block first
+	if strings.HasPrefix(taggedContent, "```python") {
+		code := extractMarkdownCodeForRendering(taggedContent)
+		if err := components.PythonCodeBlock(code).Render(ctx, &buf); err != nil {
+			return "", fmt.Errorf("failed to render python block: %w", err)
+		}
+	} else if after, ok := strings.CutPrefix(taggedContent, PythonTag.OpenTag); ok {
+		// XML format (backward compatibility)
 		code := strings.TrimSuffix(after, PythonTag.CloseTag)
 		if err := components.PythonCodeBlock(code).Render(ctx, &buf); err != nil {
 			return "", fmt.Errorf("failed to render python block: %w", err)
@@ -149,4 +155,13 @@ func renderTagComponent(ctx context.Context, taggedContent string) (string, erro
 	}
 
 	return buf.String(), nil
+}
+
+// extractMarkdownCodeForRendering extracts code from ```python ... ``` blocks.
+func extractMarkdownCodeForRendering(block string) string {
+	// Remove opening marker
+	code := strings.TrimPrefix(block, "```python")
+	// Remove closing marker
+	code = strings.TrimSuffix(code, "```")
+	return strings.TrimSpace(code)
 }

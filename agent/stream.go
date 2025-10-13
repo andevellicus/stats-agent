@@ -1,12 +1,12 @@
 package agent
 
 import (
-    "fmt"
-    "io"
-    "strings"
-    "sync"
+	"fmt"
+	"io"
+	"strings"
+	"sync"
 
-    "stats-agent/web/format"
+	"stats-agent/web/format"
 )
 
 // FlushHandler receives an assistant segment and an optional tool result.
@@ -33,28 +33,28 @@ func NewStream(logWriter, streamWriter io.Writer, flush FlushHandler) *Stream {
 
 // Write appends data to the current assistant segment while writing to the provided writers.
 func (s *Stream) Write(p []byte) (int, error) {
-    s.mu.Lock()
-    defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-    if s.logWriter != nil {
-        if _, err := s.logWriter.Write(p); err != nil {
-            return 0, err
-        }
-    }
-    if s.streamWriter != nil {
-        // Apply lightweight preprocessing so the live stream shows code/status formatting
-        // (DB persistence will still process the raw segment for canonical HTML.)
-        toStream := p
-        if len(p) > 0 {
-            transformed := format.PreprocessAssistantText(string(p))
-            toStream = []byte(transformed)
-        }
-        if _, err := s.streamWriter.Write(toStream); err != nil {
-            return 0, err
-        }
-    }
-    s.segment.Write(p)
-    return len(p), nil
+	if s.logWriter != nil {
+		if _, err := s.logWriter.Write(p); err != nil {
+			return 0, err
+		}
+	}
+	if s.streamWriter != nil {
+		// Apply lightweight preprocessing so the live stream shows code/status formatting
+		// (DB persistence will still process the raw segment for canonical HTML.)
+		toStream := p
+		if len(p) > 0 {
+			transformed := format.PreprocessAssistantText(string(p))
+			toStream = []byte(transformed)
+		}
+		if _, err := s.streamWriter.Write(toStream); err != nil {
+			return 0, err
+		}
+	}
+	s.segment.Write(p)
+	return len(p), nil
 }
 
 // WriteString convenience wrapper over Write.
@@ -66,11 +66,6 @@ func (s *Stream) WriteString(str string) (int, error) {
 func (s *Stream) Status(message string) error {
 	_, err := s.WriteString(fmt.Sprintf("<agent_status>%s</agent_status>", message))
 	return err
-}
-
-// ExecutionResult delegates to Tool for backward compatibility.
-func (s *Stream) ExecutionResult(result string) error {
-	return s.Tool(result)
 }
 
 // Tool finalizes the current assistant segment, emits it via the flush handler alongside the tool result,

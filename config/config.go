@@ -12,6 +12,9 @@ import (
 
 const (
 	defaultContextSoftLimitRatio            = 0.75
+	defaultBaseTemperature                  = 0.15
+	defaultMaxTemperature                   = 0.5
+	defaultTemperatureStep                  = 0.1
 	defaultPythonExecutorCooldownSeconds    = 5 * time.Second
 	defaultPythonExecutorDialTimeoutSeconds = 3 * time.Second
 	defaultPythonExecutorIOTimeoutSeconds   = 60 * time.Second
@@ -57,6 +60,9 @@ type Config struct {
 	RetryDelaySeconds                time.Duration `mapstructure:"RETRY_DELAY_SECONDS"`
 	ConsecutiveErrors                int           `mapstructure:"CONSECUTIVE_ERRORS"`
 	LLMRequestTimeout                time.Duration `mapstructure:"LLM_REQUEST_TIMEOUT"`
+	BaseTemperature                  float64       `mapstructure:"BASE_TEMPERATURE"`
+	MaxTemperature                   float64       `mapstructure:"MAX_TEMPERATURE"`
+	TemperatureStep                  float64       `mapstructure:"TEMPERATURE_STEP"`
 	CleanupEnabled                   bool          `mapstructure:"CLEANUP_ENABLED"`
 	CleanupInterval                  time.Duration `mapstructure:"CLEANUP_INTERVAL"`
 	SessionRetentionAge              time.Duration `mapstructure:"SESSION_RETENTION_AGE"`
@@ -130,6 +136,9 @@ func Load(logger *zap.Logger) *Config {
 	viper.SetDefault("RETRY_DELAY_SECONDS", 2)
 	viper.SetDefault("CONSECUTIVE_ERRORS", 3)
 	viper.SetDefault("LLM_REQUEST_TIMEOUT", 300)
+	viper.SetDefault("BASE_TEMPERATURE", defaultBaseTemperature)
+	viper.SetDefault("MAX_TEMPERATURE", defaultMaxTemperature)
+	viper.SetDefault("TEMPERATURE_STEP", defaultTemperatureStep)
 	viper.SetDefault("CLEANUP_ENABLED", true)
 	viper.SetDefault("CLEANUP_INTERVAL", 24)
 	viper.SetDefault("SESSION_RETENTION_AGE", 168)

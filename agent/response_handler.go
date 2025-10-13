@@ -43,8 +43,11 @@ func (r *ResponseHandler) BuildMessagesForLLM(longTermContext string, history []
 // the complete response. It also prints chunks to stdout for real-time display.
 func (r *ResponseHandler) CollectStreamedResponse(responseChan <-chan string, stream *Stream) string {
 	var llmResponseBuilder strings.Builder
+	chunkCount := 0
 
 	for chunk := range responseChan {
+		chunkCount++
+
 		if stream != nil {
 			_, _ = stream.WriteString(chunk)
 		}
@@ -53,10 +56,28 @@ func (r *ResponseHandler) CollectStreamedResponse(responseChan <-chan string, st
 
 	llmResponse := llmResponseBuilder.String()
 
-	// Debug log the complete LLM response
+	// Check if response was stopped mid-code-block (missing closing fence)
+	// This happens when stop sequence "\n```\n" triggers
+	if strings.Contains(llmResponse, "```python") && !strings.HasSuffix(strings.TrimSpace(llmResponse), "```") {
+		// Count opening and closing fences
+		openCount := strings.Count(llmResponse, "```python")
+		closeCount := strings.Count(llmResponse, "```") - openCount // Total ``` minus opening fences
+
+		if openCount > closeCount {
+			// Missing closing fence - add it
+			r.logger.Debug("Adding missing closing fence (stopped by stop sequence)")
+			llmResponse += "\n```"
+			if stream != nil {
+				_, _ = stream.WriteString("\n```")
+			}
+		}
+	}
+
+	// Debug log full response to diagnose format issues
 	r.logger.Debug("LLM response collected",
-		zap.String("response", llmResponse),
-		zap.Int("length", len(llmResponse)))
+		zap.Int("total_chunks", chunkCount),
+		zap.Int("total_length", len(llmResponse)),
+		zap.String("full_response", llmResponse))
 
 	// Add newline if response doesn't end with one
 	if stream != nil && !strings.HasSuffix(llmResponse, "\n") {
