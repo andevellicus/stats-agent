@@ -90,8 +90,8 @@ Extract relevant facts following the rules and examples above:`, latestUserMessa
 		summary = "Fact: " + summary
 	}
 
-	// Wrap the summary in memory tags
-	return fmt.Sprintf("<memory>\n%s\n</memory>", summary), nil
+    // Wrap the summary in a markdown section header
+    return fmt.Sprintf("### Memory Context\n%s", summary), nil
 }
 
 func (r *RAG) generateFactSummary(ctx context.Context, code, result string, metadata map[string]string) (string, error) {

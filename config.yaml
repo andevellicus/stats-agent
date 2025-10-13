@@ -22,14 +22,14 @@ EMBEDDING_LLM_HOST: "http://localhost:8081"
 SUMMARIZATION_LLM_HOST: "http://localhost:8082"
 MAX_TURNS: 30
 RAG_RESULTS: 5
-CONTEXT_LENGTH: 16384
+CONTEXT_LENGTH: 12288
 #CONTEXT_LENGTH: 2048
 CONTEXT_SOFT_LIMIT_RATIO: 0.75
-CONSECUTIVE_ERRORS: 5
+CONSECUTIVE_ERRORS: 3
 LLM_REQUEST_TIMEOUT: 300
 
 # --- Dynamic Temperature Adjustment ---
-BASE_TEMPERATURE: 0.25    # Starting temperature for fine-tuned model (deterministic)
+BASE_TEMPERATURE: 0.15    # Starting temperature for fine-tuned model (deterministic)
 MAX_TEMPERATURE: 0.5      # Maximum temperature cap (prevents wild outputs)
 TEMPERATURE_STEP: 0.1     # Increase per consecutive error (encourages exploration)
 

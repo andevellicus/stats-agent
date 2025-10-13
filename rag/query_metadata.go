@@ -124,8 +124,8 @@ func (r *RAG) QueryByMetadata(ctx context.Context, sessionID string, filters map
 func (r *RAG) renderRecordsToMemory(ctx context.Context, records []documentRecord, limit int) string {
 	docContents := make(map[string]string)
 	processedDocIDs := make(map[string]bool)
-	var contextBuilder strings.Builder
-	contextBuilder.WriteString("<memory>\n")
+    var contextBuilder strings.Builder
+    contextBuilder.WriteString("### Memory Context\n")
 
 	lastEmittedUser := ""
 	addedDocs := 0
@@ -227,8 +227,8 @@ func (r *RAG) renderRecordsToMemory(ctx context.Context, records []documentRecor
 		addedDocs++
 	}
 
-	contextBuilder.WriteString("</memory>\n")
-	return contextBuilder.String()
+    // End of memory context (no XML tags)
+    return contextBuilder.String()
 }
 
 func extractSimpleMetadata(query string, maxFilters int) map[string]string {

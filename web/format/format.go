@@ -128,10 +128,34 @@ func StripTag(text string, tag Tag) string {
 
 // StripAllTags removes all known tags from text.
 func StripAllTags(text string) string {
-	for _, tag := range AllTags {
-		text = StripTag(text, tag)
-	}
-	return text
+    for _, tag := range AllTags {
+        text = StripTag(text, tag)
+    }
+    return text
+}
+
+// RemoveTagSections removes all occurrences of a tag and its enclosed content
+// from the provided text. It is robust to missing closing tags by removing the
+// opening tag alone if a matching closer is not found.
+func RemoveTagSections(text string, tag Tag) string {
+    for {
+        start := strings.Index(text, tag.OpenTag)
+        if start == -1 {
+            break
+        }
+        // Look for the corresponding closing tag after the opener
+        after := text[start+len(tag.OpenTag):]
+        endRel := strings.Index(after, tag.CloseTag)
+        if endRel == -1 {
+            // No closer found; remove just the opening tag and continue
+            text = text[:start] + text[start+len(tag.OpenTag):]
+            continue
+        }
+        end := start + len(tag.OpenTag) + endRel + len(tag.CloseTag)
+        // Remove the entire section including tags
+        text = text[:start] + text[end:]
+    }
+    return text
 }
 
 // CloseUnbalancedTags appends missing closing tags for any tags left open in the text.

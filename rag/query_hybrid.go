@@ -50,7 +50,7 @@ func (r *RAG) getRelevantContent(ctx context.Context, documentID uuid.UUID, meta
 	}
 
 	// Extract matched window + 1 surrounding window (before and after)
-	var contextParts []string
+    var contextParts []string
 
 	// Add previous window if it exists
 	if windowIndex > 0 && windowIndex-1 < len(windows) {
@@ -443,12 +443,12 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		addedDocs++
 	}
 
-	if addedDocs == 0 {
-		return "", 0, nil
-	}
+    if addedDocs == 0 {
+        return "", 0, nil
+    }
 
-	contextBuilder.WriteString("</memory>\n")
-	return contextBuilder.String(), addedDocs, nil
+    // End of memory context (no XML tags)
+    return contextBuilder.String(), addedDocs, nil
 }
 
 // normalizeForEcho lowercases, strips punctuation, and collapses whitespace

@@ -87,7 +87,8 @@ func (s *Stream) Tool(result string) error {
 		return nil
 	}
 
-	formatted := fmt.Sprintf("\n```\n%s\n```\n", trimmed)
+    // Use tildes for tool fences to avoid interfering with backtick code blocks
+    formatted := fmt.Sprintf("\n~~~\n%s\n~~~\n", trimmed)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.streamWriter.Write([]byte(formatted))

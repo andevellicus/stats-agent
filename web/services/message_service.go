@@ -26,18 +26,20 @@ func NewMessageService(store *database.PostgresStore, logger *zap.Logger) *Messa
 // SaveAssistantAndTool persists an assistant message and an optional tool message in order.
 // filesHTML is appended only to the assistant message if provided (typically on the final flush).
 func (ms *MessageService) SaveAssistantAndTool(ctx context.Context, sessionID string, assistant string, tool *string, filesHTML string) (string, error) {
-	assistant = strings.TrimSpace(assistant)
-	var assistantID string
+    assistant = strings.TrimSpace(assistant)
+    var assistantID string
 
-	if assistant != "" {
-		assistant, _ = format.CloseUnbalancedTags(assistant)
-		rendered, err := ms.processContentForDB(ctx, assistant)
-		if err != nil {
-			return "", fmt.Errorf("process assistant content: %w", err)
-		}
-		if filesHTML != "" {
-			rendered += filesHTML
-		}
+    if assistant != "" {
+        // Remove agent-status sections before persisting (do not store status in DB)
+        assistant = format.RemoveTagSections(assistant, format.AgentStatusTag)
+        assistant, _ = format.CloseUnbalancedTags(assistant)
+        rendered, err := ms.processContentForDB(ctx, assistant)
+        if err != nil {
+            return "", fmt.Errorf("process assistant content: %w", err)
+        }
+        if filesHTML != "" {
+            rendered += filesHTML
+        }
 
 		assistantID = generateMessageID()
 		assistantMsg := types.ChatMessage{
@@ -96,6 +98,8 @@ func (ms *MessageService) AppendFilesToMessage(ctx context.Context, messageID st
 func (ms *MessageService) processContentForDB(ctx context.Context, rawContent string) (string, error) {
     // Normalize common LLM quirks (e.g., python> prompts, ```python, curly quotes)
     preprocessed := format.PreprocessAssistantText(rawContent)
+    // Remove any agent-status sections defensively (should already be stripped)
+    preprocessed = format.RemoveTagSections(preprocessed, format.AgentStatusTag)
     // Ensure tags are balanced before converting to HTML
     preprocessed, _ = format.CloseUnbalancedTags(preprocessed)
     return format.ConvertToHTML(ctx, preprocessed)
