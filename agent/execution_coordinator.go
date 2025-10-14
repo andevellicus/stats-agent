@@ -34,15 +34,12 @@ func NewExecutionCoordinator(pythonTool *tools.StatefulPythonTool, logger *zap.L
 
 // ProcessResponse checks if the LLM response contains Python code, executes it if found,
 // and returns the execution result.
-// Simplified for fine-tuned models that emit proper <python> tags.
+// Expects LLM to output properly formatted markdown code fences as instructed in system prompt.
 func (e *ExecutionCoordinator) ProcessResponse(ctx context.Context, llmResponse, sessionID string, stream *Stream) (*ExecutionResult, error) {
-    // Minimal preprocessing - fine-tuned model emits correct tags
-    processedResponse := format.PreprocessAssistantText(llmResponse)
+    // Safety: ensure any unbalanced tags are closed (for backward compatibility with XML format)
+    processedResponse, _ := format.CloseUnbalancedTags(llmResponse)
 
-    // Safety: ensure any unbalanced tags are closed
-    processedResponse, _ = format.CloseUnbalancedTags(processedResponse)
-
-	// Try to execute Python code if present
+	// Try to execute Python code if present (supports both markdown fences and XML tags)
 	code, result, wasExecuted := e.pythonTool.ExecutePythonCode(ctx, processedResponse, sessionID, nil)
 
 	if !wasExecuted {

@@ -149,13 +149,14 @@ func (cs *ChatService) InitializeSession(ctx context.Context, sessionID string) 
 		return fmt.Errorf("failed to initialize python session: %w", err)
 	}
 
-	initMessage := types.ChatMessage{
-		ID:        uuid.New().String(),
-		SessionID: sessionID,
-		Role:      "system",
-		Content:   initResult,
-		Rendered:  fmt.Sprintf("<pre><code>%s</code></pre>", initResult),
-	}
+    initMessage := types.ChatMessage{
+        ID:        uuid.New().String(),
+        SessionID: sessionID,
+        Role:      "tool",
+        Content:   initResult,
+        // Do not render the Python init banner on reload; keep content for LLM context only.
+        Rendered:  "",
+    }
 
 	return cs.store.CreateMessage(initCtx, initMessage)
 }

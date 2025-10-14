@@ -5,8 +5,6 @@ import (
 	"io"
 	"strings"
 	"sync"
-
-	"stats-agent/web/format"
 )
 
 // FlushHandler receives an assistant segment and an optional tool result.
@@ -42,14 +40,8 @@ func (s *Stream) Write(p []byte) (int, error) {
 		}
 	}
 	if s.streamWriter != nil {
-		// Apply lightweight preprocessing so the live stream shows code/status formatting
-		// (DB persistence will still process the raw segment for canonical HTML.)
-		toStream := p
-		if len(p) > 0 {
-			transformed := format.PreprocessAssistantText(string(p))
-			toStream = []byte(transformed)
-		}
-		if _, err := s.streamWriter.Write(toStream); err != nil {
+		// Pass through raw content without any preprocessing
+		if _, err := s.streamWriter.Write(p); err != nil {
 			return 0, err
 		}
 	}

@@ -673,15 +673,18 @@ func groupMessages(messages []types.ChatMessage) []types.MessageGroup {
 			i++
 		case "system":
 			i++ // Skip system messages
-		case "assistant", "tool":
-			var agentMessages []types.ChatMessage
-			for i < len(messages) && (messages[i].Role == "assistant" || messages[i].Role == "tool") {
-				agentMessages = append(agentMessages, messages[i])
-				i++
-			}
-			if len(agentMessages) > 0 {
-				groups = append(groups, types.MessageGroup{PrimaryRole: "agent", Messages: agentMessages})
-			}
+        case "assistant", "tool":
+            var agentMessages []types.ChatMessage
+            for i < len(messages) && (messages[i].Role == "assistant" || messages[i].Role == "tool") {
+                // Skip tool/assistant messages that have no rendered content (e.g., init banner suppression)
+                if strings.TrimSpace(messages[i].Rendered) != "" {
+                    agentMessages = append(agentMessages, messages[i])
+                }
+                i++
+            }
+            if len(agentMessages) > 0 {
+                groups = append(groups, types.MessageGroup{PrimaryRole: "agent", Messages: agentMessages})
+            }
 		default:
 			i++
 		}

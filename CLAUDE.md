@@ -370,9 +370,10 @@ HTTP headers:
 3. Frontend automatically connects to GET `/chat/stream?session_id=X&user_message_id=Y`
 4. Handler captures agent's stdout, forwards LLM chunks directly via SSE (4KB buffers)
 5. Frontend receives JSON events: `{type: "chunk", content: "..."}`
-6. Custom tags (`<python>`, `<execution_results>`, `<agent_status>`) are converted to styled HTML
-7. New files (images, CSVs) are detected and streamed as separate events
-8. After stream ends, messages are parsed and saved to DB with pre-rendered HTML
+6. Frontend renders markdown using marked.js (code blocks shown with syntax highlighting)
+7. Custom `<agent_status>` tags are converted to styled HTML components during streaming
+8. New files (images, CSVs) are detected and streamed as separate events
+9. After stream ends, messages are parsed and saved to DB with pre-rendered HTML
 
 **Important**: Agent execution is decoupled from HTTP connection lifecycle:
 - Agent runs with `context.Background()` (10-minute timeout), not HTTP request context
@@ -383,10 +384,10 @@ HTTP headers:
 ### Message Rendering
 
 Messages have two forms:
-- **Content**: Raw text with XML tags (`<python>code</python>`)
+- **Content**: Raw markdown text with code blocks (` ```python ... ``` `)
 - **Rendered**: Pre-rendered HTML stored in DB to avoid re-rendering on page load
 
-The `processAgentContentForDB` function in `web/handlers/chat.go` converts markdown and custom tags to HTML using templ components.
+The `processAgentContentForDB` function in `web/handlers/chat.go` converts markdown to HTML using templ components. Legacy messages may contain XML tags (`<python>code</python>`) for backward compatibility.
 
 ## Logging
 
@@ -415,7 +416,7 @@ To see debug logs (including LLM responses), set `LOG_LEVEL: debug` in `config.y
    - Check consecutive error count (break if ≥5)
    - Prepend long-term context to current history
    - Stream LLM response chunk-by-chunk
-   - If response contains `<python>` tags, extract and execute code
+   - If response contains markdown code blocks (` ```python ... ``` `), extract and execute code
    - Append execution results as "tool" message
    - If error detected, increment consecutive error counter
    - If no code blocks, return (conversation complete)
@@ -427,19 +428,33 @@ The `StatefulPythonTool` in `tools/python.go` implements:
 - **Executor Pool**: Round-robin with health tracking and cooldown after failures
 - **Session Affinity**: Sessions stick to their assigned executor to maintain state
 - **Initialization**: Pre-loads pandas, numpy, matplotlib, seaborn, scipy on first use
-- **XML Tag Parsing**: Extracts code from `<python>...</python>` tags
+- **Code Block Parsing**: Extracts code from markdown (` ```python ... ``` `) with XML fallback for backward compatibility
 - **Output Capture**: Redirects stdout to capture print statements and dataframe outputs
 - **Timeout Handling**: 60-second I/O timeout per execution
 
 The Go tool maintains a `sessionAddr map[string]string` to track which executor owns each session.
 
-## Code Conversion
+## Code Format Handling
 
-The agent expects `<python>...</python>` XML tags but users may type markdown code blocks. The `convertMarkdownToXMLTags` function in `agent/agent.go` automatically converts:
-- ` ```python` → `<python>`
-- ` ``` ` (closing) → `</python>`
+The system uses a **markdown-first** approach for code blocks (migrated from XML tags in commits c05192c and 4f89869):
 
-This happens after the LLM responds but before Python execution.
+### Primary Format: Markdown
+- **LLM Output**: System prompt instructs LLM to output ` ```python ... ``` ` code blocks natively
+- **Extraction**: `extractMarkdownCode()` in `tools/python.go` parses markdown fences first
+- **Streaming**: LLM client (`llmclient/client.go`) detects code fence boundaries and can stop streaming at closing ` ``` `
+- **Frontend**: marked.js renders markdown code blocks with syntax highlighting
+
+### Backward Compatibility: XML Tags
+- **Legacy Support**: `extractXMLCode()` falls back to parsing `<python>...</python>` tags for old database messages
+- **Format Package**: `web/format/format.go` provides utilities for handling both formats
+- **Tag Definitions**: Centralized tag constants (PythonTag, ToolTag, AgentStatusTag) in format package
+- **Conversion**: `CloseUnbalancedTags()` ensures any incomplete tags from legacy messages are properly closed
+
+### Key Implementation Details
+- **Code Extraction Order**: Markdown first (`extractMarkdownCode`), then XML fallback (`extractXMLCode`)
+- **Fence Detection**: LLM client tracks opening ` ```python ` and closing ` ``` ` during streaming (lines 242-273 in `llmclient/client.go`)
+- **No Conversion**: Markdown stays as markdown; no conversion to XML happens during processing
+- **Database Storage**: Messages stored in their original format (markdown for new, XML for legacy)
 
 ## Session Management
 

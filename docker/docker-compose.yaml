@@ -41,7 +41,7 @@ services:
       --host 0.0.0.0
       --port ${MAIN_LLM_PORT}
       -ngl ${N_GPU_LAYERS}
-      -c 14336
+      -c 12288
       --top_p 0.9
       --top-k 40
       --repeat-penalty 1.2

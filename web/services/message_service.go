@@ -26,33 +26,33 @@ func NewMessageService(store *database.PostgresStore, logger *zap.Logger) *Messa
 // SaveAssistantAndTool persists an assistant message and an optional tool message in order.
 // filesHTML is appended only to the assistant message if provided (typically on the final flush).
 func (ms *MessageService) SaveAssistantAndTool(ctx context.Context, sessionID string, assistant string, tool *string, filesHTML string) (string, error) {
-	assistant = strings.TrimSpace(assistant)
-	var assistantID string
+    assistant = strings.TrimSpace(assistant)
+    var assistantID string
 
-	if assistant != "" {
-		assistant, _ = format.CloseUnbalancedTags(assistant)
-		rendered, err := ms.processContentForDB(ctx, assistant)
-		if err != nil {
-			return "", fmt.Errorf("process assistant content: %w", err)
-		}
-		if filesHTML != "" {
-			rendered += filesHTML
-		}
+    if assistant != "" {
+        assistant, _ = format.CloseUnbalancedTags(assistant)
+        rendered, err := ms.processContentForDB(ctx, assistant)
+        if err != nil {
+            return "", fmt.Errorf("process assistant content: %w", err)
+        }
+        if filesHTML != "" {
+            rendered += filesHTML
+        }
 
-		assistantID = generateMessageID()
-		assistantMsg := types.ChatMessage{
-			ID:        assistantID,
-			SessionID: sessionID,
-			Role:      "assistant",
-			Content:   assistant,
-			Rendered:  rendered,
-		}
+        assistantID = generateMessageID()
+        assistantMsg := types.ChatMessage{
+            ID:        assistantID,
+            SessionID: sessionID,
+            Role:      "assistant",
+            Content:   assistant,
+            Rendered:  rendered,
+        }
 
-		if err := ms.store.CreateMessage(ctx, assistantMsg); err != nil {
-			ms.logger.Error("Failed to save assistant message", zap.Error(err))
-			return "", fmt.Errorf("save assistant message: %w", err)
-		}
-	}
+        if err := ms.store.CreateMessage(ctx, assistantMsg); err != nil {
+            ms.logger.Error("Failed to save assistant message", zap.Error(err))
+            return "", fmt.Errorf("save assistant message: %w", err)
+        }
+    }
 
 	if tool != nil {
 		result := strings.TrimSpace(*tool)
