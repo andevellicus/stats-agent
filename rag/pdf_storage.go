@@ -33,7 +33,7 @@ func (r *RAG) AddPDFPagesToRAG(ctx context.Context, sessionID, filename string, 
 
         // Create document ID and content hash
         docID := uuid.New()
-		contentHash := hashContent(fmt.Sprintf("pdf:%s:page:%d:%s", filename, page.PageNumber, page.Text))
+		contentHash := HashContent(fmt.Sprintf("pdf:%s:page:%d:%s", filename, page.PageNumber, page.Text))
 
 		// Prepare metadata
 		metadata := map[string]string{

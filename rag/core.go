@@ -109,16 +109,29 @@ func canonicalizeFactText(text string) string {
 	return strings.TrimSpace(joined)
 }
 
-func normalizeForHash(content string) string {
+// NormalizeForHash prepares content for hashing by normalizing whitespace.
+// Exported for use in deduplication logic.
+func NormalizeForHash(content string) string {
 	return strings.TrimSpace(content)
 }
 
-func hashContent(content string) string {
+// HashContent creates a SHA-256 hash of the given content.
+// Exported for use in deduplication logic.
+func HashContent(content string) string {
 	if content == "" {
 		return ""
 	}
 	sum := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(sum[:])
+}
+
+// ContentHashesMatch checks if two pieces of content have the same hash.
+// Uses RAG's standard normalization (trim whitespace) before hashing.
+// This is the same logic used when storing documents to RAG.
+func ContentHashesMatch(content1, content2 string) bool {
+	hash1 := HashContent(NormalizeForHash(content1))
+	hash2 := HashContent(NormalizeForHash(content2))
+	return hash1 != "" && hash1 == hash2
 }
 
 func compressMiddle(s string, maxLength int, preserveStart int, preserveEnd int) string {

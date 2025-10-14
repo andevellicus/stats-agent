@@ -242,7 +242,6 @@ func (c *Client) ChatStream(ctx context.Context, host string, messages []types.A
 							if idx := strings.Index(window, "```python"); idx != -1 {
 								opened = true
 								openAbs = total - (len(window) - idx)
-								c.logger.Debug("llm stream: detected code fence open")
 							}
 						}
 
@@ -270,7 +269,6 @@ func (c *Client) ChatStream(ctx context.Context, host string, messages []types.A
 							out <- toEmit
 						}
 						if shouldStop {
-							c.logger.Debug("llm stream: detected code fence close; stopping stream")
 							break
 						}
 					}

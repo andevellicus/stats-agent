@@ -130,6 +130,12 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 			longTermContext = "" // Ensure empty on error
 		}
 
+		// Deduplicate RAG context to prevent adding messages that are still in currentHistory
+		// Uses RAG's existing hash-based deduplication logic for consistency
+		if longTermContext != "" {
+			longTermContext = a.deduplicateRAGContext(longTermContext, currentHistory)
+		}
+
 		// Build messages for LLM (combine long-term context + history)
 		messagesForLLM := a.responseHandler.BuildMessagesForLLM(longTermContext, currentHistory)
 
@@ -389,4 +395,108 @@ func (a *Agent) handleEmptyResponse(ctx context.Context, longTermContext, latest
 	}
 
 	return summarizedContext
+}
+
+// deduplicateRAGContext filters RAG context to remove content already in currentHistory.
+// Uses RAG's ContentHashesMatch for consistent hash-based comparison.
+func (a *Agent) deduplicateRAGContext(ragContext string, currentHistory []types.AgentMessage) string {
+	if ragContext == "" || len(currentHistory) == 0 {
+		return ragContext
+	}
+
+	// Parse RAG context sections (format: <memory>\n- role: content\n</memory>)
+	ragContext = strings.TrimSpace(ragContext)
+	ragContext = strings.TrimPrefix(ragContext, "<memory>")
+	ragContext = strings.TrimSuffix(ragContext, "</memory>")
+	ragContext = strings.TrimSpace(ragContext)
+
+	if ragContext == "" {
+		return ""
+	}
+
+	// Split into sections by role markers
+	lines := strings.Split(ragContext, "\n")
+	var uniqueSections []string
+	var currentSection strings.Builder
+	duplicateCount := 0
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+
+		// Check if this starts a new section
+		isRoleMarker := strings.HasPrefix(trimmed, "- user:") ||
+			strings.HasPrefix(trimmed, "- assistant:") ||
+			strings.HasPrefix(trimmed, "- tool:")
+
+		if isRoleMarker {
+			// Process previous section if any
+			if currentSection.Len() > 0 {
+				if !a.isInCurrentHistory(currentSection.String(), currentHistory) {
+					uniqueSections = append(uniqueSections, currentSection.String())
+				} else {
+					duplicateCount++
+				}
+				currentSection.Reset()
+			}
+			currentSection.WriteString(trimmed)
+		} else {
+			// Continuation of current section
+			if currentSection.Len() > 0 {
+				currentSection.WriteString("\n")
+			}
+			currentSection.WriteString(trimmed)
+		}
+	}
+
+	// Process final section
+	if currentSection.Len() > 0 {
+		if !a.isInCurrentHistory(currentSection.String(), currentHistory) {
+			uniqueSections = append(uniqueSections, currentSection.String())
+		} else {
+			duplicateCount++
+		}
+	}
+
+	if duplicateCount > 0 {
+		a.logger.Info("Deduplicated RAG context",
+			zap.Int("duplicates_filtered", duplicateCount),
+			zap.Int("unique_sections", len(uniqueSections)))
+	}
+
+	// Rebuild context
+	if len(uniqueSections) == 0 {
+		return ""
+	}
+
+	var result strings.Builder
+	result.WriteString("<memory>\n")
+	for _, section := range uniqueSections {
+		result.WriteString(section)
+		result.WriteString("\n")
+	}
+	result.WriteString("</memory>")
+
+	return result.String()
+}
+
+// isInCurrentHistory checks if a RAG section's content matches any message in current history.
+// Strips role prefix from RAG section and uses RAG's ContentHashesMatch for comparison.
+func (a *Agent) isInCurrentHistory(ragSection string, currentHistory []types.AgentMessage) bool {
+	// Strip role prefix (e.g., "- user: ", "- assistant: ", "- tool: ")
+	content := ragSection
+	for _, prefix := range []string{"- user: ", "- assistant: ", "- tool: "} {
+		content = strings.TrimPrefix(content, prefix)
+	}
+
+	// Compare against all messages in current history using RAG's hash logic
+	for _, msg := range currentHistory {
+		if rag.ContentHashesMatch(content, msg.Content) {
+			return true
+		}
+	}
+
+	return false
 }

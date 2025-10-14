@@ -214,8 +214,8 @@ func (r *RAG) prepareDocumentForMessage(
 	}
 
 	role := metadata["role"]
-	normalizedContent := normalizeForHash(storedContent)
-	contentHash := hashContent(normalizedContent)
+	normalizedContent := NormalizeForHash(storedContent)
+	contentHash := HashContent(normalizedContent)
 	if contentHash != "" {
 		metadata["content_hash"] = contentHash
 		existingDocID, err := r.store.FindRAGDocumentByHash(ctx, sessionID, role, contentHash)
@@ -288,57 +288,82 @@ func (r *RAG) persistPreparedDocument(ctx context.Context, data *ragDocumentData
 	// Filter metadata to keep only structural fields for JSONB storage
 	structuralMetadata := filterStructuralMetadata(data.Metadata)
 
-	// Count tokens FIRST to decide if we should chunk
+	// For documents and large content, use specialized chunking strategies
 	tokenCount, err := r.countTokensForEmbedding(ctx, data.EmbedContent)
 	if err != nil {
-		r.logger.Warn("Failed to count tokens for content, will attempt to embed anyway",
+		r.logger.Warn("Failed to count tokens for content, will proceed with windowing",
 			zap.Error(err),
 			zap.String("document_id", data.Metadata["document_id"]))
-		tokenCount = 0
 	}
 
-    tokenLimit := r.embeddingTokenTarget
-    if tokenLimit <= 0 {
-        tokenLimit = 480
-    }
+	tokenLimit := r.embeddingTokenTarget
+	if tokenLimit <= 0 {
+		tokenLimit = 480
+	}
 
-	if tokenCount > tokenLimit {
-		// Content exceeds limit - CHUNK IT instead of truncating
+	role := structuralMetadata["role"]
+
+	// Route large content through specialized chunking strategies
+	if err == nil && tokenCount > tokenLimit*2 {
 		if data.Metadata["role"] == "fact" {
 			previewLen := 150
 			if len(data.EmbedContent) < previewLen {
 				previewLen = len(data.EmbedContent)
 			}
-			r.logger.Warn("Fact summary exceeds token limit - should be more concise",
+			r.logger.Warn("Fact summary is very long - should be more concise",
 				zap.Int("tokens", tokenCount),
 				zap.Int("limit", tokenLimit),
 				zap.String("document_id", data.Metadata["document_id"]),
 				zap.String("preview", data.EmbedContent[:previewLen]))
 		}
-		r.logger.Info("Chunking oversized content for embedding",
-			zap.String("role", data.Metadata["role"]),
+		r.logger.Info("Using chunking strategy for very large content",
+			zap.String("role", role),
 			zap.Int("tokens", tokenCount),
 			zap.Int("limit", tokenLimit))
 
-		// Route to appropriate chunking strategy based on role
-		role := structuralMetadata["role"]
 		if role == "document" {
 			r.persistDocumentChunks(ctx, structuralMetadata, data.EmbedContent)
 		} else {
 			r.persistConversationChunks(ctx, structuralMetadata, data.EmbedContent)
 		}
-	} else {
-		// Content is within limit - embed directly with safety check
-		embedContent := r.ensureEmbeddingTokenLimit(ctx, data.EmbedContent)
-		embeddingVector, embedErr := r.embedder(ctx, embedContent)
-		if embedErr != nil {
-			r.logger.Warn("Failed to create embedding for RAG persistence",
-				zap.Error(embedErr),
-				zap.String("document_id", data.Metadata["document_id"]))
-		}
 
-		if err := r.store.UpsertRAGDocument(ctx, data.ID, data.StoredContent, embedContent, structuralMetadata, data.ContentHash, embeddingVector); err != nil {
-			r.logger.Warn("Failed to persist RAG document", zap.Error(err), zap.String("document_id", data.Metadata["document_id"]))
+		if data.SummaryDoc != nil {
+			r.persistSummaryDocument(ctx, data.SummaryDoc)
+		}
+		return
+	}
+
+	// For all other content (facts, user messages, assistant messages):
+	// Use createEmbeddingWindows() which handles both short and long content correctly
+	// - Short content: Creates 1 window with full text (no truncation)
+	// - Long content: Creates multiple windows with full text distributed
+
+	// Store document first (with full StoredContent, not truncated)
+	docID, err := r.store.UpsertDocument(ctx, data.ID, data.StoredContent, structuralMetadata, data.ContentHash)
+	if err != nil {
+		r.logger.Warn("Failed to store document for RAG",
+			zap.Error(err),
+			zap.String("document_id", data.Metadata["document_id"]))
+		return
+	}
+
+	// Create embedding windows (may be 1 or more depending on content length)
+	// This uses EmbedContent for embedding, but stores FULL content as window_text
+	windows, err := r.createEmbeddingWindows(ctx, data.EmbedContent)
+	if err != nil {
+		r.logger.Warn("Failed to create embedding windows",
+			zap.Error(err),
+			zap.String("document_id", data.Metadata["document_id"]))
+		return
+	}
+
+	// Store all embedding windows
+	for _, window := range windows {
+		if err := r.store.CreateEmbedding(ctx, docID, window.WindowIndex, window.WindowStart, window.WindowEnd, window.WindowText, window.Embedding); err != nil {
+			r.logger.Warn("Failed to store embedding window",
+				zap.Error(err),
+				zap.String("document_id", data.Metadata["document_id"]),
+				zap.Int("window_index", window.WindowIndex))
 		}
 	}
 
@@ -498,7 +523,7 @@ func (r *RAG) persistConversationChunks(ctx context.Context, baseMetadata map[st
 		chunkMetadata["parent_document_role"] = role
 		chunkMetadata["document_id"] = chunkDocID.String()
 
-		chunkHash := hashContent(normalizeForHash(chunkContent))
+		chunkHash := HashContent(NormalizeForHash(chunkContent))
 		if chunkHash != "" {
 			chunkMetadata["content_hash"] = chunkHash
 		}
@@ -631,7 +656,7 @@ func (r *RAG) persistDocumentChunks(ctx context.Context, baseMetadata map[string
 		// NO parent_document_id - retrieval returns chunk directly
 		chunkMetadata["document_id"] = chunkDocID.String()
 
-		chunkHash := hashContent(normalizeForHash(chunkContent))
+		chunkHash := HashContent(NormalizeForHash(chunkContent))
 		if chunkHash != "" {
 			chunkMetadata["content_hash"] = chunkHash
 		}
@@ -695,7 +720,7 @@ func (r *RAG) persistSummaryDocument(ctx context.Context, summaryDoc *summaryDoc
 	}
 
 	summaryContent := summaryDoc.Content
-	summaryHash := hashContent(normalizeForHash(summaryContent))
+	summaryHash := HashContent(NormalizeForHash(summaryContent))
 	if summaryHash != "" {
 		summaryMetadata["content_hash"] = summaryHash
 	}

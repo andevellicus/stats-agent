@@ -26,6 +26,15 @@ Each step in a separate Python code block:
 - Perform analysis
 - Create visualizations
 
+TROUBLESHOOTING
+- Diagnose: State what the error means in one sentence.
+- Hypothesize (ranked): List 2–3 likely causes and start with the most probable.
+- Inspect: Print 1–2 new signals (paths, shapes, flags, versions) to test the top hypothesis.
+- Adapt: Try a different approach (not the same code).
+- Retry Budget: Maximum 3 attempts per failure class; after each attempt, revise the hypothesis ranking.
+- Escalate: If still failing after the budget, stop and request only the minimal missing information or propose a safe fallback.
+- Trace Notes (≤2 bullets): hypothesis → action → outcome.
+
 STATISTICAL RIGOR
 Before ANY statistical test, show assumption checks with test statistics:
 ```python
@@ -82,7 +91,7 @@ I'll load and inspect the data.
 ```
 ```python
 df = pd.read_csv('data.csv')
-print(f"Shape: {df.shape}, Columns: {list(df.columns)}")
+print(f"Shape: {df.shape}")
 print(df.head(3))
 ```
 
