@@ -1,17 +1,17 @@
 package agent
 
 import (
-    "context"
-    "fmt"
-    "strings"
+	"context"
+	"fmt"
+	"strings"
 
-    "stats-agent/config"
-    "stats-agent/prompts"
-    "stats-agent/llmclient"
-    "stats-agent/rag"
-    "stats-agent/tools"
-    "stats-agent/web/format"
-    "stats-agent/web/types"
+	"stats-agent/config"
+	"stats-agent/llmclient"
+	"stats-agent/prompts"
+	"stats-agent/rag"
+	"stats-agent/tools"
+	"stats-agent/web/format"
+	"stats-agent/web/types"
 
 	"go.uber.org/zap"
 )
@@ -118,10 +118,10 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 			}
 		}
 
-        // Add timeout to RAG query to avoid hangs
-        ragCtx, ragCancel := context.WithTimeout(ctx, a.cfg.LLMRequestTimeout)
-        defer ragCancel()
-        longTermContext, err := a.rag.Query(ragCtx, sessionID, queryText, a.cfg.RAGResults)
+		// Add timeout to RAG query to avoid hangs
+		ragCtx, ragCancel := context.WithTimeout(ctx, a.cfg.LLMRequestTimeout)
+		defer ragCancel()
+		longTermContext, err := a.rag.Query(ragCtx, sessionID, queryText, a.cfg.RAGResults)
 		if err != nil {
 			a.logger.Warn("Failed to query RAG for long-term context, continuing without it",
 				zap.Error(err),
@@ -129,8 +129,6 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 				zap.Int("turn", turn))
 			longTermContext = "" // Ensure empty on error
 		}
-
-
 
 		// Build messages for LLM (combine long-term context + history)
 		messagesForLLM := a.responseHandler.BuildMessagesForLLM(longTermContext, currentHistory)
@@ -263,7 +261,7 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 }
 
 func (a *Agent) GenerateTitle(ctx context.Context, content string) (string, error) {
-    systemPrompt := prompts.TitleGenerator()
+	systemPrompt := prompts.TitleGenerator()
 
 	userPrompt := fmt.Sprintf(`User message:
 %s
@@ -379,16 +377,16 @@ func sanitizeTitle(raw string) string {
 
 // handleEmptyResponse attempts to recover from empty LLM responses by summarizing context.
 func (a *Agent) handleEmptyResponse(ctx context.Context, longTermContext, latestUserMessage string, stream *Stream) string {
-    a.logger.Warn("LLM response was empty, likely due to a context window error. Attempting to summarize context")
-    _ = stream.Status("Compressing memory due to a context window error...")
+	a.logger.Warn("LLM response was empty, likely due to a context window error. Attempting to summarize context")
+	_ = stream.Status("Compressing memory due to a context window error...")
 
-    sumCtx, sumCancel := context.WithTimeout(ctx, a.cfg.LLMRequestTimeout)
-    summarizedContext, err := a.rag.SummarizeLongTermMemory(sumCtx, longTermContext, latestUserMessage)
-    sumCancel()
-    if err != nil {
-        a.logger.Error("Recovery failed: Could not summarize RAG context. Aborting turn", zap.Error(err))
-        return ""
-    }
+	sumCtx, sumCancel := context.WithTimeout(ctx, a.cfg.LLMRequestTimeout)
+	summarizedContext, err := a.rag.SummarizeLongTermMemory(sumCtx, longTermContext, latestUserMessage)
+	sumCancel()
+	if err != nil {
+		a.logger.Error("Recovery failed: Could not summarize RAG context. Aborting turn", zap.Error(err))
+		return ""
+	}
 
 	return summarizedContext
 }

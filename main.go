@@ -11,6 +11,7 @@ import (
 	"stats-agent/rag"
 	"stats-agent/tools"
 	"stats-agent/web"
+	"stats-agent/web/services"
 	"syscall"
 
 	"go.uber.org/zap"
@@ -64,7 +65,7 @@ func main() {
 	statsAgent := agent.NewAgent(cfg, pythonTool, rag, logger)
 
 	// Initialize cleanup service and start background cleanup routine
-	cleanupService := web.NewCleanupService(store, statsAgent, logger)
+	cleanupService := services.NewCleanupService(store, statsAgent, logger)
 	go web.StartWorkspaceCleanup(cfg, cleanupService, logger)
 
 	// Initialize web server

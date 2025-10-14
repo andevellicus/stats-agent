@@ -136,12 +136,6 @@ func renderTagComponent(ctx context.Context, taggedContent string) (string, erro
 		if err := components.PythonCodeBlock(code).Render(ctx, &buf); err != nil {
 			return "", fmt.Errorf("failed to render python block: %w", err)
 		}
-	} else if after, ok := strings.CutPrefix(taggedContent, PythonTag.OpenTag); ok {
-		// XML format (backward compatibility)
-		code := strings.TrimSuffix(after, PythonTag.CloseTag)
-		if err := components.PythonCodeBlock(code).Render(ctx, &buf); err != nil {
-			return "", fmt.Errorf("failed to render python block: %w", err)
-		}
 	} else if after, ok := strings.CutPrefix(taggedContent, ToolTag.OpenTag); ok {
 		result := strings.TrimSuffix(after, ToolTag.CloseTag)
 		if err := components.ExecutionResultBlock(result).Render(ctx, &buf); err != nil {

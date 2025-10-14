@@ -298,7 +298,7 @@ SESSION_RETENTION_AGE: 720
 
 ### Implementation Details
 
-- **Service**: `web/cleanup_service.go` - Reusable cleanup logic
+- **Service**: `web/services/cleanup_service.go` - Reusable cleanup logic
 - **Database**: `database.GetStaleSessions()` - Queries sessions by `last_active` timestamp
 - **Routine**: `web/server.go:StartWorkspaceCleanup()` - Background scheduler
 - **Timeout**: 5-minute timeout per cleanup cycle
@@ -387,7 +387,7 @@ Messages have two forms:
 - **Content**: Raw markdown text with code blocks (` ```python ... ``` `)
 - **Rendered**: Pre-rendered HTML stored in DB to avoid re-rendering on page load
 
-The `processAgentContentForDB` function in `web/handlers/chat.go` converts markdown to HTML using templ components. Legacy messages may contain XML tags (`<python>code</python>`) for backward compatibility.
+The `processAgentContentForDB` function in `web/handlers/chat.go` converts markdown to HTML using templ components.
 
 ## Logging
 
@@ -428,7 +428,7 @@ The `StatefulPythonTool` in `tools/python.go` implements:
 - **Executor Pool**: Round-robin with health tracking and cooldown after failures
 - **Session Affinity**: Sessions stick to their assigned executor to maintain state
 - **Initialization**: Pre-loads pandas, numpy, matplotlib, seaborn, scipy on first use
-- **Code Block Parsing**: Extracts code from markdown (` ```python ... ``` `) with XML fallback for backward compatibility
+- **Code Block Parsing**: Extracts code from markdown (` ```python ... ``` `) code fences
 - **Output Capture**: Redirects stdout to capture print statements and dataframe outputs
 - **Timeout Handling**: 60-second I/O timeout per execution
 
@@ -436,25 +436,20 @@ The Go tool maintains a `sessionAddr map[string]string` to track which executor 
 
 ## Code Format Handling
 
-The system uses a **markdown-first** approach for code blocks (migrated from XML tags in commits c05192c and 4f89869):
+The system uses **markdown code fences** exclusively for Python code blocks:
 
-### Primary Format: Markdown
+### Markdown Format
 - **LLM Output**: System prompt instructs LLM to output ` ```python ... ``` ` code blocks natively
-- **Extraction**: `extractMarkdownCode()` in `tools/python.go` parses markdown fences first
+- **Extraction**: `extractMarkdownCode()` in `tools/python.go` parses markdown fences
 - **Streaming**: LLM client (`llmclient/client.go`) detects code fence boundaries and can stop streaming at closing ` ``` `
 - **Frontend**: marked.js renders markdown code blocks with syntax highlighting
+- **Database Storage**: Messages are stored with markdown code blocks intact
 
-### Backward Compatibility: XML Tags
-- **Legacy Support**: `extractXMLCode()` falls back to parsing `<python>...</python>` tags for old database messages
-- **Format Package**: `web/format/format.go` provides utilities for handling both formats
-- **Tag Definitions**: Centralized tag constants (PythonTag, ToolTag, AgentStatusTag) in format package
-- **Conversion**: `CloseUnbalancedTags()` ensures any incomplete tags from legacy messages are properly closed
-
-### Key Implementation Details
-- **Code Extraction Order**: Markdown first (`extractMarkdownCode`), then XML fallback (`extractXMLCode`)
-- **Fence Detection**: LLM client tracks opening ` ```python ` and closing ` ``` ` during streaming (lines 242-273 in `llmclient/client.go`)
-- **No Conversion**: Markdown stays as markdown; no conversion to XML happens during processing
-- **Database Storage**: Messages stored in their original format (markdown for new, XML for legacy)
+### Other XML Tags (Still Used)
+- **Tool Results**: `<tool>...</tool>` tags wrap Python execution results
+- **Agent Status**: `<agent_status>...</agent_status>` tags for status messages
+- **Format Package**: `web/format/format.go` provides utilities for handling these tags
+- **Tag Balancing**: `CloseUnbalancedTags()` ensures any incomplete tags are properly closed during streaming
 
 ## Session Management
 

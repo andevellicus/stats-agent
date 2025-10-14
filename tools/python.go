@@ -17,11 +17,11 @@ import (
 )
 
 const (
-    EOM_TOKEN                        = "<|EOM|>"
-    defaultExecutorCooldown          = 5 * time.Second
-    defaultDialTimeout               = 3 * time.Second
-    defaultIOTimeout                 = 60 * time.Second
-    defaultMaxConnectionsPerExecutor = 4
+	EOM_TOKEN                        = "<|EOM|>"
+	defaultExecutorCooldown          = 5 * time.Second
+	defaultDialTimeout               = 3 * time.Second
+	defaultIOTimeout                 = 60 * time.Second
+	defaultMaxConnectionsPerExecutor = 4
 )
 
 type executorNode struct {
@@ -240,10 +240,10 @@ func NewStatefulPythonTool(ctx context.Context, cfg *config.Config, logger *zap.
 	if dialTimeout <= 0 {
 		dialTimeout = defaultDialTimeout
 	}
-    ioTimeout := cfg.PythonExecutorIOTimeoutSeconds
-    if ioTimeout <= 0 {
-        ioTimeout = defaultIOTimeout
-    }
+	ioTimeout := cfg.PythonExecutorIOTimeoutSeconds
+	if ioTimeout <= 0 {
+		ioTimeout = defaultIOTimeout
+	}
 	maxConnections := cfg.PythonExecutorMaxConnections
 	if maxConnections <= 0 {
 		maxConnections = defaultMaxConnectionsPerExecutor
@@ -367,7 +367,13 @@ import scipy
 import warnings
 from scipy import stats
 warnings.filterwarnings('ignore')
+
 pd.set_option('display.precision', 3)
+pd.set_option('display.max_rows', None)
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', 0)
+pd.set_option('display.max_colwidth', None)
+
 workspace_path = os.getcwd()
 uploaded_files = [%s]
 
@@ -510,16 +516,9 @@ func (t *StatefulPythonTool) CleanupSession(sessionID string) {
 }
 
 // ExecutePythonCode now requires a sessionID to be passed.
-// Supports markdown code blocks (```python) and XML tags (<python>) for backward compatibility.
+// Supports markdown code blocks (```python) only.
 func (t *StatefulPythonTool) ExecutePythonCode(ctx context.Context, text string, sessionID string, output io.Writer) (string, string, bool) {
-	// Try markdown format first (proper ```python fence)
 	pythonCode := extractMarkdownCode(text)
-
-	// Fall back to XML tags (backward compatibility with old database messages)
-	if pythonCode == "" {
-		pythonCode = extractXMLCode(text)
-	}
-
 	if pythonCode == "" {
 		return "", "", false
 	}
@@ -563,25 +562,3 @@ func extractMarkdownCode(text string) string {
 	return strings.TrimSpace(code)
 }
 
-// extractXMLCode extracts Python code from XML tags (<python> ... </python>)
-// Kept for backward compatibility with old messages.
-func extractXMLCode(text string) string {
-	startTag := "<python>"
-	endTag := "</python>"
-
-	startIdx := strings.Index(text, startTag)
-	if startIdx == -1 {
-		return ""
-	}
-
-	endIdx := strings.Index(text[startIdx:], endTag)
-	if endIdx == -1 {
-		return ""
-	}
-
-	codeStart := startIdx + len(startTag)
-	codeEnd := startIdx + endIdx
-	code := text[codeStart:codeEnd]
-
-	return strings.TrimSpace(code)
-}

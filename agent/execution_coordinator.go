@@ -36,10 +36,10 @@ func NewExecutionCoordinator(pythonTool *tools.StatefulPythonTool, logger *zap.L
 // and returns the execution result.
 // Expects LLM to output properly formatted markdown code fences as instructed in system prompt.
 func (e *ExecutionCoordinator) ProcessResponse(ctx context.Context, llmResponse, sessionID string, stream *Stream) (*ExecutionResult, error) {
-    // Safety: ensure any unbalanced tags are closed (for backward compatibility with XML format)
+    // Safety: ensure any unbalanced tags are closed (for <tool> and <agent_status> tags)
     processedResponse, _ := format.CloseUnbalancedTags(llmResponse)
 
-	// Try to execute Python code if present (supports both markdown fences and XML tags)
+	// Try to execute Python code if present (markdown fences only)
 	code, result, wasExecuted := e.pythonTool.ExecutePythonCode(ctx, processedResponse, sessionID, nil)
 
 	if !wasExecuted {

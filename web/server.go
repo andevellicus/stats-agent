@@ -169,7 +169,7 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 }
 
 // StartWorkspaceCleanup runs a background goroutine that periodically cleans up stale sessions
-func StartWorkspaceCleanup(cfg *config.Config, cleanupService *CleanupService, logger *zap.Logger) {
+func StartWorkspaceCleanup(cfg *config.Config, cleanupService *services.CleanupService, logger *zap.Logger) {
 	if !cfg.CleanupEnabled {
 		logger.Info("Workspace cleanup disabled by configuration")
 		return
@@ -192,7 +192,7 @@ func StartWorkspaceCleanup(cfg *config.Config, cleanupService *CleanupService, l
 }
 
 // runCleanup executes a single cleanup cycle with timeout
-func runCleanup(cleanupService *CleanupService, cfg *config.Config, logger *zap.Logger) {
+func runCleanup(cleanupService *services.CleanupService, cfg *config.Config, logger *zap.Logger) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 

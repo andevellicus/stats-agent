@@ -229,7 +229,7 @@ func (c *Client) ChatStream(ctx context.Context, host string, messages []types.A
 					if len(sr.Choices) > 0 {
 						chunk := sr.Choices[0].Delta.Content
 						// Debug log each raw delta chunk as received from the LLM server
-						c.logger.Debug("llm stream delta", zap.String("delta", chunk))
+						//c.logger.Debug("llm stream delta", zap.String("delta", chunk))
 
 						// Update detection window/state before emitting
 						total += len(chunk)

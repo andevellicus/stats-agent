@@ -24,7 +24,13 @@ type BlockConfig struct {
 
 // CollapsibleBlock is a unified component for code blocks, execution results, and images
 templ CollapsibleBlock(config BlockConfig) {
-	<div class="mt-4 rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden code-block" data-block-type={ string(config.Type) }>
+	<div
+		class={
+			"mt-4 rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden code-block",
+			templ.KV("mb-6", config.Type == BlockTypeExecution),
+		}
+		data-block-type={ string(config.Type) }
+	>
 		<div class="flex items-center justify-between px-5 py-3 bg-gray-50 border-b border-gray-200">
 			<div class="flex items-center space-x-3">
 				@blockIcon(config.Type)
@@ -119,7 +125,7 @@ templ PythonCodeBlock(content string) {
 templ ExecutionResultBlock(content string) {
 	@CollapsibleBlock(BlockConfig{
 		Type:           BlockTypeExecution,
-		Title:          "Execution Output",
+		Title:          "Output",
 		Content:        content,
 		InitiallyOpen:  true,
 		ShowCopyButton: false,
@@ -156,11 +162,11 @@ templ PythonCodeBlockTemplate() {
 }
 
 templ ExecutionResultBlockTemplate() {
-	<div id="execution-block-template" class="mt-4 rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden code-block" data-block-type="execution">
+	<div id="execution-block-template" class="mt-4 mb-6 rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden code-block" data-block-type="execution">
 		<div class="flex items-center justify-between px-5 py-3 bg-gray-50 border-b border-gray-200">
 			<div class="flex items-center space-x-3">
 				@blockIcon(BlockTypeExecution)
-				<span class="block-title text-xs font-bold text-gray-700 uppercase tracking-wider font-mono">Execution Output</span>
+				<span class="block-title text-xs font-bold text-gray-700 uppercase tracking-wider font-mono">Output</span>
 			</div>
 			<div class="flex items-center space-x-4">
 				<div class="flex items-center space-x-2 cursor-pointer" onclick="toggleCodeBlock(this)">

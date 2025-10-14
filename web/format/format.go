@@ -6,7 +6,6 @@ import (
 
 // Tag definitions - single source of truth for all custom XML tags
 const (
-	TagPython      = "python"
 	TagTool        = "tool"
 	TagAgentStatus = "agent_status"
 )
@@ -21,13 +20,6 @@ type Tag struct {
 
 // Predefined tags used throughout the application
 var (
-	PythonTag = Tag{
-		Name:        TagPython,
-		OpenTag:     "<python>",
-		CloseTag:    "</python>",
-		MarkdownAlt: "```python",
-	}
-
 	ToolTag = Tag{
 		Name:     TagTool,
 		OpenTag:  "<tool>",
@@ -41,7 +33,7 @@ var (
 	}
 
 	// AllTags contains all tags for iteration
-	AllTags = []Tag{PythonTag, ToolTag, AgentStatusTag}
+	AllTags = []Tag{ToolTag, AgentStatusTag}
 )
 
 // HasTag checks if text contains a specific tag (opening or closing).
@@ -194,11 +186,6 @@ type StreamTransform struct {
 // This is used by the stream service to convert XML tags to display format.
 func GetStreamTransform(tag Tag) StreamTransform {
 	switch tag.Name {
-	case TagPython:
-		return StreamTransform{
-			OpenReplace:  "\n```python\n",
-			CloseReplace: "\n```\n",
-		}
 	case TagTool:
 		return StreamTransform{
 			OpenReplace:  "\n```\n",

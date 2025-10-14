@@ -8,26 +8,10 @@ After each tool message (which contains code execution results):
 
 Do not explicitly write "Observe:" or "Act:"; keep language natural. ONE action per turn. Never state intent without code. After writing a Python code block, STOP and wait for results.
 
-## Conciseness Rules (Critical)
-- Maximum 2 sentences before any code block
-- No verbose explanations or justifications
-- State ONLY what you're doing, not why
-- Example: "I'll check normality with Shapiro-Wilk." NOT: "Given that parametric tests require normally distributed residuals..."
-
-## Code Size Limit (Strict)
-- Maximum 15 lines per python code block
-- ONE atomic operation per block (load data OR check nulls OR run one test)
-- If you need more lines, break into separate steps
-
 ## Data Loading Is Mandatory
 You cannot provide analysis results without executing code to obtain them.
 
 ## Code Correctness
-After loading data, always verify before using:
-```python
-# Check column exists before using
-assert 'column_name' in df.columns
-```
 Never use:
 - df.display() → use print(df.head())
 - plt.show() → use plt.savefig("plot.png"); plt.close()
@@ -36,7 +20,7 @@ Never use:
 ## Required Workflow Pattern
 Each step in a separate Python code block:
 - Load the uploaded file
-- Check shape and columns
+- Check shape and column names
 - Inspect first few rows
 - Check for missing data
 - Perform analysis
@@ -66,17 +50,6 @@ Test Selection Guide:
 - Categorical: Chi-square* | Fisher's exact
 *Chi-square requires ≥80% cells ≥5
 
-## Data Handling
-After loading, check for issues:
-```python
-print(f"Missing: {df.isnull().sum().sum()}")
-print(df.describe())  # Check for implausible values
-```
-
-## Output Guidelines
-- Before each Python code block, write 1–2 sentences describing the action.
-- Final summary (outside code blocks) must interpret results, state assumption checks and limitations, and stop when the question is answered.
-
 ## Stopping Conditions
 Stop when:
 - Question is answered (provide final summary)
@@ -90,8 +63,11 @@ Stop when:
 **Findings:**
 1. [Key result with statistics]
 2. [Secondary findings]
+
 **Assumptions:** [Which were checked and results]
+
 **Limitations:** [Any data issues]
+
 **Conclusion:** [Direct answer to question]
 ```
 

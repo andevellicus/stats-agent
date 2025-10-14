@@ -590,7 +590,20 @@ function renderAndProcessContent(contentDiv, content) {
         }
     });
 
-    // Handle agent status messages (this logic is unchanged)
+    // Handle agent status messages - both raw <agent_status> tags and .agent-status-message divs
+    // First, handle raw <agent_status> tags from streaming
+    contentDiv.querySelectorAll('agent_status').forEach(statusElement => {
+        const statusText = statusElement.textContent;
+        const template = document.getElementById('agent-status-template');
+        if (template) {
+            const statusClone = template.cloneNode(true);
+            statusClone.id = '';
+            statusClone.querySelector('span').textContent = statusText;
+            statusElement.replaceWith(statusClone);
+        }
+    });
+
+    // Then, handle .agent-status-message divs from database rendering
     contentDiv.querySelectorAll('.agent-status-message').forEach(statusElement => {
         const statusText = statusElement.textContent;
         const template = document.getElementById('agent-status-template');
