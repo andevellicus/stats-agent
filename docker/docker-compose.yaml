@@ -147,5 +147,31 @@ services:
       retries: 3
       start_period: 10s
 
+  caddy:
+    build:
+      context: ./caddy
+      dockerfile: Dockerfile
+    container_name: stats-agent-caddy
+    environment:
+      # Set to your domain for automatic HTTPS (e.g. app.example.com)
+      DOMAIN: ${DOMAIN:-localhost}
+      # Upstream app address; default assumes app runs on host:5000
+      UPSTREAM: ${UPSTREAM:-host.docker.internal:5000}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    # Enable resolving host.docker.internal on Linux
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
 volumes:
   postgres-data:
+  caddy_data:
+    name: caddy_data
+  caddy_config:
+    name: caddy_config

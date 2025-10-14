@@ -1,0 +1,39 @@
+# Caddy reverse proxy for stats-agent
+# Usage:
+# - Set env DOMAIN to your domain (e.g. example.com) or "localhost" for local
+# - Set env UPSTREAM to the upstream app address (e.g. host.docker.internal:5000 or stats-agent:5000)
+
+{$DOMAIN} {
+    encode zstd gzip
+
+    @health {
+        path /health /healthz /ping
+    }
+    handle @health {
+        respond 200 {
+            body "ok"
+            close
+        }
+    }
+
+    # Forward all other requests to the app
+    reverse_proxy {$UPSTREAM}
+
+    # Basic hardening headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer-when-downgrade"
+        Content-Security-Policy "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:"
+    }
+
+    # Fallback for unknown routes
+    handle_errors {
+        @notfound expression {http.error.status_code} == 404
+        handle @notfound {
+            respond 404
+        }
+    }
+}
+
