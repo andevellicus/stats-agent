@@ -22,10 +22,14 @@ var pdfKeyFacts string
 //go:embed title_generator.txt
 var titleGenerator string
 
+//go:embed document_qa.txt
+var documentQA string
+
 func AgentSystem() string         { return agentSystem }
 func SummarizeMemory() string     { return summarizeMemory }
 func FactSummary() string         { return factSummary }
 func SearchableSummary() string   { return searchableSummary }
 func PDFKeyFacts() string         { return pdfKeyFacts }
 func TitleGenerator() string      { return titleGenerator }
+func DocumentQA() string          { return documentQA }
 

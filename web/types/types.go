@@ -6,6 +6,12 @@ import (
 	"github.com/google/uuid"
 )
 
+// Session modes
+const (
+	ModeDataset  = "dataset"
+	ModeDocument = "document"
+)
+
 // AgentMessage represents a message in the format expected by the agent and LLM.
 type AgentMessage struct {
 	Role    string `json:"role"`
@@ -35,6 +41,7 @@ type Session struct {
 	WorkspacePath string
 	Title         string
 	IsActive      bool
+	Mode          string // "dataset" or "document"
 }
 
 // MessageGroup is a struct for rendering grouped messages in the template.

@@ -49,7 +49,8 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
             last_active TIMESTAMPTZ DEFAULT NOW(),
             workspace_path TEXT NOT NULL,
             title TEXT DEFAULT '',
-            is_active BOOLEAN DEFAULT TRUE
+            is_active BOOLEAN DEFAULT TRUE,
+            mode TEXT DEFAULT 'dataset'
         )`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_last_active ON sessions(last_active DESC)`,
@@ -184,6 +185,7 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 	indexStmts := []string{
 		`CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_user_active ON sessions(user_id, is_active, last_active DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_mode ON sessions(mode)`,
 		`CREATE INDEX IF NOT EXISTS idx_rag_documents_created_at ON rag_documents(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_rag_documents_content_hash ON rag_documents(content_hash)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_documents_session_role_hash ON rag_documents (content_hash, COALESCE(metadata ->> 'session_id', ''), COALESCE(metadata ->> 'role', '')) WHERE content_hash IS NOT NULL`,
@@ -224,6 +226,10 @@ func (s *PostgresStore) GetUserByID(ctx context.Context, userID uuid.UUID) error
 }
 
 func (s *PostgresStore) CreateSession(ctx context.Context, userID *uuid.UUID) (uuid.UUID, error) {
+	return s.CreateSessionWithMode(ctx, userID, "dataset")
+}
+
+func (s *PostgresStore) CreateSessionWithMode(ctx context.Context, userID *uuid.UUID, mode string) (uuid.UUID, error) {
 	sessionID := uuid.New()
 	workspacePath := filepath.Join("workspaces", sessionID.String())
 	now := time.Now()
@@ -236,11 +242,16 @@ func (s *PostgresStore) CreateSession(ctx context.Context, userID *uuid.UUID) (u
 		userIDValue = sql.NullString{Valid: false}
 	}
 
+	// Validate mode
+	if mode != "dataset" && mode != "document" {
+		mode = "dataset" // Default to dataset mode
+	}
+
 	query := `
-        INSERT INTO sessions (id, user_id, created_at, last_active, workspace_path, title, is_active)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO sessions (id, user_id, created_at, last_active, workspace_path, title, is_active, mode)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
     `
-	_, err := s.DB.ExecContext(ctx, query, sessionID, userIDValue, now, now, workspacePath, initialTitle, true)
+	_, err := s.DB.ExecContext(ctx, query, sessionID, userIDValue, now, now, workspacePath, initialTitle, true, mode)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("failed to create session: %w", err)
 	}
@@ -249,7 +260,7 @@ func (s *PostgresStore) CreateSession(ctx context.Context, userID *uuid.UUID) (u
 
 func (s *PostgresStore) GetSessionByID(ctx context.Context, sessionID uuid.UUID) (types.Session, error) {
 	query := `
-		SELECT id, user_id, created_at, last_active, workspace_path, title, is_active
+		SELECT id, user_id, created_at, last_active, workspace_path, title, is_active, COALESCE(mode, 'dataset') as mode
 		FROM sessions
 		WHERE id = $1
 	`
@@ -257,7 +268,7 @@ func (s *PostgresStore) GetSessionByID(ctx context.Context, sessionID uuid.UUID)
 
 	var session types.Session
 	var userID sql.NullString
-	if err := row.Scan(&session.ID, &userID, &session.CreatedAt, &session.LastActive, &session.WorkspacePath, &session.Title, &session.IsActive); err != nil {
+	if err := row.Scan(&session.ID, &userID, &session.CreatedAt, &session.LastActive, &session.WorkspacePath, &session.Title, &session.IsActive, &session.Mode); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return types.Session{}, fmt.Errorf("session not found: %w", err)
 		}
@@ -285,6 +296,20 @@ func (s *PostgresStore) UpdateSessionTitle(ctx context.Context, sessionID uuid.U
 	return nil
 }
 
+func (s *PostgresStore) UpdateSessionMode(ctx context.Context, sessionID uuid.UUID, mode string) error {
+	// Validate mode
+	if mode != "dataset" && mode != "document" {
+		return fmt.Errorf("invalid mode: must be 'dataset' or 'document'")
+	}
+
+	query := `UPDATE sessions SET mode = $1 WHERE id = $2`
+	_, err := s.DB.ExecContext(ctx, query, mode, sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to update session mode: %w", err)
+	}
+	return nil
+}
+
 func (s *PostgresStore) GetSessions(ctx context.Context, userID *uuid.UUID) ([]types.Session, error) {
 	var query string
 	var rows *sql.Rows
@@ -292,7 +317,7 @@ func (s *PostgresStore) GetSessions(ctx context.Context, userID *uuid.UUID) ([]t
 
 	if userID != nil {
 		query = `
-			SELECT id, user_id, created_at, last_active, workspace_path, title, is_active
+			SELECT id, user_id, created_at, last_active, workspace_path, title, is_active, COALESCE(mode, 'dataset') as mode
 			FROM sessions
 			WHERE is_active = true AND user_id = $1
 			ORDER BY last_active DESC
@@ -300,7 +325,7 @@ func (s *PostgresStore) GetSessions(ctx context.Context, userID *uuid.UUID) ([]t
 		rows, err = s.DB.QueryContext(ctx, query, userID)
 	} else {
 		query = `
-			SELECT id, user_id, created_at, last_active, workspace_path, title, is_active
+			SELECT id, user_id, created_at, last_active, workspace_path, title, is_active, COALESCE(mode, 'dataset') as mode
 			FROM sessions
 			WHERE is_active = true
 			ORDER BY last_active DESC
@@ -317,7 +342,7 @@ func (s *PostgresStore) GetSessions(ctx context.Context, userID *uuid.UUID) ([]t
 	for rows.Next() {
 		var session types.Session
 		var userID sql.NullString
-		if err := rows.Scan(&session.ID, &userID, &session.CreatedAt, &session.LastActive, &session.WorkspacePath, &session.Title, &session.IsActive); err != nil {
+		if err := rows.Scan(&session.ID, &userID, &session.CreatedAt, &session.LastActive, &session.WorkspacePath, &session.Title, &session.IsActive, &session.Mode); err != nil {
 			return nil, fmt.Errorf("failed to scan session row: %w", err)
 		}
 		if userID.Valid {

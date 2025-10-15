@@ -204,7 +204,39 @@ func (cs *ChatService) CleanupSession(sessionID string) {
 
 // StreamAgentResponse orchestrates the agent's response streaming via SSE.
 // It captures stdout, streams word-by-word, tracks new files, and saves messages to DB.
+// Routes to either dataset mode (with code execution) or document mode (Q&A only) based on session.
 func (cs *ChatService) StreamAgentResponse(
+	ctx context.Context,
+	w http.ResponseWriter,
+	input string,
+	userMessageID string,
+	sessionID string,
+	history []types.AgentMessage,
+) {
+	// Determine session mode to route to appropriate agent workflow
+	sessionUUID, err := uuid.Parse(sessionID)
+	if err != nil {
+		cs.logger.Error("Invalid session ID format", zap.Error(err), zap.String("session_id", sessionID))
+		return
+	}
+
+	session, err := cs.store.GetSessionByID(ctx, sessionUUID)
+	if err != nil {
+		cs.logger.Error("Failed to get session for mode detection", zap.Error(err), zap.String("session_id", sessionID))
+		// Default to dataset mode if we can't determine
+		session.Mode = types.ModeDataset
+	}
+
+	// Route based on mode
+	if session.Mode == types.ModeDocument {
+		cs.streamDocumentResponse(ctx, w, input, userMessageID, sessionID, history)
+	} else {
+		cs.streamDatasetResponse(ctx, w, input, userMessageID, sessionID, history)
+	}
+}
+
+// streamDatasetResponse handles the original agentic workflow with Python code execution
+func (cs *ChatService) streamDatasetResponse(
 	ctx context.Context,
 	w http.ResponseWriter,
 	input string,
@@ -364,4 +396,103 @@ func (cs *ChatService) StreamAgentResponse(
 			}
 		}
 	}
+}
+
+// streamDocumentResponse handles document Q&A mode without code execution
+func (cs *ChatService) streamDocumentResponse(
+	ctx context.Context,
+	w http.ResponseWriter,
+	input string,
+	userMessageID string,
+	sessionID string,
+	history []types.AgentMessage,
+) {
+	agentMessageID := uuid.New().String()
+	var writeMu sync.Mutex
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	token := cs.registerRun(sessionID, cancelRun, userMessageID)
+	defer func() {
+		cancelRun()
+		cs.deregisterRun(sessionID, token)
+	}()
+	var sseActive atomic.Bool
+	sseActive.Store(true)
+
+	// Helper function to write SSE data without aborting background work on failure
+	safeWrite := func(data StreamData) {
+		if runCtx.Err() != nil {
+			return
+		}
+		if !sseActive.Load() {
+			return
+		}
+		if err := cs.streamService.WriteSSEData(ctx, w, data, &writeMu); err != nil {
+			if sseActive.CompareAndSwap(true, false) {
+				cs.logger.Info("SSE stream closed, continuing document response in background",
+					zap.Error(err),
+					zap.String("session_id", sessionID),
+					zap.String("user_message_id", userMessageID))
+			}
+		}
+	}
+
+	// Send initial SSE messages
+	safeWrite(StreamData{Type: "remove_loader", Content: "loading-" + userMessageID})
+	safeWrite(StreamData{Type: "create_container", Content: agentMessageID})
+
+	pipeReader, pipeWriter := io.Pipe()
+	defer pipeReader.Close()
+
+	var captureBuffer bytes.Buffer
+
+	// Document mode uses simpler persistence (no tool messages)
+	persist := func(assistant string, tool *string) {
+		assistant = strings.TrimSpace(assistant)
+		if assistant == "" {
+			return
+		}
+
+		ctxPersist, cancelPersist := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancelPersist()
+
+		// Document mode: only save assistant messages (no tools)
+		_, err := cs.messageService.SaveAssistantAndTool(ctxPersist, sessionID, assistant, nil, "")
+		if err != nil {
+			cs.logger.Error("Document mode message persistence failed",
+				zap.Error(err),
+				zap.String("session_id", sessionID))
+		}
+	}
+
+	agentStream := agent.NewStream(&captureBuffer, pipeWriter, persist)
+
+	streamDone := make(chan struct{})
+	go func() {
+		defer close(streamDone)
+		cs.streamService.ProcessStreamByWord(runCtx, pipeReader, func(data StreamData) error {
+			safeWrite(data)
+			return nil
+		})
+	}()
+
+	agentDone := make(chan struct{})
+	go func() {
+		defer close(agentDone)
+		// Call document mode agent workflow (no code execution)
+		cs.agent.RunDocumentMode(runCtx, input, sessionID, history, agentStream)
+		_ = pipeWriter.Close()
+	}()
+
+	go func() {
+		<-runCtx.Done()
+		pipeWriter.CloseWithError(runCtx.Err())
+	}()
+
+	<-agentDone
+	<-streamDone
+
+	agentStream.Finalize()
+
+	// Send end signal
+	safeWrite(StreamData{Type: "end"})
 }

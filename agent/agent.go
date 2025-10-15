@@ -72,6 +72,77 @@ func (a *Agent) GetRAG() *rag.RAG {
 	return a.rag
 }
 
+// RunDocumentMode executes a simple document Q&A workflow without code execution.
+// It queries RAG for document context, combines it with conversation history, and streams a single LLM response.
+func (a *Agent) RunDocumentMode(ctx context.Context, input string, sessionID string, history []types.AgentMessage, stream *Stream) {
+	// 1. Setup: Add user message to history
+	userMsg := types.AgentMessage{Role: "user", Content: input}
+	currentHistory := append(history, userMsg)
+
+	// Store user message to RAG
+	if a.rag != nil {
+		a.rag.AddMessagesAsync(sessionID, []types.AgentMessage{userMsg})
+	}
+
+	// 2. Query RAG for document context
+	// Use configured document mode RAG results (default 5, more than dataset mode)
+	ragResults := a.cfg.DocumentModeRAGResults
+	if ragResults <= 0 {
+		ragResults = 5 // Fallback if not configured
+	}
+
+	ragCtx, ragCancel := context.WithTimeout(ctx, a.cfg.LLMRequestTimeout)
+	defer ragCancel()
+	longTermContext, err := a.rag.Query(ragCtx, sessionID, input, ragResults)
+	if err != nil {
+		a.logger.Warn("Failed to query RAG for document context, continuing without it",
+			zap.Error(err),
+			zap.String("session_id", sessionID))
+		longTermContext = ""
+	}
+
+	// 3. Build messages for LLM (use document QA prompt)
+	var messagesForLLM []types.AgentMessage
+
+	// Add long-term context if available
+	if longTermContext != "" {
+		messagesForLLM = append(messagesForLLM, types.AgentMessage{
+			Role:    "system",
+			Content: longTermContext,
+		})
+	}
+
+	// Add conversation history
+	messagesForLLM = append(messagesForLLM, currentHistory...)
+
+	// 4. Get single LLM response with document QA prompt
+	responseChan, err := getLLMResponseForDocumentMode(ctx, a.cfg.MainLLMHost, messagesForLLM, a.cfg, a.logger)
+	if err != nil {
+		a.logger.Error("Failed to get LLM response in document mode",
+			zap.Error(err),
+			zap.String("session_id", sessionID))
+		_ = stream.Status("LLM communication error")
+		return
+	}
+
+	// 5. Collect and stream response
+	llmResponse := a.responseHandler.CollectStreamedResponse(responseChan, stream)
+
+	if a.responseHandler.IsEmpty(llmResponse) {
+		a.logger.Warn("Empty response in document mode", zap.String("session_id", sessionID))
+		_ = stream.Status("Received empty response from LLM")
+		return
+	}
+
+	// 6. Store assistant response to RAG (no tool messages in document mode)
+	assistantMsg := types.AgentMessage{Role: "assistant", Content: llmResponse}
+	if a.rag != nil {
+		a.rag.AddMessagesAsync(sessionID, []types.AgentMessage{assistantMsg})
+	}
+
+	// Done - single response, no iteration
+}
+
 // Run executes the agent's conversation loop with the given user input.
 // It orchestrates memory management, LLM interaction, and Python code execution.
 func (a *Agent) Run(ctx context.Context, input string, sessionID string, history []types.AgentMessage, stream *Stream) {

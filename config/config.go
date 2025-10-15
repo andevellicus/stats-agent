@@ -40,6 +40,9 @@ const (
     defaultPDFHeaderFooterRepeatThreshold   = 0.6
     defaultPDFReferencesTrimEnabled         = true
     defaultPDFReferencesCitationDensity     = 0.5
+    // Document mode defaults
+    defaultDocumentModeEnabled              = true
+    defaultDocumentModeRAGResults           = 5
 )
 
 // Config holds the application's configuration
@@ -111,6 +114,9 @@ type Config struct {
     PDFHeaderFooterRepeatThreshold   float64       `mapstructure:"PDF_HEADER_FOOTER_REPEAT_THRESHOLD"`
     PDFReferencesTrimEnabled         bool          `mapstructure:"PDF_REFERENCES_TRIM_ENABLED"`
     PDFReferencesCitationDensity     float64       `mapstructure:"PDF_REFERENCES_CITATION_DENSITY"`
+    // Document mode configuration
+    DocumentModeEnabled              bool          `mapstructure:"DOCUMENT_MODE_ENABLED"`
+    DocumentModeRAGResults           int           `mapstructure:"DOCUMENT_MODE_RAG_RESULTS"`
 }
 
 func Load(logger *zap.Logger) *Config {
@@ -187,6 +193,9 @@ func Load(logger *zap.Logger) *Config {
     viper.SetDefault("PDF_HEADER_FOOTER_REPEAT_THRESHOLD", defaultPDFHeaderFooterRepeatThreshold)
     viper.SetDefault("PDF_REFERENCES_TRIM_ENABLED", defaultPDFReferencesTrimEnabled)
     viper.SetDefault("PDF_REFERENCES_CITATION_DENSITY", defaultPDFReferencesCitationDensity)
+    // Document mode defaults
+    viper.SetDefault("DOCUMENT_MODE_ENABLED", defaultDocumentModeEnabled)
+    viper.SetDefault("DOCUMENT_MODE_RAG_RESULTS", defaultDocumentModeRAGResults)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if logger != nil {

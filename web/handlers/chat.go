@@ -290,6 +290,49 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 			return
 		}
 
+		// Determine session mode based on file type (first upload sets the mode)
+		session, err := h.store.GetSessionByID(c.Request.Context(), sessionID)
+		if err != nil {
+			h.logger.Error("Failed to get session for mode detection",
+				zap.Error(err),
+				zap.String("session_id", req.SessionID))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not verify session"})
+			return
+		}
+
+		// Check if this is the first file upload (determine mode)
+		files, err := h.store.GetFilesBySession(c.Request.Context(), sessionID)
+		if err != nil {
+			h.logger.Warn("Failed to check existing files, continuing with default mode",
+				zap.Error(err))
+			files = []database.FileRecord{} // Treat as no files
+		}
+
+		// If no files exist yet, set mode based on file type
+		if len(files) == 0 {
+			var newMode string
+			if ext == ".pdf" {
+				newMode = types.ModeDocument
+			} else {
+				newMode = types.ModeDataset
+			}
+
+			// Update session mode if it differs from current
+			if session.Mode != newMode {
+				if err := h.store.UpdateSessionMode(c.Request.Context(), sessionID, newMode); err != nil {
+					h.logger.Warn("Failed to update session mode, continuing with current mode",
+						zap.Error(err),
+						zap.String("session_id", req.SessionID),
+						zap.String("new_mode", newMode))
+				} else {
+					h.logger.Info("Session mode set based on first file upload",
+						zap.String("session_id", req.SessionID),
+						zap.String("mode", newMode),
+						zap.String("file_type", ext))
+				}
+			}
+		}
+
 		// Limit PDF size to 10MB
 		if ext == ".pdf" && file.Size > 10*1024*1024 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "PDF file too large. Maximum size is 10MB."})
