@@ -99,7 +99,9 @@ func New(cfg *config.Config, store *database.PostgresStore, logger *zap.Logger) 
 	return r, nil
 }
 
-func canonicalizeFactText(text string) string {
+// CanonicalizeFactText normalizes text for storage by standardizing line endings and trimming whitespace.
+// Exported for use in message content hashing.
+func CanonicalizeFactText(text string) string {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
@@ -109,10 +111,38 @@ func canonicalizeFactText(text string) string {
 	return strings.TrimSpace(joined)
 }
 
+// canonicalizeFactText is an internal alias for backward compatibility
+func canonicalizeFactText(text string) string {
+	return CanonicalizeFactText(text)
+}
+
 // NormalizeForHash prepares content for hashing by normalizing whitespace.
 // Exported for use in deduplication logic.
 func NormalizeForHash(content string) string {
 	return strings.TrimSpace(content)
+}
+
+// ComputeMessageContentHash computes a hash using the same normalization as RAG message storage.
+// This ensures consistent hashing between messages in the database and RAG documents.
+func ComputeMessageContentHash(role, content string) string {
+	// Apply canonicalization (same as RAG does when storing)
+	normalized := CanonicalizeFactText(content)
+
+	// For user messages, strip file upload notifications (same as RAG does)
+	if role == "user" && strings.Contains(normalized, "[📎 File uploaded:") {
+		lines := strings.Split(normalized, "\n")
+		var userLines []string
+		for _, line := range lines {
+			// Skip file upload notification lines and empty lines
+			if !strings.Contains(line, "[📎 File uploaded:") && strings.TrimSpace(line) != "" {
+				userLines = append(userLines, line)
+			}
+		}
+		normalized = strings.Join(userLines, "\n")
+	}
+
+	// Hash using standard normalization
+	return HashContent(NormalizeForHash(normalized))
 }
 
 // HashContent creates a SHA-256 hash of the given content.

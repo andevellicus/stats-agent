@@ -362,19 +362,19 @@ func (s *PostgresStore) FindRAGDocumentByHash(ctx context.Context, sessionID, ro
 
 // SearchRAGDocumentsBM25 performs a BM25-style full-text search over the stored RAG documents.
 // It returns ranked results ordered by their textual relevance to the provided query.
-func (s *PostgresStore) SearchRAGDocumentsBM25(ctx context.Context, query string, limit int, sessionID string) ([]BM25SearchResult, error) {
+func (s *PostgresStore) SearchRAGDocumentsBM25(ctx context.Context, query string, limit int, sessionID string, excludeHashes []string) ([]BM25SearchResult, error) {
     trimmed := strings.TrimSpace(query)
     if trimmed == "" || limit <= 0 {
         return nil, nil
     }
 
     // Try rich websearch_to_tsquery first, then fallback to simpler plainto_tsquery on error
-    results, err := s.searchBM25With(ctx, trimmed, limit, sessionID, "websearch_to_tsquery")
+    results, err := s.searchBM25With(ctx, trimmed, limit, sessionID, excludeHashes, "websearch_to_tsquery")
     if err == nil {
         return results, nil
     }
     // Fallback attempt
-    fallback, fbErr := s.searchBM25With(ctx, trimmed, limit, sessionID, "plainto_tsquery")
+    fallback, fbErr := s.searchBM25With(ctx, trimmed, limit, sessionID, excludeHashes, "plainto_tsquery")
     if fbErr == nil {
         return fallback, nil
     }
@@ -383,7 +383,7 @@ func (s *PostgresStore) SearchRAGDocumentsBM25(ctx context.Context, query string
 
 // searchBM25With builds and executes a BM25-like query using the provided tsquery function name
 // (e.g., "websearch_to_tsquery" or "plainto_tsquery").
-func (s *PostgresStore) searchBM25With(ctx context.Context, trimmed string, limit int, sessionID string, tsFunc string) ([]BM25SearchResult, error) {
+func (s *PostgresStore) searchBM25With(ctx context.Context, trimmed string, limit int, sessionID string, excludeHashes []string, tsFunc string) ([]BM25SearchResult, error) {
     const searchableTextExpr = "rd.content || ' ' || COALESCE(meta.metadata_text, '')"
     rankExpr := "ts_rank_cd(to_tsvector('english', " + searchableTextExpr + "), " + tsFunc + "('english', $1))"
     positionExpr := "position(lower($1) in lower(" + searchableTextExpr + "))"
@@ -406,6 +406,20 @@ func (s *PostgresStore) searchBM25With(ctx context.Context, trimmed string, limi
         builder.WriteString(" AND (" + rankExpr + " > 0 OR " + positionExpr + " > 0)")
     } else {
         builder.WriteString(" WHERE " + rankExpr + " > 0 OR " + positionExpr + " > 0")
+    }
+
+    // Exclude documents with matching content hashes
+    if len(excludeHashes) > 0 {
+        builder.WriteString(" AND (rd.content_hash IS NULL OR rd.content_hash NOT IN (")
+        for i, hash := range excludeHashes {
+            if i > 0 {
+                builder.WriteString(", ")
+            }
+            builder.WriteString("$")
+            builder.WriteString(strconv.Itoa(len(args) + 1))
+            args = append(args, hash)
+        }
+        builder.WriteString("))")
     }
 
     builder.WriteString(" ORDER BY (" + rankExpr + " + " + bonusExpr + ") DESC LIMIT $")
@@ -470,7 +484,7 @@ type VectorSearchResult struct {
 
 // VectorSearchRAGDocuments performs a cosine similarity search using pgvector.
 // Returns documents ordered by similarity (highest first), joining embeddings with documents.
-func (s *PostgresStore) VectorSearchRAGDocuments(ctx context.Context, queryVector []float32, limit int, sessionID string) ([]VectorSearchResult, error) {
+func (s *PostgresStore) VectorSearchRAGDocuments(ctx context.Context, queryVector []float32, limit int, sessionID string, excludeHashes []string) ([]VectorSearchResult, error) {
 	if len(queryVector) == 0 || limit <= 0 {
 		return nil, nil
 	}
@@ -492,6 +506,20 @@ func (s *PostgresStore) VectorSearchRAGDocuments(ctx context.Context, queryVecto
 		builder.WriteString(strconv.Itoa(len(args) + 1))
 		args = append(args, sessionID)
 		builder.WriteString(" ")
+	}
+
+	// Exclude documents with matching content hashes
+	if len(excludeHashes) > 0 {
+		builder.WriteString("AND (rd.content_hash IS NULL OR rd.content_hash NOT IN (")
+		for i, hash := range excludeHashes {
+			if i > 0 {
+				builder.WriteString(", ")
+			}
+			builder.WriteString("$")
+			builder.WriteString(strconv.Itoa(len(args) + 1))
+			args = append(args, hash)
+		}
+		builder.WriteString(")) ")
 	}
 
 	builder.WriteString("ORDER BY re.embedding <=> $1 LIMIT $")

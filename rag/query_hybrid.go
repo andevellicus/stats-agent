@@ -76,7 +76,7 @@ func (r *RAG) getRelevantContent(ctx context.Context, documentID uuid.UUID, meta
 	return strings.Join(contextParts, " "), nil
 }
 
-func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, nResults int) (string, int, error) {
+func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, nResults int, excludeHashes []string) (string, int, error) {
 	if nResults <= 0 {
 		return "", 0, nil
 	}
@@ -128,7 +128,7 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		r.logger.Warn("Failed to generate query embedding, using BM25 fallback only",
 			zap.Error(err))
 	} else if len(queryEmbedding) > 0 {
-		semanticResults, err := r.store.VectorSearchRAGDocuments(ctx, queryEmbedding, candidateLimit, sessionID)
+		semanticResults, err := r.store.VectorSearchRAGDocuments(ctx, queryEmbedding, candidateLimit, sessionID, excludeHashes)
 		if err != nil {
 			r.logger.Warn("Vector search failed, using BM25 fallback only",
 				zap.Error(err))
@@ -157,7 +157,7 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		}
 	}
 
-	bm25Results, err := r.store.SearchRAGDocumentsBM25(ctx, query, candidateLimit, sessionID)
+	bm25Results, err := r.store.SearchRAGDocumentsBM25(ctx, query, candidateLimit, sessionID, excludeHashes)
 	if err != nil {
 		r.logger.Warn("BM25 search failed, falling back to semantic results only",
 			zap.Error(err),
@@ -342,6 +342,14 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		return candidateList[i].Score > candidateList[j].Score
 	})
 
+	// Build a set of excluded hashes for O(1) lookup
+	excludeHashSet := make(map[string]bool, len(excludeHashes))
+	for _, hash := range excludeHashes {
+		if hash != "" {
+			excludeHashSet[hash] = true
+		}
+	}
+
 	var contextBuilder strings.Builder
 	contextBuilder.WriteString("<memory>\n")
 
@@ -406,6 +414,29 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		if role == "fact" {
 			var fact factStoredContent
 			if err := json.Unmarshal([]byte(content), &fact); err == nil && (fact.User != "" || fact.Assistant != "" || fact.Tool != "") {
+				// Check if user or assistant components are already in history
+				// Don't check tool - tool outputs are context-dependent (same output can come from different queries)
+				skipFact := false
+				if fact.User != "" {
+					userHash := ComputeMessageContentHash("user", fact.User)
+					if userHash != "" && excludeHashSet[userHash] {
+						skipFact = true
+					}
+				}
+				if !skipFact && fact.Assistant != "" {
+					assistantHash := ComputeMessageContentHash("assistant", fact.Assistant)
+					if assistantHash != "" && excludeHashSet[assistantHash] {
+						skipFact = true
+					}
+				}
+				// Tool outputs are NOT checked - two different queries can produce the same output
+				// e.g., "Check Age missingness" → "0" and "Check Gender missingness" → "0"
+
+				// Skip this fact if user or assistant is already in history
+				if skipFact {
+					continue
+				}
+
 				userTrimmed := canonicalizeFactText(fact.User)
 				if userTrimmed != "" && userTrimmed != lastEmittedUser {
 					lines = append(lines, fmt.Sprintf("- user: %s\n", userTrimmed))

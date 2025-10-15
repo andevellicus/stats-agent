@@ -17,7 +17,7 @@ func (r *RAG) AddMessagesAsync(sessionID string, messages []types.AgentMessage) 
 
 	go func(sessionID string, messages []types.AgentMessage) {
 		const maxAttempts = 3
-		for attempt := 0; attempt < maxAttempts; attempt++ {
+		for attempt := range maxAttempts {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			err := r.AddMessagesToStore(ctx, sessionID, messages)
 			cancel()

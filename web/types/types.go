@@ -20,16 +20,19 @@ type AgentMessage struct {
 	TokenCount int `json:"-"`
 	// TokenCountComputed tells whether TokenCount has been populated.
 	TokenCountComputed bool `json:"-"`
+	// ContentHash stores the normalized hash of the message content for deduplication.
+	ContentHash string `json:"-"`
 }
 
 // ChatMessage represents a single message in the chat, stored in the DB.
 type ChatMessage struct {
-	ID        string    `json:"id"`
-	SessionID string    `json:"session_id"`
-	Role      string    `json:"role"`
-	Content   string    `json:"content"`  // Raw content for the agent
-	Rendered  string    `json:"rendered"` // Rendered HTML for the UI
-	CreatedAt time.Time `json:"created_at"`
+	ID          string    `json:"id"`
+	SessionID   string    `json:"session_id"`
+	Role        string    `json:"role"`
+	Content     string    `json:"content"`      // Raw content for the agent
+	Rendered    string    `json:"rendered"`     // Rendered HTML for the UI
+	ContentHash string    `json:"content_hash"` // Hash of normalized content for deduplication
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // Session represents a chat session.

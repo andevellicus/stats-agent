@@ -38,15 +38,15 @@ func (r *RAG) AddMessagesToStore(ctx context.Context, sessionID string, messages
 	return nil
 }
 
-func (r *RAG) ensureDatasetMetadata(sessionID string, metadata map[string]string, texts ...string) {
+func (r *RAG) ensureDatasetMetadata(sessionID string, metadata map[string]string, texts ...string) string {
 	if metadata == nil {
-		return
+		return ""
 	}
 
 	if existing := strings.TrimSpace(metadata["dataset"]); existing != "" {
 		metadata["dataset"] = existing
 		r.rememberSessionDataset(sessionID, existing)
-		return
+		return existing
 	}
 
 	for _, text := range texts {
@@ -58,18 +58,21 @@ func (r *RAG) ensureDatasetMetadata(sessionID string, metadata map[string]string
 			if dataset != "" {
 				metadata["dataset"] = dataset
 				r.rememberSessionDataset(sessionID, dataset)
-				return
+				return dataset
 			}
 		}
 	}
 
 	if sessionID == "" {
-		return
+		return ""
 	}
 
 	if dataset := strings.TrimSpace(r.getSessionDataset(sessionID)); dataset != "" {
 		metadata["dataset"] = dataset
+		return dataset
 	}
+
+	return ""
 }
 
 func (r *RAG) prepareDocumentForMessage(
@@ -88,7 +91,7 @@ func (r *RAG) prepareDocumentForMessage(
 	if sessionID != "" {
 		metadata["session_id"] = sessionID
 	}
-	r.ensureDatasetMetadata(sessionID, metadata, message.Content)
+	_ = r.ensureDatasetMetadata(sessionID, metadata, message.Content)
 
 	var storedContent string
 	var contentToEmbed string
@@ -107,7 +110,14 @@ func (r *RAG) prepareDocumentForMessage(
 		if format.HasCodeBlock(message.Content) {
 			code, _ := format.ExtractCodeContent(message.Content)
 			statMeta = ExtractStatisticalMetadata(code, toolContent)
-			r.ensureDatasetMetadata(sessionID, metadata, code, toolContent)
+
+			// Ensure dataset is resolved and added to both structural metadata AND statistical metadata
+			if dataset := r.ensureDatasetMetadata(sessionID, metadata, code, toolContent); dataset != "" {
+				if statMeta == nil {
+					statMeta = make(map[string]string)
+				}
+				statMeta["dataset"] = dataset
+			}
 		}
 
 		userContent := ""
@@ -198,7 +208,7 @@ func (r *RAG) prepareDocumentForMessage(
 		if message.Role != "user" {
 			queryEmbedding, err := r.embedder(ctx, contentToEmbed)
 			if err == nil && len(queryEmbedding) > 0 {
-				results, err := r.store.VectorSearchRAGDocuments(ctx, queryEmbedding, 1, sessionID)
+				results, err := r.store.VectorSearchRAGDocuments(ctx, queryEmbedding, 1, sessionID, nil)
 				if err != nil {
 					r.logger.Warn("Deduplication query failed, proceeding to add document anyway", zap.Error(err))
 				} else if len(results) > 0 && results[0].Similarity > 0.98 && results[0].Metadata["role"] == message.Role {
@@ -245,7 +255,8 @@ func (r *RAG) prepareDocumentForMessage(
 		}
 	}
 
-	r.ensureDatasetMetadata(sessionID, metadata, message.Content, storedContent, contentToEmbed)
+	// Ensure dataset is in metadata for all messages (returns value but we've already set it)
+	_ = r.ensureDatasetMetadata(sessionID, metadata, message.Content, storedContent, contentToEmbed)
 
 	return &ragDocumentData{
 		ID:            documentUUID,

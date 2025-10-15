@@ -60,10 +60,12 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
             role TEXT NOT NULL,
             content TEXT NOT NULL,
             rendered TEXT NOT NULL,
+            content_hash TEXT NOT NULL DEFAULT '',
             created_at TIMESTAMPTZ DEFAULT NOW(),
             metadata JSONB DEFAULT '{}'::jsonb
         )`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_session_created_at ON messages(session_id, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_content_hash ON messages(content_hash)`,
 		`CREATE TABLE IF NOT EXISTS rag_documents (
             id UUID PRIMARY KEY,
             content TEXT NOT NULL,
@@ -365,8 +367,8 @@ func (s *PostgresStore) GetSessions(ctx context.Context, userID *uuid.UUID) ([]t
 
 func (s *PostgresStore) CreateMessage(ctx context.Context, msg types.ChatMessage) error {
 	query := `
-		INSERT INTO messages (id, session_id, role, content, rendered, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO messages (id, session_id, role, content, rendered, content_hash, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 	`
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -383,7 +385,7 @@ func (s *PostgresStore) CreateMessage(ctx context.Context, msg types.ChatMessage
 		return fmt.Errorf("invalid session ID in message: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx, query, messageUUID, sessionUUID, msg.Role, msg.Content, msg.Rendered, time.Now())
+	_, err = tx.ExecContext(ctx, query, messageUUID, sessionUUID, msg.Role, msg.Content, msg.Rendered, msg.ContentHash, time.Now())
 	if err != nil {
 		return fmt.Errorf("failed to insert message: %w", err)
 	}
@@ -426,7 +428,7 @@ func (s *PostgresStore) AppendToMessageRendered(ctx context.Context, messageID s
 
 func (s *PostgresStore) GetMessagesBySession(ctx context.Context, sessionID uuid.UUID) ([]types.ChatMessage, error) {
 	query := `
-		SELECT id, session_id, role, content, rendered FROM messages
+		SELECT id, session_id, role, content, rendered, content_hash FROM messages
 		WHERE session_id = $1 ORDER BY created_at ASC
 	`
 	rows, err := s.DB.QueryContext(ctx, query, sessionID)
@@ -439,7 +441,7 @@ func (s *PostgresStore) GetMessagesBySession(ctx context.Context, sessionID uuid
 	for rows.Next() {
 		var msg types.ChatMessage
 		var sessionUUID uuid.UUID
-		if err := rows.Scan(&msg.ID, &sessionUUID, &msg.Role, &msg.Content, &msg.Rendered); err != nil {
+		if err := rows.Scan(&msg.ID, &sessionUUID, &msg.Role, &msg.Content, &msg.Rendered, &msg.ContentHash); err != nil {
 			return nil, fmt.Errorf("failed to scan message row: %w", err)
 		}
 		msg.SessionID = sessionUUID.String()

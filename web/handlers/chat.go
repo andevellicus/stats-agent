@@ -440,11 +440,12 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 	}
 
 	userMessage := types.ChatMessage{
-		Role:      "user",
-		Content:   req.Message,
-		Rendered:  displayMessage, // If empty, template will use Content
-		ID:        generateMessageID(),
-		SessionID: sessionID.String(),
+		Role:        "user",
+		Content:     req.Message,
+		Rendered:    displayMessage, // If empty, template will use Content
+		ContentHash: rag.ComputeMessageContentHash("user", req.Message),
+		ID:          generateMessageID(),
+		SessionID:   sessionID.String(),
 	}
 
 	// Save user message - critical operation
@@ -738,8 +739,9 @@ func toAgentMessages(messages []types.ChatMessage) []types.AgentMessage {
 	for _, message := range messages {
 		if message.Role == "user" || message.Role == "assistant" || message.Role == "tool" {
 			agentMessages = append(agentMessages, types.AgentMessage{
-				Role:    message.Role,
-				Content: message.Content,
+				Role:        message.Role,
+				Content:     message.Content,
+				ContentHash: message.ContentHash,
 			})
 		}
 	}

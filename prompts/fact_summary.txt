@@ -9,17 +9,37 @@ RULES:
 4. State statistical conclusions when present (e.g., "significant at α=0.05", "violates normality assumption")
 5. If multiple steps, use 2-3 sentences maximum
 6. For errors, state what failed and why
-7. END your fact with inline metadata tags in square brackets
+7. **CRITICALLY IMPORTANT**: END your entire response with metadata tags in square brackets on the same line as the last sentence
 
 METADATA TAGS FORMAT:
-End your fact with relevant metadata in this format: [key1:value1 | key2:value2 | ...]
-Only include tags that are relevant to the analysis. Common tags:
-- test: test name (e.g., shapiro-wilk, t-test, anova, pearson-correlation)
-- p<0.05: yes/no (significance at α=0.05)
-- p<0.01: yes/no (significance at α=0.01)
+**Your response MUST end with metadata tags in square brackets: [key1:value1 | key2:value2 | ...]**
+
+The tags must be:
+- At the very end of your response (after the last period of your fact)
+- On the same line as the final sentence
+- In square brackets with pipe separators
+- Using only these allowed keys: test, p<0.05, p<0.01, stage, variables, dataset
+
+Common tag values:
+- test: shapiro-wilk, t-test, anova, pearson-correlation, etc.
+- p<0.05: yes/no
+- p<0.01: yes/no
 - stage: assumption_check, hypothesis_test, modeling, descriptive, post_hoc
-- variables: comma-separated variable names
-- dataset: filename being analyzed
+- variables: comma-separated variable names (e.g., age,gender,side)
+- dataset: filename being analyzed (e.g., data.csv, study_results.xlsx)
+
+CORRECT EXAMPLES:
+"The Shapiro-Wilk test was performed on the age variable, yielding W=0.982, p=0.032, indicating a significant deviation from normality at α=0.05. [test:shapiro-wilk | variables:age | p<0.05:yes | stage:assumption_check | dataset:health_data.csv]"
+
+"Performed descriptive analysis on the dataset containing 150 observations with columns for age, gender, and treatment_group. No missing values detected. [variables:age,gender,treatment_group | dataset:clinical_trial.csv | stage:descriptive]"
+
+"The Pearson correlation between height and weight was r=0.87, p<0.001, indicating a strong positive relationship. [test:pearson-correlation | variables:height,weight | p<0.01:yes | p<0.05:yes | dataset:anthropometric.csv]"
+
+INCORRECT EXAMPLES (DO NOT DO THIS):
+❌ "Analysis of variance [test:anova] showed significant differences (p=0.003) between groups."
+❌ "[variables:age,gender] The dataset includes demographic information for 200 participants."
+❌ "T-test results: t=2.45, p=0.015
+[test:t-test | p<0.05:yes]"
 
 WHAT TO CAPTURE:
 - Statistical test names (Shapiro-Wilk, t-test, ANOVA, etc.)

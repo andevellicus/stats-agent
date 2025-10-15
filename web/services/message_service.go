@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"stats-agent/database"
+	"stats-agent/rag"
 	"stats-agent/web/format"
 	"stats-agent/web/templates/components"
 	"stats-agent/web/types"
@@ -41,11 +42,12 @@ func (ms *MessageService) SaveAssistantAndTool(ctx context.Context, sessionID st
 
         assistantID = generateMessageID()
         assistantMsg := types.ChatMessage{
-            ID:        assistantID,
-            SessionID: sessionID,
-            Role:      "assistant",
-            Content:   assistant,
-            Rendered:  rendered,
+            ID:          assistantID,
+            SessionID:   sessionID,
+            Role:        "assistant",
+            Content:     assistant,
+            Rendered:    rendered,
+            ContentHash: rag.ComputeMessageContentHash("assistant", assistant),
         }
 
         if err := ms.store.CreateMessage(ctx, assistantMsg); err != nil {
@@ -64,11 +66,12 @@ func (ms *MessageService) SaveAssistantAndTool(ctx context.Context, sessionID st
 			}
 
 			toolMsg := types.ChatMessage{
-				ID:        generateMessageID(),
-				SessionID: sessionID,
-				Role:      "tool",
-				Content:   result,
-				Rendered:  renderedTool,
+				ID:          generateMessageID(),
+				SessionID:   sessionID,
+				Role:        "tool",
+				Content:     result,
+				Rendered:    renderedTool,
+				ContentHash: rag.ComputeMessageContentHash("tool", result),
 			}
 			if err := ms.store.CreateMessage(ctx, toolMsg); err != nil {
 				ms.logger.Error("Failed to save tool message", zap.Error(err))

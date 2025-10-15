@@ -75,13 +75,11 @@ func (a *Agent) GetRAG() *rag.RAG {
 // RunDocumentMode executes a simple document Q&A workflow without code execution.
 // It queries RAG for document context, combines it with conversation history, and streams a single LLM response.
 func (a *Agent) RunDocumentMode(ctx context.Context, input string, sessionID string, history []types.AgentMessage, stream *Stream) {
-	// 1. Setup: Add user message to history
-	userMsg := types.AgentMessage{Role: "user", Content: input}
-	currentHistory := append(history, userMsg)
-
-	// Store user message to RAG
-	if a.rag != nil {
-		a.rag.AddMessagesAsync(sessionID, []types.AgentMessage{userMsg})
+	// 1. Create user message but DON'T add to history or RAG yet
+	userMsg := types.AgentMessage{
+		Role:        "user",
+		Content:     input,
+		ContentHash: rag.ComputeMessageContentHash("user", input),
 	}
 
 	// 2. Query RAG for document context
@@ -91,9 +89,17 @@ func (a *Agent) RunDocumentMode(ctx context.Context, input string, sessionID str
 		ragResults = 5 // Fallback if not configured
 	}
 
+	// Extract content hashes from current history to exclude from RAG results
+	excludeHashes := make([]string, 0, len(history))
+	for _, msg := range history {
+		if msg.ContentHash != "" {
+			excludeHashes = append(excludeHashes, msg.ContentHash)
+		}
+	}
+
 	ragCtx, ragCancel := context.WithTimeout(ctx, a.cfg.LLMRequestTimeout)
 	defer ragCancel()
-	longTermContext, err := a.rag.Query(ragCtx, sessionID, input, ragResults)
+	longTermContext, err := a.rag.Query(ragCtx, sessionID, input, ragResults, excludeHashes)
 	if err != nil {
 		a.logger.Warn("Failed to query RAG for document context, continuing without it",
 			zap.Error(err),
@@ -102,6 +108,9 @@ func (a *Agent) RunDocumentMode(ctx context.Context, input string, sessionID str
 	}
 
 	// 3. Build messages for LLM (use document QA prompt)
+	// Append user message to history for this request (but don't modify passed-in history yet)
+	historyWithUserMsg := append(history, userMsg)
+
 	var messagesForLLM []types.AgentMessage
 
 	// Add long-term context if available
@@ -112,8 +121,8 @@ func (a *Agent) RunDocumentMode(ctx context.Context, input string, sessionID str
 		})
 	}
 
-	// Add conversation history
-	messagesForLLM = append(messagesForLLM, currentHistory...)
+	// Add conversation history (including current user message)
+	messagesForLLM = append(messagesForLLM, historyWithUserMsg...)
 
 	// 4. Get single LLM response with document QA prompt
 	responseChan, err := getLLMResponseForDocumentMode(ctx, a.cfg.MainLLMHost, messagesForLLM, a.cfg, a.logger)
@@ -134,8 +143,12 @@ func (a *Agent) RunDocumentMode(ctx context.Context, input string, sessionID str
 		return
 	}
 
-	// 6. Store assistant response to RAG (no tool messages in document mode)
-	assistantMsg := types.AgentMessage{Role: "assistant", Content: llmResponse}
+	// 6. Store assistant response to RAG (user message stored separately via chat handler)
+	assistantMsg := types.AgentMessage{
+		Role:        "assistant",
+		Content:     llmResponse,
+		ContentHash: rag.ComputeMessageContentHash("assistant", llmResponse),
+	}
 	if a.rag != nil {
 		a.rag.AddMessagesAsync(sessionID, []types.AgentMessage{assistantMsg})
 	}
@@ -146,13 +159,12 @@ func (a *Agent) RunDocumentMode(ctx context.Context, input string, sessionID str
 // Run executes the agent's conversation loop with the given user input.
 // It orchestrates memory management, LLM interaction, and Python code execution.
 func (a *Agent) Run(ctx context.Context, input string, sessionID string, history []types.AgentMessage, stream *Stream) {
-	// 1. Setup: Add user message to history
-	userMsg := types.AgentMessage{Role: "user", Content: input}
-	currentHistory := append(history, userMsg)
-
-	// Store user message to RAG
-	if a.rag != nil {
-		a.rag.AddMessagesAsync(sessionID, []types.AgentMessage{userMsg})
+	// 1. Create user message but DON'T add to history or RAG yet
+	// It will be added at the end of the turn along with the assistant response
+	userMsg := types.AgentMessage{
+		Role:        "user",
+		Content:     input,
+		ContentHash: rag.ComputeMessageContentHash("user", input),
 	}
 
 	// 2. Initialize conversation loop controller
@@ -161,7 +173,7 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 	// 3. Main conversation loop
 	for turn := 0; turn < a.cfg.MaxTurns; turn++ {
 		// Manage memory before each turn - non-critical, log warning if fails
-		if err := a.memoryManager.ManageHistory(ctx, sessionID, &currentHistory, stream); err != nil {
+		if err := a.memoryManager.ManageHistory(ctx, sessionID, &history, stream); err != nil {
 			a.logger.Warn("Failed to manage memory, continuing with current history",
 				zap.Error(err),
 				zap.Int("turn", turn),
@@ -180,19 +192,27 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 		if turn > 0 {
 			// For subsequent turns, combine user input with recent assistant focus
 			// This helps retrieve context relevant to what the agent is currently working on
-			for i := len(currentHistory) - 1; i >= 0; i-- {
-				if currentHistory[i].Role == "assistant" {
+			for i := len(history) - 1; i >= 0; i-- {
+				if history[i].Role == "assistant" {
 					// Combine original question with what agent is currently doing
-					queryText = input + " " + currentHistory[i].Content
+					queryText = input + " " + history[i].Content
 					break
 				}
+			}
+		}
+
+		// Extract content hashes from current history to exclude from RAG results
+		excludeHashes := make([]string, 0, len(history))
+		for _, msg := range history {
+			if msg.ContentHash != "" {
+				excludeHashes = append(excludeHashes, msg.ContentHash)
 			}
 		}
 
 		// Add timeout to RAG query to avoid hangs
 		ragCtx, ragCancel := context.WithTimeout(ctx, a.cfg.LLMRequestTimeout)
 		defer ragCancel()
-		longTermContext, err := a.rag.Query(ragCtx, sessionID, queryText, a.cfg.RAGResults)
+		longTermContext, err := a.rag.Query(ragCtx, sessionID, queryText, a.cfg.RAGResults, excludeHashes)
 		if err != nil {
 			a.logger.Warn("Failed to query RAG for long-term context, continuing without it",
 				zap.Error(err),
@@ -201,24 +221,22 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 			longTermContext = "" // Ensure empty on error
 		}
 
-		// Deduplicate RAG context to prevent adding messages that are still in currentHistory
-		// Uses RAG's existing hash-based deduplication logic for consistency
-		if longTermContext != "" {
-			longTermContext = a.deduplicateRAGContext(longTermContext, currentHistory)
+		// Build messages for LLM (combine long-term context + history + current user message)
+		// On turn 0, append user message. On turn 1+, it's already in history
+		if turn == 0 {
+			history = append(history, userMsg)
 		}
-
-		// Build messages for LLM (combine long-term context + history)
-		messagesForLLM := a.responseHandler.BuildMessagesForLLM(longTermContext, currentHistory)
+		messagesForLLM := a.responseHandler.BuildMessagesForLLM(longTermContext, history)
 
 		// Ensure combined system context + history fits within context window
 		{
 			softLimitTokens := a.cfg.ContextSoftLimitTokens()
-			// Build a temporary slice to measure combined token count
-			combined := make([]types.AgentMessage, 0, len(currentHistory)+1)
+			// Build a temporary slice to measure combined token count (includes user message)
+			combined := make([]types.AgentMessage, 0, len(history)+1)
 			if longTermContext != "" {
 				combined = append(combined, types.AgentMessage{Role: "system", Content: longTermContext})
 			}
-			combined = append(combined, currentHistory...)
+			combined = append(combined, history...)
 
 			totalTokens, err := a.memoryManager.CalculateHistorySize(ctx, combined)
 			if err != nil {
@@ -235,7 +253,7 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 						// Recompute combined count with summarized context
 						combined = combined[:0]
 						combined = append(combined, types.AgentMessage{Role: "system", Content: longTermContext})
-						combined = append(combined, currentHistory...)
+						combined = append(combined, history...)
 						totalTokens, err = a.memoryManager.CalculateHistorySize(ctx, combined)
 						if err != nil {
 							a.logger.Warn("Token recount after summarization failed", zap.Error(err))
@@ -243,29 +261,64 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 					}
 				}
 
-				// If still over the limit, trim oldest history messages until it fits
-				for (err == nil && totalTokens > softLimitTokens) && len(currentHistory) > 1 {
-					// Avoid splitting assistant-tool pairs when trimming
-					if currentHistory[0].Role == "assistant" && format.HasCodeBlock(currentHistory[0].Content) && len(currentHistory) > 1 && currentHistory[1].Role == "tool" {
-						currentHistory = currentHistory[2:]
-					} else {
-						currentHistory = currentHistory[1:]
+				// If still over the limit, calculate how many messages to trim in one pass
+				if totalTokens > softLimitTokens {
+					tokensToRemove := totalTokens - softLimitTokens
+					tokensAccumulated := 0
+					cutoffIndex := 0
+
+					// Find cutoff point by accumulating token counts from oldest messages
+					for cutoffIndex < len(history) && tokensAccumulated < tokensToRemove {
+						msg := history[cutoffIndex]
+
+						// Ensure message has token count computed
+						if !msg.TokenCountComputed {
+							tokens, err := a.memoryManager.CountTokens(ctx, msg.Content)
+							if err != nil {
+								a.logger.Warn("Failed to count tokens for message during trimming",
+									zap.Error(err),
+									zap.Int("cutoff_index", cutoffIndex))
+								break
+							}
+							history[cutoffIndex].TokenCount = tokens
+							history[cutoffIndex].TokenCountComputed = true
+						}
+
+						// If this is an assistant message with code, check for tool pair
+						if msg.Role == "assistant" && format.HasCodeBlock(msg.Content) &&
+							cutoffIndex+1 < len(history) && history[cutoffIndex+1].Role == "tool" {
+							// Remove both messages together
+							toolMsg := history[cutoffIndex+1]
+							if !toolMsg.TokenCountComputed {
+								tokens, err := a.memoryManager.CountTokens(ctx, toolMsg.Content)
+								if err != nil {
+									a.logger.Warn("Failed to count tokens for tool message during trimming",
+										zap.Error(err))
+									break
+								}
+								history[cutoffIndex+1].TokenCount = tokens
+								history[cutoffIndex+1].TokenCountComputed = true
+							}
+							tokensAccumulated += msg.TokenCount + toolMsg.TokenCount
+							cutoffIndex += 2
+						} else {
+							tokensAccumulated += msg.TokenCount
+							cutoffIndex++
+						}
 					}
 
-					combined = combined[:0]
-					if longTermContext != "" {
-						combined = append(combined, types.AgentMessage{Role: "system", Content: longTermContext})
-					}
-					combined = append(combined, currentHistory...)
-					totalTokens, err = a.memoryManager.CalculateHistorySize(ctx, combined)
-					if err != nil {
-						a.logger.Warn("Token recount during trimming failed", zap.Error(err))
-						break
+					// Slice once at the cutoff point
+					if cutoffIndex > 0 && cutoffIndex < len(history) {
+						history = history[cutoffIndex:]
+
+						messagesForLLM = a.responseHandler.BuildMessagesForLLM(longTermContext, history)
+
+						a.logger.Info("Trimmed history to fit context window",
+							zap.Int("messages_removed", cutoffIndex),
+							zap.Int("tokens_removed", tokensAccumulated),
+							zap.Int("remaining_messages", len(history)))
 					}
 				}
-
-				// Rebuild messages for LLM after any compression/trimming
-				messagesForLLM = a.responseHandler.BuildMessagesForLLM(longTermContext, currentHistory)
 			}
 		}
 
@@ -306,12 +359,21 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 
 		// Update history based on execution result
 		if execResult.WasCodeExecuted {
-			assistantMsg := types.AgentMessage{Role: "assistant", Content: llmResponse}
-			toolMsg := types.AgentMessage{Role: "tool", Content: execResult.Result}
+			assistantMsg := types.AgentMessage{
+				Role:        "assistant",
+				Content:     llmResponse,
+				ContentHash: rag.ComputeMessageContentHash("assistant", llmResponse),
+			}
+			toolMsg := types.AgentMessage{
+				Role:        "tool",
+				Content:     execResult.Result,
+				ContentHash: rag.ComputeMessageContentHash("tool", execResult.Result),
+			}
 
-			currentHistory = append(currentHistory, assistantMsg, toolMsg)
+			// Add assistant response and tool result to history
+			history = append(history, assistantMsg, toolMsg)
 
-			// Store assistant+tool pair to RAG for fact generation
+			// Store assistant + tool pair to RAG (user message stored separately via chat handler)
 			if a.rag != nil {
 				a.rag.AddMessagesAsync(sessionID, []types.AgentMessage{assistantMsg, toolMsg})
 			}
@@ -324,10 +386,16 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 			}
 		} else {
 			// No code to execute - conversation complete
-			assistantMsg := types.AgentMessage{Role: "assistant", Content: llmResponse}
-			currentHistory = append(currentHistory, assistantMsg)
+			assistantMsg := types.AgentMessage{
+				Role:        "assistant",
+				Content:     llmResponse,
+				ContentHash: rag.ComputeMessageContentHash("assistant", llmResponse),
+			}
 
-			// Store final assistant message to RAG
+			// Add assistant response to history
+			history = append(history, assistantMsg)
+
+			// Store assistant message to RAG (user message stored separately via chat handler)
 			if a.rag != nil {
 				a.rag.AddMessagesAsync(sessionID, []types.AgentMessage{assistantMsg})
 			}
@@ -466,108 +534,4 @@ func (a *Agent) handleEmptyResponse(ctx context.Context, longTermContext, latest
 	}
 
 	return summarizedContext
-}
-
-// deduplicateRAGContext filters RAG context to remove content already in currentHistory.
-// Uses RAG's ContentHashesMatch for consistent hash-based comparison.
-func (a *Agent) deduplicateRAGContext(ragContext string, currentHistory []types.AgentMessage) string {
-	if ragContext == "" || len(currentHistory) == 0 {
-		return ragContext
-	}
-
-	// Parse RAG context sections (format: <memory>\n- role: content\n</memory>)
-	ragContext = strings.TrimSpace(ragContext)
-	ragContext = strings.TrimPrefix(ragContext, "<memory>")
-	ragContext = strings.TrimSuffix(ragContext, "</memory>")
-	ragContext = strings.TrimSpace(ragContext)
-
-	if ragContext == "" {
-		return ""
-	}
-
-	// Split into sections by role markers
-	lines := strings.Split(ragContext, "\n")
-	var uniqueSections []string
-	var currentSection strings.Builder
-	duplicateCount := 0
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-
-		// Check if this starts a new section
-		isRoleMarker := strings.HasPrefix(trimmed, "- user:") ||
-			strings.HasPrefix(trimmed, "- assistant:") ||
-			strings.HasPrefix(trimmed, "- tool:")
-
-		if isRoleMarker {
-			// Process previous section if any
-			if currentSection.Len() > 0 {
-				if !a.isInCurrentHistory(currentSection.String(), currentHistory) {
-					uniqueSections = append(uniqueSections, currentSection.String())
-				} else {
-					duplicateCount++
-				}
-				currentSection.Reset()
-			}
-			currentSection.WriteString(trimmed)
-		} else {
-			// Continuation of current section
-			if currentSection.Len() > 0 {
-				currentSection.WriteString("\n")
-			}
-			currentSection.WriteString(trimmed)
-		}
-	}
-
-	// Process final section
-	if currentSection.Len() > 0 {
-		if !a.isInCurrentHistory(currentSection.String(), currentHistory) {
-			uniqueSections = append(uniqueSections, currentSection.String())
-		} else {
-			duplicateCount++
-		}
-	}
-
-	if duplicateCount > 0 {
-		a.logger.Info("Deduplicated RAG context",
-			zap.Int("duplicates_filtered", duplicateCount),
-			zap.Int("unique_sections", len(uniqueSections)))
-	}
-
-	// Rebuild context
-	if len(uniqueSections) == 0 {
-		return ""
-	}
-
-	var result strings.Builder
-	result.WriteString("<memory>\n")
-	for _, section := range uniqueSections {
-		result.WriteString(section)
-		result.WriteString("\n")
-	}
-	result.WriteString("</memory>")
-
-	return result.String()
-}
-
-// isInCurrentHistory checks if a RAG section's content matches any message in current history.
-// Strips role prefix from RAG section and uses RAG's ContentHashesMatch for comparison.
-func (a *Agent) isInCurrentHistory(ragSection string, currentHistory []types.AgentMessage) bool {
-	// Strip role prefix (e.g., "- user: ", "- assistant: ", "- tool: ")
-	content := ragSection
-	for _, prefix := range []string{"- user: ", "- assistant: ", "- tool: "} {
-		content = strings.TrimPrefix(content, prefix)
-	}
-
-	// Compare against all messages in current history using RAG's hash logic
-	for _, msg := range currentHistory {
-		if rag.ContentHashesMatch(content, msg.Content) {
-			return true
-		}
-	}
-
-	return false
 }

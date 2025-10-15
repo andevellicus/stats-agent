@@ -10,40 +10,40 @@ import (
 	"stats-agent/web/types"
 )
 
-func buildMetadataTagsForPrompt(metadata map[string]string) string {
+func buildMetadataContext(metadata map[string]string) string {
 	if len(metadata) == 0 {
 		return ""
 	}
 
-	var tags []string
+	var parts []string
 
-	// Priority order for tag inclusion
+	// Build a context block that provides the metadata to the LLM without instructing it to copy
 	if test := metadata["primary_test"]; test != "" {
-		tags = append(tags, fmt.Sprintf("test:%s", test))
+		parts = append(parts, fmt.Sprintf("Test detected: %s", test))
 	}
 	if metadata["sig_at_05"] == "true" {
-		tags = append(tags, "p<0.05:yes")
+		parts = append(parts, "Result significant at α=0.05")
 	} else if metadata["sig_at_05"] == "false" {
-		tags = append(tags, "p<0.05:no")
+		parts = append(parts, "Result not significant at α=0.05")
 	}
 	if metadata["sig_at_01"] == "true" {
-		tags = append(tags, "p<0.01:yes")
+		parts = append(parts, "Result significant at α=0.01")
 	}
 	if stage := metadata["analysis_stage"]; stage != "" {
-		tags = append(tags, fmt.Sprintf("stage:%s", stage))
+		parts = append(parts, fmt.Sprintf("Analysis stage: %s", stage))
 	}
 	if vars := metadata["variables"]; vars != "" {
-		tags = append(tags, fmt.Sprintf("variables:%s", vars))
+		parts = append(parts, fmt.Sprintf("Variables: %s", vars))
 	}
 	if dataset := metadata["dataset"]; dataset != "" {
-		tags = append(tags, fmt.Sprintf("dataset:%s", dataset))
+		parts = append(parts, fmt.Sprintf("Dataset: %s", dataset))
 	}
 
-	if len(tags) == 0 {
+	if len(parts) == 0 {
 		return ""
 	}
 
-	return fmt.Sprintf("Based on the extracted metadata, include these tags in your response: [%s]", strings.Join(tags, " | "))
+	return "Extracted metadata:\n" + strings.Join(parts, "\n")
 }
 
 func (r *RAG) SummarizeLongTermMemory(ctx context.Context, context, latestUserMessage string) (string, error) {
@@ -91,34 +91,25 @@ func (r *RAG) generateFactSummary(ctx context.Context, code, result string, meta
 
 	systemPrompt := prompts.FactSummary()
 
-	// Build metadata tags string for the prompt
-	metadataTags := buildMetadataTagsForPrompt(metadata)
+	// Build metadata context (provides info to LLM without instructing it to copy)
+	metadataContext := buildMetadataContext(metadata)
 
-	// Build user prompt with only the specific data to extract from
-	var userPrompt string
-	if metadataTags != "" {
-		userPrompt = fmt.Sprintf(`%s
-
-Code:
-%s
-
-Output:
-%s
-
-Extract the fact following the rules and examples above. Respond with only the fact, ending with metadata tags in square brackets.`, metadataTags, code, finalResult)
-	} else {
-		userPrompt = fmt.Sprintf(`Code:
-%s
-
-Output:
-%s
-
-Extract the fact following the rules and examples above. Respond with only the fact, ending with metadata tags in square brackets.`, code, finalResult)
+	// Build user prompt with code, output, and metadata context
+	var userPrompt strings.Builder
+	if metadataContext != "" {
+		userPrompt.WriteString(metadataContext)
+		userPrompt.WriteString("\n\n")
 	}
+
+	userPrompt.WriteString("Code:\n")
+	userPrompt.WriteString(code)
+	userPrompt.WriteString("\n\nOutput:\n")
+	userPrompt.WriteString(finalResult)
+	userPrompt.WriteString("\n\nExtract the fact following the rules and examples above. Respond with only the fact, ending with metadata tags in square brackets.")
 
 	messages := []types.AgentMessage{
 		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: userPrompt},
+		{Role: "user", Content: userPrompt.String()},
 	}
 
 	summary, err := llmclient.New(r.cfg, r.logger).Chat(ctx, r.cfg.SummarizationLLMHost, messages, nil)

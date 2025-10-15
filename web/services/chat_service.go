@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"stats-agent/agent"
 	"stats-agent/database"
+	"stats-agent/rag"
 	"stats-agent/web/templates/components"
 	"stats-agent/web/types"
 	"strings"
@@ -150,12 +151,13 @@ func (cs *ChatService) InitializeSession(ctx context.Context, sessionID string) 
 	}
 
     initMessage := types.ChatMessage{
-        ID:        uuid.New().String(),
-        SessionID: sessionID,
-        Role:      "tool",
-        Content:   initResult,
+        ID:          uuid.New().String(),
+        SessionID:   sessionID,
+        Role:        "tool",
+        Content:     initResult,
+        ContentHash: rag.ComputeMessageContentHash("tool", initResult),
         // Do not render the Python init banner on reload; keep content for LLM context only.
-        Rendered:  "",
+        Rendered:    "",
     }
 
 	return cs.store.CreateMessage(initCtx, initMessage)
