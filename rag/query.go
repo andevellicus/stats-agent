@@ -6,9 +6,9 @@ import (
 	"go.uber.org/zap"
 )
 
-func (r *RAG) Query(ctx context.Context, sessionID string, query string, nResults int, excludeHashes []string) (string, error) {
+func (r *RAG) Query(ctx context.Context, sessionID string, query string, nResults int, excludeHashes []string, historyDocIDs []string) (string, error) {
 	expandedQuery := r.expandQuery(query)
-	context, hits, err := r.queryHybrid(ctx, sessionID, expandedQuery, nResults, excludeHashes)
+	context, hits, err := r.queryHybrid(ctx, sessionID, expandedQuery, nResults, excludeHashes, historyDocIDs)
 	if err != nil {
 		return "", err
 	}

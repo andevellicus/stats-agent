@@ -61,8 +61,7 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
             content TEXT NOT NULL,
             rendered TEXT NOT NULL,
             content_hash TEXT NOT NULL DEFAULT '',
-            created_at TIMESTAMPTZ DEFAULT NOW(),
-            metadata JSONB DEFAULT '{}'::jsonb
+            created_at TIMESTAMPTZ DEFAULT NOW()
         )`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_session_created_at ON messages(session_id, created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_content_hash ON messages(content_hash)`,
@@ -194,6 +193,7 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_rag_documents_metadata_dataset ON rag_documents ((metadata ->> 'dataset'))`,
 		`CREATE INDEX IF NOT EXISTS idx_rag_documents_metadata_primary_test ON rag_documents ((metadata ->> 'primary_test'))`,
 		`CREATE INDEX IF NOT EXISTS idx_rag_documents_metadata_role ON rag_documents ((metadata ->> 'role'))`,
+		`CREATE INDEX IF NOT EXISTS idx_rag_documents_metadata_session_id ON rag_documents ((metadata ->> 'session_id'))`,
 		`CREATE INDEX IF NOT EXISTS idx_rag_embeddings_document_id ON rag_embeddings(document_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_rag_embeddings_vector_cosine ON rag_embeddings USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)`,
 		`CREATE INDEX IF NOT EXISTS idx_files_session_id ON files(session_id)`,

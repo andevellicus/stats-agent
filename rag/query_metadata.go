@@ -140,7 +140,7 @@ func (r *RAG) renderRecordsToMemory(ctx context.Context, records []documentRecor
 			continue
 		}
 
-		lookupID := resolveLookupID(record.documentID, record.metadata)
+		lookupID := ResolveLookupID(record.documentID, record.metadata)
 		if lookupID == "" {
 			r.logger.Warn("Unable to resolve lookup identifier for document", zap.String("document_id", docID))
 			continue

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -116,10 +117,18 @@ func canonicalizeFactText(text string) string {
 	return CanonicalizeFactText(text)
 }
 
-// NormalizeForHash prepares content for hashing by normalizing whitespace.
+// NormalizeForHash prepares content for hashing by canonical normalization.
+// This ensures tiny whitespace/casing changes don't defeat deduplication.
 // Exported for use in deduplication logic.
 func NormalizeForHash(content string) string {
-	return strings.TrimSpace(content)
+	// Lowercase for case-insensitive matching
+	content = strings.ToLower(content)
+	// Trim leading/trailing whitespace
+	content = strings.TrimSpace(content)
+	// Collapse multiple whitespace to single space
+	re := regexp.MustCompile(`\s+`)
+	content = re.ReplaceAllString(content, " ")
+	return content
 }
 
 // ComputeMessageContentHash computes a hash using the same normalization as RAG message storage.
@@ -255,7 +264,21 @@ func (r *RAG) clearSessionDataset(sessionID string) {
 	r.datasetMu.Unlock()
 }
 
-func resolveLookupID(documentID string, metadata map[string]string) string {
+// GetDocumentIDsByContentHash looks up document IDs by content hashes.
+// This is used for post-query pruning to avoid retrieving messages already in history.
+// Returns map: contentHash → document_id
+func (r *RAG) GetDocumentIDsByContentHash(ctx context.Context, sessionID string, contentHashes []string) (map[string]string, error) {
+	if len(contentHashes) == 0 {
+		return make(map[string]string), nil
+	}
+
+	return r.store.FindDocumentIDsByContentHash(ctx, sessionID, contentHashes)
+}
+
+// ResolveLookupID resolves the lookup ID for a document, handling parent/chunk relationships.
+// For summaries and chunks, returns the parent document ID. For document chunks, returns the chunk itself.
+// Exported for use in post-query pruning logic.
+func ResolveLookupID(documentID string, metadata map[string]string) string {
 	if documentID == "" {
 		return ""
 	}

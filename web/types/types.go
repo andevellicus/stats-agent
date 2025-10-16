@@ -22,6 +22,9 @@ type AgentMessage struct {
 	TokenCountComputed bool `json:"-"`
 	// ContentHash stores the normalized hash of the message content for deduplication.
 	ContentHash string `json:"-"`
+	// Metadata stores optional metadata like document_id, parent_document_id for RAG tracking.
+	// This field is used for post-query pruning to avoid retrieving messages already in history.
+	Metadata map[string]string `json:"-"`
 }
 
 // ChatMessage represents a single message in the chat, stored in the DB.

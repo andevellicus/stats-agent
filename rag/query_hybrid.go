@@ -16,13 +16,36 @@ import (
 
 // getRelevantContent retrieves context-appropriate content based on document type and matched window.
 // For documents (PDFs), returns matched window + 1 surrounding window (~1440 tokens).
-// For facts/conversations, returns full content.
+// For facts/summaries, returns embedding window text (the concise summary).
+// For other content, returns full content.
 func (r *RAG) getRelevantContent(ctx context.Context, documentID uuid.UUID, metadata map[string]string, windowIndex int) (string, error) {
 	docType := metadata["type"]
 	role := metadata["role"]
 
-	// For facts, conversations, summaries: return full content (these are small)
-	if role == "fact" || docType == "summary" || docType == "chunk" || (role != "document" && docType != "pdf" && docType != "document_chunk") {
+	// For facts and summaries: return window_text (the concise summary), not full content
+	if role == "fact" || docType == "summary" {
+		// Get embedding windows for this document
+		windows, err := r.store.GetDocumentEmbeddings(ctx, documentID)
+		if err != nil {
+			return "", fmt.Errorf("failed to get embeddings for fact: %w", err)
+		}
+		if len(windows) == 0 {
+			// Fallback: no embeddings, return full content
+			r.logger.Warn("No embeddings found for fact, using full content",
+				zap.String("document_id", documentID.String()),
+				zap.String("role", role))
+			content, err := r.store.GetRAGDocumentContent(ctx, documentID)
+			if err != nil {
+				return "", fmt.Errorf("failed to get document content: %w", err)
+			}
+			return content, nil
+		}
+		// Return the window_text (summary) from the first embedding window
+		return windows[0].WindowText, nil
+	}
+
+	// For conversation chunks: return full content
+	if docType == "chunk" || (role != "document" && docType != "pdf" && docType != "document_chunk") {
 		content, err := r.store.GetRAGDocumentContent(ctx, documentID)
 		if err != nil {
 			return "", fmt.Errorf("failed to get document content: %w", err)
@@ -76,7 +99,7 @@ func (r *RAG) getRelevantContent(ctx context.Context, documentID uuid.UUID, meta
 	return strings.Join(contextParts, " "), nil
 }
 
-func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, nResults int, excludeHashes []string) (string, int, error) {
+func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, nResults int, excludeHashes []string, historyDocIDs []string) (string, int, error) {
 	if nResults <= 0 {
 		return "", 0, nil
 	}
@@ -200,7 +223,7 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 	docContents := make(map[string]string)
 
 	for _, cand := range candidates {
-		lookupID := resolveLookupID(cand.DocumentID, cand.Metadata)
+		lookupID := ResolveLookupID(cand.DocumentID, cand.Metadata)
 		if lookupID == "" || lookupID == cand.DocumentID {
 			continue
 		}
@@ -342,13 +365,129 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		return candidateList[i].Score > candidateList[j].Score
 	})
 
-	// Build a set of excluded hashes for O(1) lookup
+	// === POST-QUERY PRUNING: 3-STAGE FILTERING ===
+
+	// Build historyDocIDSet for O(1) lookup
+	historyDocIDSet := make(map[string]bool, len(historyDocIDs))
+	for _, docID := range historyDocIDs {
+		if docID != "" {
+			historyDocIDSet[docID] = true
+		}
+	}
+
+	// FILTER 1: Drop candidates if document_id or lookupID is in history
+	filtered1 := make([]*hybridCandidate, 0, len(candidateList))
+	for _, cand := range candidateList {
+		// Check direct document ID
+		if historyDocIDSet[cand.DocumentID] {
+			continue
+		}
+
+		// Check resolved lookup ID (parent/chunk relationships)
+		lookupID := ResolveLookupID(cand.DocumentID, cand.Metadata)
+		if lookupID != "" && historyDocIDSet[lookupID] {
+			continue
+		}
+
+		filtered1 = append(filtered1, cand)
+	}
+
+	// FILTER 2: Proper summary bucketing
+	// Group candidates by resolved parent ID, pick best summary if present, else best parent
+	buckets := make(map[string][]*hybridCandidate)
+	for _, cand := range filtered1 {
+		lookupID := ResolveLookupID(cand.DocumentID, cand.Metadata)
+		if lookupID == "" {
+			lookupID = cand.DocumentID
+		}
+		buckets[lookupID] = append(buckets[lookupID], cand)
+	}
+
+	filtered2 := make([]*hybridCandidate, 0, len(buckets))
+	for _, bucket := range buckets {
+		if len(bucket) == 0 {
+			continue
+		}
+
+		// Find best summary in bucket
+		var bestSummary *hybridCandidate
+		var bestNonSummary *hybridCandidate
+
+		for _, cand := range bucket {
+			if cand.Metadata["type"] == "summary" {
+				if bestSummary == nil || cand.Score > bestSummary.Score {
+					bestSummary = cand
+				}
+			} else {
+				if bestNonSummary == nil || cand.Score > bestNonSummary.Score {
+					bestNonSummary = cand
+				}
+			}
+		}
+
+		// Prefer summary if available, else use best non-summary
+		if bestSummary != nil {
+			filtered2 = append(filtered2, bestSummary)
+		} else if bestNonSummary != nil {
+			filtered2 = append(filtered2, bestNonSummary)
+		}
+	}
+
+	// Re-sort after bucketing
+	sort.Slice(filtered2, func(i, j int) bool {
+		if filtered2[i].Score == filtered2[j].Score {
+			return filtered2[i].DocumentID < filtered2[j].DocumentID
+		}
+		return filtered2[i].Score > filtered2[j].Score
+	})
+
+	// FILTER 3: Shingled containment similarity (5-gram, >0.9 threshold)
+	// Also add hash-based dedup fallback
+	filtered3 := make([]*hybridCandidate, 0, len(filtered2))
+	seenContent := make(map[string]bool)
+
+	// Build set of history content hashes for fallback dedup
 	excludeHashSet := make(map[string]bool, len(excludeHashes))
 	for _, hash := range excludeHashes {
 		if hash != "" {
 			excludeHashSet[hash] = true
 		}
 	}
+
+	for _, cand := range filtered2 {
+		content := cand.Content
+		if content == "" {
+			// No content to check, include it
+			filtered3 = append(filtered3, cand)
+			continue
+		}
+
+		// Hash-based dedup fallback (belt-and-suspenders)
+		contentHash := HashContent(NormalizeForHash(content))
+		if contentHash != "" && excludeHashSet[contentHash] {
+			continue
+		}
+
+		// Check shingled containment against previously seen content
+		isDuplicate := false
+		for seenHash := range seenContent {
+			if containment5gram(content, seenHash) > 0.9 {
+				isDuplicate = true
+				break
+			}
+		}
+
+		if !isDuplicate {
+			filtered3 = append(filtered3, cand)
+			// Store normalized hash for future comparisons
+			if contentHash != "" {
+				seenContent[contentHash] = true
+			}
+		}
+	}
+
+	// Replace candidateList with filtered results
+	candidateList = filtered3
 
 	var contextBuilder strings.Builder
 	contextBuilder.WriteString("<memory>\n")
@@ -368,7 +507,7 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 			continue
 		}
 
-		lookupID := resolveLookupID(cand.DocumentID, cand.Metadata)
+		lookupID := ResolveLookupID(cand.DocumentID, cand.Metadata)
 		if lookupID == "" {
 			r.logger.Warn("Unable to resolve lookup identifier for document", zap.String("document_id", docID))
 			continue
@@ -414,25 +553,29 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		if role == "fact" {
 			var fact factStoredContent
 			if err := json.Unmarshal([]byte(content), &fact); err == nil && (fact.User != "" || fact.Assistant != "" || fact.Tool != "") {
-				// Check if user or assistant components are already in history
-				// Don't check tool - tool outputs are context-dependent (same output can come from different queries)
+				// Check if assistant component is already in history
+				// Don't check tool - tool outputs can be identical across different queries
+				// e.g., "Check Age missingness" → "0" and "Check Gender missingness" → "0"
 				skipFact := false
-				if fact.User != "" {
-					userHash := ComputeMessageContentHash("user", fact.User)
-					if userHash != "" && excludeHashSet[userHash] {
-						skipFact = true
+
+				// Fast path: check stored assistant_hash in metadata
+				if !skipFact && cand.Metadata != nil {
+					if storedAssistantHash := cand.Metadata["assistant_hash"]; storedAssistantHash != "" {
+						if excludeHashSet[storedAssistantHash] {
+							skipFact = true
+						}
 					}
 				}
+
+				// Fallback: compute hash from assistant content (for older facts without assistant_hash)
 				if !skipFact && fact.Assistant != "" {
 					assistantHash := ComputeMessageContentHash("assistant", fact.Assistant)
 					if assistantHash != "" && excludeHashSet[assistantHash] {
 						skipFact = true
 					}
 				}
-				// Tool outputs are NOT checked - two different queries can produce the same output
-				// e.g., "Check Age missingness" → "0" and "Check Gender missingness" → "0"
 
-				// Skip this fact if user or assistant is already in history
+				// Skip this fact if assistant is already in history
 				if skipFact {
 					continue
 				}
@@ -554,4 +697,51 @@ func ensureCandidate(candidates map[string]*hybridCandidate, docID string, metad
 	}
 	candidates[docID] = cand
 	return cand
+}
+
+// shingles5gram generates 5-gram character shingles from a string.
+// Returns a set (map[string]bool) of all 5-character substrings.
+func shingles5gram(s string) map[string]bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if len(s) < 5 {
+		return map[string]bool{s: true}
+	}
+
+	shingles := make(map[string]bool)
+	for i := 0; i <= len(s)-5; i++ {
+		shingles[s[i:i+5]] = true
+	}
+	return shingles
+}
+
+// containment5gram computes the containment similarity between two strings using 5-gram shingles.
+// Containment = |A ∩ B| / min(|A|, |B|)
+// Returns a value between 0 and 1, where 1 means one string is fully contained in the other.
+func containment5gram(s1, s2 string) float64 {
+	shingles1 := shingles5gram(s1)
+	shingles2 := shingles5gram(s2)
+
+	if len(shingles1) == 0 || len(shingles2) == 0 {
+		return 0.0
+	}
+
+	// Count intersection
+	intersection := 0
+	for shingle := range shingles1 {
+		if shingles2[shingle] {
+			intersection++
+		}
+	}
+
+	// Compute containment: intersection / min(|A|, |B|)
+	minSize := len(shingles1)
+	if len(shingles2) < minSize {
+		minSize = len(shingles2)
+	}
+
+	if minSize == 0 {
+		return 0.0
+	}
+
+	return float64(intersection) / float64(minSize)
 }

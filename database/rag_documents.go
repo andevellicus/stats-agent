@@ -360,6 +360,54 @@ func (s *PostgresStore) FindRAGDocumentByHash(ctx context.Context, sessionID, ro
 	return documentID, nil
 }
 
+// FindDocumentIDsByContentHash returns document IDs for given content hashes.
+// This is used for post-query pruning to avoid retrieving messages already in history.
+// Returns map: content_hash → document_id
+func (s *PostgresStore) FindDocumentIDsByContentHash(ctx context.Context, sessionID string, contentHashes []string) (map[string]string, error) {
+	if len(contentHashes) == 0 {
+		return make(map[string]string), nil
+	}
+
+	// Build placeholders for IN clause
+	placeholders := make([]string, len(contentHashes))
+	args := make([]interface{}, 0, len(contentHashes)+1)
+	args = append(args, sessionID)
+
+	for i, hash := range contentHashes {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		args = append(args, hash)
+	}
+
+	query := fmt.Sprintf(`
+		SELECT content_hash, id::text as document_id
+		FROM rag_documents
+		WHERE metadata->>'session_id' = $1
+		  AND content_hash IN (%s)
+		  AND content_hash IS NOT NULL
+	`, strings.Join(placeholders, ","))
+
+	rows, err := s.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query document IDs by content hash: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]string)
+	for rows.Next() {
+		var hash, docID string
+		if err := rows.Scan(&hash, &docID); err != nil {
+			return nil, fmt.Errorf("failed to scan document ID: %w", err)
+		}
+		result[hash] = docID
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating document ID results: %w", err)
+	}
+
+	return result, nil
+}
+
 // SearchRAGDocumentsBM25 performs a BM25-style full-text search over the stored RAG documents.
 // It returns ranked results ordered by their textual relevance to the provided query.
 func (s *PostgresStore) SearchRAGDocumentsBM25(ctx context.Context, query string, limit int, sessionID string, excludeHashes []string) ([]BM25SearchResult, error) {

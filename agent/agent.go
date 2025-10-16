@@ -24,6 +24,7 @@ type Agent struct {
 	memoryManager        *MemoryManager
 	executionCoordinator *ExecutionCoordinator
 	responseHandler      *ResponseHandler
+	queryBuilder         *QueryBuilder
 }
 
 // Tokenize request/response types have been centralized in llmclient.
@@ -35,6 +36,7 @@ func NewAgent(cfg *config.Config, pythonTool *tools.StatefulPythonTool, rag *rag
 	memoryManager := NewMemoryManager(cfg, logger)
 	executionCoordinator := NewExecutionCoordinator(pythonTool, logger)
 	responseHandler := NewResponseHandler(cfg, logger)
+	queryBuilder := NewQueryBuilder(cfg, rag, logger)
 
 	return &Agent{
 		cfg:                  cfg,
@@ -44,6 +46,7 @@ func NewAgent(cfg *config.Config, pythonTool *tools.StatefulPythonTool, rag *rag
 		memoryManager:        memoryManager,
 		executionCoordinator: executionCoordinator,
 		responseHandler:      responseHandler,
+		queryBuilder:         queryBuilder,
 	}
 }
 
@@ -99,7 +102,8 @@ func (a *Agent) RunDocumentMode(ctx context.Context, input string, sessionID str
 
 	ragCtx, ragCancel := context.WithTimeout(ctx, a.cfg.LLMRequestTimeout)
 	defer ragCancel()
-	longTermContext, err := a.rag.Query(ragCtx, sessionID, input, ragResults, excludeHashes)
+	// Document mode doesn't use post-query pruning (simpler flow)
+	longTermContext, err := a.rag.Query(ragCtx, sessionID, input, ragResults, excludeHashes, nil)
 	if err != nil {
 		a.logger.Warn("Failed to query RAG for document context, continuing without it",
 			zap.Error(err),
@@ -188,31 +192,70 @@ func (a *Agent) Run(ctx context.Context, input string, sessionID string, history
 
 		// Query RAG for long-term context before each turn
 		// This ensures newly added content (PDFs, facts) is available
-		queryText := input // Default: use original user question
-		if turn > 0 {
-			// For subsequent turns, combine user input with recent assistant focus
-			// This helps retrieve context relevant to what the agent is currently working on
-			for i := len(history) - 1; i >= 0; i-- {
-				if history[i].Role == "assistant" {
-					// Combine original question with what agent is currently doing
-					queryText = input + " " + history[i].Content
-					break
+		// Build structured query using QueryBuilder (combines fact summaries, metadata, values, synonyms)
+		queryText := a.queryBuilder.BuildRAGQuery(ctx, input, sessionID, history, turn)
+
+		// Build sets for post-query pruning (O(1) lookups)
+		excludeHashSet := make(map[string]bool)
+		historyDocIDSet := make(map[string]bool)
+
+		// Collect content hashes and document IDs from history
+		for _, msg := range history {
+			if msg.ContentHash != "" {
+				excludeHashSet[msg.ContentHash] = true
+			}
+
+			// Extract document ID from metadata if available (cached from previous queries)
+			if msg.Metadata != nil {
+				if docID := msg.Metadata["document_id"]; docID != "" {
+					// Resolve lookup ID (handles parent/chunk relationships)
+					lookupID := rag.ResolveLookupID(docID, msg.Metadata)
+					if lookupID != "" {
+						historyDocIDSet[lookupID] = true
+					}
 				}
 			}
 		}
 
-		// Extract content hashes from current history to exclude from RAG results
-		excludeHashes := make([]string, 0, len(history))
-		for _, msg := range history {
-			if msg.ContentHash != "" {
-				excludeHashes = append(excludeHashes, msg.ContentHash)
+		// Lazy lookup: If we don't have document IDs cached in metadata, query by content hash
+		if len(historyDocIDSet) == 0 && len(excludeHashSet) > 0 {
+			// Convert hash set to slice for query
+			hashSlice := make([]string, 0, len(excludeHashSet))
+			for hash := range excludeHashSet {
+				hashSlice = append(hashSlice, hash)
 			}
+
+			// Query database for document IDs by content hash
+			docIDMap, err := a.rag.GetDocumentIDsByContentHash(ctx, sessionID, hashSlice)
+			if err != nil {
+				a.logger.Warn("Failed to lookup document IDs by content hash, continuing with hash-only dedup",
+					zap.Error(err),
+					zap.String("session_id", sessionID))
+			} else {
+				// Populate historyDocIDSet from query results
+				for _, docID := range docIDMap {
+					if docID != "" {
+						historyDocIDSet[docID] = true
+					}
+				}
+			}
+		}
+
+		// Convert sets to slices at call boundary
+		excludeHashes := make([]string, 0, len(excludeHashSet))
+		for hash := range excludeHashSet {
+			excludeHashes = append(excludeHashes, hash)
+		}
+
+		historyDocIDs := make([]string, 0, len(historyDocIDSet))
+		for docID := range historyDocIDSet {
+			historyDocIDs = append(historyDocIDs, docID)
 		}
 
 		// Add timeout to RAG query to avoid hangs
 		ragCtx, ragCancel := context.WithTimeout(ctx, a.cfg.LLMRequestTimeout)
 		defer ragCancel()
-		longTermContext, err := a.rag.Query(ragCtx, sessionID, queryText, a.cfg.RAGResults, excludeHashes)
+		longTermContext, err := a.rag.Query(ragCtx, sessionID, queryText, a.cfg.RAGResults, excludeHashes, historyDocIDs)
 		if err != nil {
 			a.logger.Warn("Failed to query RAG for long-term context, continuing without it",
 				zap.Error(err),

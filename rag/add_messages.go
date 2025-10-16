@@ -144,6 +144,12 @@ func (r *RAG) prepareDocumentForMessage(
 			storedContent = string(factJSON)
 		}
 
+		// Store assistant hash for deduplication (tool outputs can be identical across different queries)
+		assistantHash := HashContent(NormalizeForHash(assistantContent))
+		if assistantHash != "" {
+			metadata["assistant_hash"] = assistantHash
+		}
+
 		// Extract code from markdown format (retrained model outputs ```python natively)
 		re := regexp.MustCompile("(?s)" + "```python\n(.*?)\n```")
 		matches := re.FindStringSubmatch(message.Content)
