@@ -2,8 +2,6 @@ package handlers
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -19,7 +17,6 @@ import (
 	"stats-agent/web/types"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -27,13 +24,14 @@ import (
 )
 
 type ChatHandler struct {
-	chatService   *services.ChatService
-	streamService *services.StreamService
-	pdfService    *services.PDFService
-	agent         AgentInterface
-	cfg           *config.Config
-	logger        *zap.Logger
-	store         *database.PostgresStore
+	chatService    *services.ChatService
+	streamService  *services.StreamService
+	sessionService *services.SessionService
+	uploadService  *services.UploadService
+	agent          AgentInterface
+	cfg            *config.Config
+	logger         *zap.Logger
+	store          *database.PostgresStore
 }
 
 // AgentInterface defines the subset of agent methods we need
@@ -50,20 +48,22 @@ type ChatRequest struct {
 func NewChatHandler(
 	chatService *services.ChatService,
 	streamService *services.StreamService,
-	pdfService *services.PDFService,
+	sessionService *services.SessionService,
+	uploadService *services.UploadService,
 	agent AgentInterface,
 	cfg *config.Config,
 	logger *zap.Logger,
 	store *database.PostgresStore,
 ) *ChatHandler {
 	return &ChatHandler{
-		chatService:   chatService,
-		streamService: streamService,
-		pdfService:    pdfService,
-		agent:         agent,
-		cfg:           cfg,
-		logger:        logger,
-		store:         store,
+		chatService:    chatService,
+		streamService:  streamService,
+		sessionService: sessionService,
+		uploadService:  uploadService,
+		agent:          agent,
+		cfg:            cfg,
+		logger:         logger,
+		store:          store,
 	}
 }
 
@@ -152,23 +152,14 @@ func (h *ChatHandler) Index(c *gin.Context) {
 		userUUIDPtr = &userUUID
 	}
 
-	workspaceDir := filepath.Join("workspaces", sessionUUID.String())
-	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
-		h.logger.Error("Failed to create workspace directory",
-			zap.Error(err),
-			zap.String("session_id", sessionUUID.String()))
+	// Create workspace using service
+	if err := h.sessionService.CreateWorkspace(sessionUUID); err != nil {
 		c.String(http.StatusInternalServerError, "Could not create workspace")
 		return
 	}
 
-	// Get sessions - non-critical, show empty sidebar if fails
-	sessions, err := h.store.GetSessions(c.Request.Context(), userUUIDPtr)
-	if err != nil {
-		h.logger.Error("Failed to get sessions for sidebar",
-			zap.Error(err),
-			zap.String("session_id", sessionUUID.String()))
-		sessions = []types.Session{} // Empty sidebar
-	}
+	// Get sessions for sidebar using service
+	sessions := h.sessionService.GetSessionsForSidebar(c.Request.Context(), userUUIDPtr)
 
 	// Get messages - critical for page render
 	messages, err := h.store.GetMessagesBySession(c.Request.Context(), sessionUUID)
@@ -199,47 +190,34 @@ func (h *ChatHandler) LoadSession(c *gin.Context) {
 		userUUIDPtr = &userUUID
 	}
 
-	// Verify the session belongs to this user
-	session, err := h.store.GetSessionByID(c.Request.Context(), sessionID)
+	// Validate and get session using service
+	session, shouldCreate, err := h.sessionService.ValidateAndGetSession(c.Request.Context(), sessionID, userUUIDPtr)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			h.logger.Info("Requested session not found, creating new one",
-				zap.String("requested_session_id", sessionID.String()))
-			newSessionID, createErr := h.store.CreateSession(c.Request.Context(), userUUIDPtr)
-			if createErr != nil {
-				h.logger.Error("Failed to create replacement session",
-					zap.Error(createErr))
-				c.String(http.StatusInternalServerError, "Could not create new session")
-				return
-			}
-			c.SetCookie(middleware.SessionCookieName, newSessionID.String(), middleware.CookieMaxAge, "/", "", false, true)
-			c.Redirect(http.StatusFound, fmt.Sprintf("/chat/%s", newSessionID.String()))
-			return
-		}
-		h.logger.Error("Failed to get session",
+		h.logger.Error("Session validation failed",
 			zap.Error(err),
 			zap.String("session_id", sessionID.String()))
-		c.String(http.StatusInternalServerError, "Could not load session")
-		return
-	}
-
-	// Check ownership - security check
-	if userUUIDPtr != nil && (session.UserID == nil || *session.UserID != *userUUIDPtr) {
-		h.logger.Warn("Attempted to access session belonging to different user",
-			zap.String("session_id", sessionID.String()),
-			zap.String("user_id", userUUIDPtr.String()))
 		c.Redirect(http.StatusFound, "/")
 		return
 	}
 
-	// Get sessions - non-critical, show empty sidebar if fails
-	sessions, err := h.store.GetSessions(c.Request.Context(), userUUIDPtr)
-	if err != nil {
-		h.logger.Error("Failed to get sessions for sidebar",
-			zap.Error(err),
-			zap.String("session_id", sessionID.String()))
-		sessions = []types.Session{} // Empty sidebar
+	// If session not found, create new one
+	if shouldCreate {
+		h.logger.Info("Requested session not found, creating new one",
+			zap.String("requested_session_id", sessionID.String()))
+		newSessionID, createErr := h.store.CreateSession(c.Request.Context(), userUUIDPtr)
+		if createErr != nil {
+			h.logger.Error("Failed to create replacement session",
+				zap.Error(createErr))
+			c.String(http.StatusInternalServerError, "Could not create new session")
+			return
+		}
+		c.SetCookie(middleware.SessionCookieName, newSessionID.String(), middleware.CookieMaxAge, "/", "", false, true)
+		c.Redirect(http.StatusFound, fmt.Sprintf("/chat/%s", newSessionID.String()))
+		return
 	}
+
+	// Get sessions for sidebar using service
+	sessions := h.sessionService.GetSessionsForSidebar(c.Request.Context(), userUUIDPtr)
 
 	// Get messages - critical for page render
 	messages, err := h.store.GetMessagesBySession(c.Request.Context(), sessionID)
@@ -253,6 +231,7 @@ func (h *ChatHandler) LoadSession(c *gin.Context) {
 
 	messageGroups := groupMessages(messages)
 	pages.ChatPage(sessionID, sessions, messageGroups).Render(c.Request.Context(), c.Writer)
+	_ = session // Mark as used
 }
 
 func (h *ChatHandler) SendMessage(c *gin.Context) {
@@ -274,169 +253,34 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 		return
 	}
 
-	// Handle potential file upload
+	// Handle potential file upload using upload service
 	var displayMessage string // Track what to display to the user
 	file, err := c.FormFile("file")
 	if err == nil {
-		sanitizedFilename := sanitizeFilename(file.Filename)
-		if sanitizedFilename == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid or unsafe filename."})
-			return
-		}
-
+		// Get file extension for mode detection
 		ext := strings.ToLower(filepath.Ext(file.Filename))
-		if ext != ".csv" && ext != ".xlsx" && ext != ".xls" && ext != ".pdf" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file type. Please upload CSV, Excel, or PDF files."})
-			return
-		}
 
-		// Determine session mode based on file type (first upload sets the mode)
-		session, err := h.store.GetSessionByID(c.Request.Context(), sessionID)
+		// Detect and set session mode based on first file upload
+		_, err := h.sessionService.DetectAndSetMode(c.Request.Context(), sessionID, ext)
 		if err != nil {
-			h.logger.Error("Failed to get session for mode detection",
-				zap.Error(err),
-				zap.String("session_id", req.SessionID))
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not verify session"})
-			return
+			h.logger.Warn("Failed to update session mode", zap.Error(err))
+			// Continue - mode update is not critical
 		}
 
-		// Check if this is the first file upload (determine mode)
-		files, err := h.store.GetFilesBySession(c.Request.Context(), sessionID)
+		// Process the upload using upload service
+		uploadResult, err := h.uploadService.ProcessUpload(c.Request.Context(), file, sessionID, req.Message)
 		if err != nil {
-			h.logger.Warn("Failed to check existing files, continuing with default mode",
-				zap.Error(err))
-			files = []database.FileRecord{} // Treat as no files
-		}
-
-		// If no files exist yet, set mode based on file type
-		if len(files) == 0 {
-			var newMode string
-			if ext == ".pdf" {
-				newMode = types.ModeDocument
-			} else {
-				newMode = types.ModeDataset
-			}
-
-			// Update session mode if it differs from current
-			if session.Mode != newMode {
-				if err := h.store.UpdateSessionMode(c.Request.Context(), sessionID, newMode); err != nil {
-					h.logger.Warn("Failed to update session mode, continuing with current mode",
-						zap.Error(err),
-						zap.String("session_id", req.SessionID),
-						zap.String("new_mode", newMode))
-				} else {
-					h.logger.Info("Session mode set based on first file upload",
-						zap.String("session_id", req.SessionID),
-						zap.String("mode", newMode),
-						zap.String("file_type", ext))
-				}
-			}
-		}
-
-		// Limit PDF size to 10MB
-		if ext == ".pdf" && file.Size > 10*1024*1024 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "PDF file too large. Maximum size is 10MB."})
-			return
-		}
-
-		workspaceDir := filepath.Join("workspaces", req.SessionID)
-		dst := filepath.Join(workspaceDir, sanitizedFilename)
-		if err := c.SaveUploadedFile(file, dst); err != nil {
-			h.logger.Error("Failed to save uploaded file",
+			h.logger.Error("File upload failed",
 				zap.Error(err),
-				zap.String("filename", sanitizedFilename),
+				zap.String("filename", file.Filename),
 				zap.String("session_id", req.SessionID))
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not save file"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
-		if !verifyFileExists(workspaceDir, sanitizedFilename) {
-			h.logger.Error("File verification failed after upload",
-				zap.String("filename", sanitizedFilename),
-				zap.String("workspace", workspaceDir))
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "File verification failed after upload"})
-			return
-		}
-
-		// Handle PDF uploads
-		if ext == ".pdf" {
-			// Set user message for display (without embedding full PDF text)
-			if strings.TrimSpace(req.Message) == "" {
-				req.Message = fmt.Sprintf("[📎 File uploaded: %s]\n\nPlease analyze the content from this PDF and provide statistical insights.", file.Filename)
-				displayMessage = fmt.Sprintf("[📎 PDF uploaded: %s]<br><br>Please analyze the content from this PDF and provide statistical insights.", file.Filename)
-			} else {
-				displayMessage = fmt.Sprintf("[📎 PDF uploaded: %s]<br><br>%s", file.Filename, req.Message)
-				req.Message = fmt.Sprintf("[📎 File uploaded: %s]\n\n%s", file.Filename, req.Message)
-			}
-
-			// Extract pages and store in RAG synchronously
-			// This ensures the PDF content is available when the agent starts processing
-			pdfCtx, pdfCancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
-			defer pdfCancel()
-
-			pages, err := h.pdfService.ExtractPages(dst)
-			if err != nil {
-				h.logger.Error("Failed to extract PDF pages for RAG",
-					zap.Error(err),
-					zap.String("filename", sanitizedFilename))
-				// Continue - user can still ask questions, just without PDF content in RAG
-			} else {
-				ragInstance := h.agent.GetRAG()
-				if ragInstance == nil {
-					h.logger.Warn("RAG instance not available for PDF storage")
-				} else {
-					if err := ragInstance.AddPDFPagesToRAG(pdfCtx, req.SessionID, file.Filename, pages); err != nil {
-						h.logger.Error("Failed to store PDF pages in RAG",
-							zap.Error(err),
-							zap.String("filename", sanitizedFilename),
-							zap.String("session_id", req.SessionID))
-					} else {
-						h.logger.Info("Successfully stored PDF pages in RAG",
-							zap.String("filename", sanitizedFilename),
-							zap.Int("pages", len(pages)),
-							zap.String("session_id", req.SessionID))
-					}
-				}
-			}
-		} else {
-			// For non-PDF files, use existing message logic
-			if strings.TrimSpace(req.Message) == "" {
-				req.Message = fmt.Sprintf("I've uploaded %s. Please analyze this dataset and provide statistical insights.", file.Filename)
-			} else {
-				req.Message = fmt.Sprintf("[📎 File uploaded: %s]\n\n%s", file.Filename, req.Message)
-			}
-		}
-
-		// Track uploaded file in database - non-critical, log if fails
-		webPath := filepath.ToSlash(filepath.Join("/workspaces", req.SessionID, sanitizedFilename))
-
-		// Determine file type
-		fileType := "csv"
-		if ext == ".pdf" {
-			fileType = "pdf"
-		}
-
-		fileRecord := database.FileRecord{
-			ID:        uuid.New(),
-			SessionID: sessionID,
-			Filename:  sanitizedFilename,
-			FilePath:  webPath,
-			FileType:  fileType,
-			FileSize:  file.Size,
-			CreatedAt: time.Now(),
-			MessageID: nil, // Will be associated with user message later if needed
-		}
-		if _, err := h.store.CreateFile(c.Request.Context(), fileRecord); err != nil {
-			h.logger.Warn("Failed to track uploaded file in database",
-				zap.Error(err),
-				zap.String("filename", sanitizedFilename),
-				zap.String("session_id", req.SessionID))
-		}
-
-		h.logger.Info("File uploaded successfully",
-			zap.String("filename", file.Filename),
-			zap.String("session_id", req.SessionID),
-			zap.Int64("size_bytes", file.Size))
+		// Use the formatted messages from upload service
+		req.Message = uploadResult.ContentMessage
+		displayMessage = uploadResult.DisplayMessage
 	}
 
 	userMessage := types.ChatMessage{
@@ -746,78 +590,6 @@ func toAgentMessages(messages []types.ChatMessage) []types.AgentMessage {
 		}
 	}
 	return agentMessages
-}
-
-func sanitizeFilename(filename string) string {
-	// Trim leading/trailing spaces and dots
-	sanitized := strings.Trim(filename, " .")
-
-	// Remove path traversal attempts
-	sanitized = strings.ReplaceAll(sanitized, "..", "")
-
-	// Preserve extension
-	ext := filepath.Ext(sanitized)
-	nameWithoutExt := strings.TrimSuffix(sanitized, ext)
-
-	// Replace special characters with safe alternatives
-	nameWithoutExt = replaceSpecialChars(nameWithoutExt)
-
-	// Reconstruct with original extension
-	sanitized = nameWithoutExt + ext
-
-	// Limit total length to 255 characters
-	if len(sanitized) > 255 {
-		// Truncate name portion, preserve extension
-		maxNameLen := 255 - len(ext)
-		if maxNameLen > 0 {
-			sanitized = nameWithoutExt[:maxNameLen] + ext
-		} else {
-			sanitized = sanitized[:255]
-		}
-	}
-
-	return sanitized
-}
-
-func replaceSpecialChars(s string) string {
-	// Replace common special chars with readable alternatives
-	s = strings.ReplaceAll(s, "%", "pct")
-	s = strings.ReplaceAll(s, "&", "and")
-	s = strings.ReplaceAll(s, " ", "_")
-
-	// Replace filesystem-unsafe characters with underscore
-	// These are problematic across Windows, Linux, macOS
-	unsafeChars := []string{
-		"<", ">", ":", "\"", "/", "\\", "|", "?", "*",
-		"(", ")", "[", "]", "{", "}", "'", ",", ";", "!",
-		"@", "#", "$", "^", "`", "~", "+", "=",
-	}
-
-	for _, char := range unsafeChars {
-		s = strings.ReplaceAll(s, char, "_")
-	}
-
-	// Collapse multiple underscores to single
-	for strings.Contains(s, "__") {
-		s = strings.ReplaceAll(s, "__", "_")
-	}
-
-	// Trim leading/trailing underscores
-	s = strings.Trim(s, "_")
-
-	return s
-}
-
-func verifyFileExists(workspaceDir, filename string) bool {
-	safePath := filepath.Join(workspaceDir, filename)
-	info, err := os.Stat(safePath)
-	if os.IsNotExist(err) {
-		return false
-	}
-	if info.IsDir() {
-		return false
-	}
-	return true
 }
 
 func generateMessageID() string {

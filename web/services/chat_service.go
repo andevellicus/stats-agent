@@ -23,9 +23,9 @@ import (
 )
 
 type sessionRun struct {
-    cancel        context.CancelFunc
-    token         string
-    userMessageID string
+	cancel        context.CancelFunc
+	token         string
+	userMessageID string
 }
 
 type ChatService struct {
@@ -59,14 +59,14 @@ func NewChatService(
 }
 
 func (cs *ChatService) registerRun(sessionID string, cancel context.CancelFunc, userMessageID string) string {
-    token := uuid.New().String()
-    var previous context.CancelFunc
+	token := uuid.New().String()
+	var previous context.CancelFunc
 
 	cs.activeRunsMu.Lock()
 	if existing, ok := cs.activeRuns[sessionID]; ok {
 		previous = existing.cancel
 	}
-    cs.activeRuns[sessionID] = sessionRun{cancel: cancel, token: token, userMessageID: userMessageID}
+	cs.activeRuns[sessionID] = sessionRun{cancel: cancel, token: token, userMessageID: userMessageID}
 	cs.activeRunsMu.Unlock()
 
 	if previous != nil {
@@ -102,12 +102,12 @@ func (cs *ChatService) StopSessionRun(sessionID string) {
 // GetActiveRun returns whether a run is active for the session and, if so,
 // the user message ID that initiated it (used to reattach SSE).
 func (cs *ChatService) GetActiveRun(sessionID string) (bool, string) {
-    cs.activeRunsMu.Lock()
-    defer cs.activeRunsMu.Unlock()
-    if run, ok := cs.activeRuns[sessionID]; ok {
-        return true, run.userMessageID
-    }
-    return false, ""
+	cs.activeRunsMu.Lock()
+	defer cs.activeRunsMu.Unlock()
+	if run, ok := cs.activeRuns[sessionID]; ok {
+		return true, run.userMessageID
+	}
+	return false, ""
 }
 
 // InitializeSession initializes a new session by checking for uploaded files
@@ -150,15 +150,15 @@ func (cs *ChatService) InitializeSession(ctx context.Context, sessionID string) 
 		return fmt.Errorf("failed to initialize python session: %w", err)
 	}
 
-    initMessage := types.ChatMessage{
-        ID:          uuid.New().String(),
-        SessionID:   sessionID,
-        Role:        "tool",
-        Content:     initResult,
-        ContentHash: rag.ComputeMessageContentHash("tool", initResult),
-        // Do not render the Python init banner on reload; keep content for LLM context only.
-        Rendered:    "",
-    }
+	initMessage := types.ChatMessage{
+		ID:          uuid.New().String(),
+		SessionID:   sessionID,
+		Role:        "tool",
+		Content:     initResult,
+		ContentHash: rag.ComputeMessageContentHash("tool", initResult),
+		// Do not render the Python init banner on reload; keep content for LLM context only.
+		Rendered: "",
+	}
 
 	return cs.store.CreateMessage(initCtx, initMessage)
 }
@@ -248,8 +248,8 @@ func (cs *ChatService) streamDatasetResponse(
 ) {
 	agentMessageID := uuid.New().String()
 	var writeMu sync.Mutex
-    runCtx, cancelRun := context.WithCancel(context.Background())
-    token := cs.registerRun(sessionID, cancelRun, userMessageID)
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	token := cs.registerRun(sessionID, cancelRun, userMessageID)
 	defer func() {
 		cancelRun()
 		cs.deregisterRun(sessionID, token)
@@ -333,7 +333,7 @@ func (cs *ChatService) streamDatasetResponse(
 	agentDone := make(chan struct{})
 	go func() {
 		defer close(agentDone)
-		cs.agent.Run(runCtx, input, sessionID, history, agentStream)
+		cs.agent.RunDatasetMode(runCtx, input, sessionID, history, agentStream)
 		_ = pipeWriter.Close()
 	}()
 
