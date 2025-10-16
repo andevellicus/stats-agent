@@ -99,7 +99,7 @@ func (r *RAG) getRelevantContent(ctx context.Context, documentID uuid.UUID, meta
 	return strings.Join(contextParts, " "), nil
 }
 
-func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, nResults int, excludeHashes []string, historyDocIDs []string) (string, int, error) {
+func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, nResults int, excludeHashes []string, historyDocIDs []string, doneLedger string) (string, int, error) {
 	if nResults <= 0 {
 		return "", 0, nil
 	}
@@ -302,12 +302,15 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		role := cand.Metadata["role"]
 		docType := cand.Metadata["type"]
 		// Only boost conversation facts (not document chunks)
-		if role == "fact" && docType != "chunk" && docType != "document_chunk" {
-			combined *= r.cfg.HybridFactBoost
-		}
-		if cand.Metadata["type"] == "summary" {
-			combined *= r.cfg.HybridSummaryBoost
-		}
+        if role == "fact" && docType != "chunk" && docType != "document_chunk" {
+            combined *= r.cfg.HybridFactBoost
+        }
+        if cand.Metadata["type"] == "summary" {
+            combined *= r.cfg.HybridSummaryBoost
+        }
+        if cand.Metadata["type"] == "state" {
+            combined *= r.cfg.HybridStateBoost
+        }
 		if cand.Content != "" && strings.Contains(cand.Content, "Error:") && !isQueryForError {
 			combined *= r.cfg.HybridErrorPenalty
 		}
@@ -605,9 +608,13 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 			if assistantContent != "" {
 				lines = append(lines, fmt.Sprintf("- assistant: %s\n", assistantContent))
 			}
-		} else {
-			lines = append(lines, fmt.Sprintf("- %s: %s\n", role, content))
-		}
+        } else {
+            label := role
+            if cand.Metadata["type"] == "state" || role == "state" {
+                label = "state"
+            }
+            lines = append(lines, fmt.Sprintf("- %s: %s\n", label, content))
+        }
 
 		for _, line := range lines {
 			contextBuilder.WriteString(line)
@@ -619,6 +626,13 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 
 	if addedDocs == 0 {
 		return "", 0, nil
+	}
+
+	// Inject done ledger if provided
+	if doneLedger != "" {
+		contextBuilder.WriteString("\n")
+		contextBuilder.WriteString(doneLedger)
+		contextBuilder.WriteString("\n")
 	}
 
 	contextBuilder.WriteString("</memory>\n")
@@ -734,10 +748,7 @@ func containment5gram(s1, s2 string) float64 {
 	}
 
 	// Compute containment: intersection / min(|A|, |B|)
-	minSize := len(shingles1)
-	if len(shingles2) < minSize {
-		minSize = len(shingles2)
-	}
+	minSize := min(len(shingles1), len(shingles2))
 
 	if minSize == 0 {
 		return 0.0

@@ -410,15 +410,16 @@ func extractNumericalValues(result string) map[string]string {
 	}
 
 	// Test statistics
-	testStatPatterns := map[string]*regexp.Regexp{
-		"t":    regexp.MustCompile(`(?i)(?:^|\s)t\s*[=:]\s*([-\d.]+)`),
-		"F":    regexp.MustCompile(`(?i)(?:^|\s)F\s*[=:]\s*([\d.]+)`),
-		"chi2": regexp.MustCompile(`(?i)chi2?\s*[=:]\s*([\d.]+)`),
-		"z":    regexp.MustCompile(`(?i)(?:^|\s)z\s*[=:]\s*([-\d.]+)`),
-		"r":    regexp.MustCompile(`(?i)(?:^|\s)r\s*[=:]\s*([-\d.]+)`),
-		"U":    regexp.MustCompile(`(?i)(?:^|\s)U\s*[=:]\s*([\d.]+)`),
-		"H":    regexp.MustCompile(`(?i)(?:^|\s)H\s*[=:]\s*([\d.]+)`),
-	}
+    testStatPatterns := map[string]*regexp.Regexp{
+        "t":    regexp.MustCompile(`(?i)(?:^|\s)t\s*[=:]\s*([-\d.]+)`),
+        "F":    regexp.MustCompile(`(?i)(?:^|\s)F\s*[=:]\s*([\d.]+)`),
+        "chi2": regexp.MustCompile(`(?i)chi2?\s*[=:]\s*([\d.]+)`),
+        "z":    regexp.MustCompile(`(?i)(?:^|\s)z\s*[=:]\s*([-\d.]+)`),
+        "r":    regexp.MustCompile(`(?i)(?:^|\s)r\s*[=:]\s*([-\d.]+)`),
+        "U":    regexp.MustCompile(`(?i)(?:^|\s)U\s*[=:]\s*([\d.]+)`),
+        "H":    regexp.MustCompile(`(?i)(?:^|\s)H\s*[=:]\s*([\d.]+)`),
+        "W":    regexp.MustCompile(`(?i)(?:^|\s)W\s*[=:]\s*([\d.]+)`),
+    }
 
 	for key, re := range testStatPatterns {
 		if matches := re.FindStringSubmatch(result); len(matches) > 1 {

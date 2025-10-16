@@ -17,11 +17,7 @@ import (
 )
 
 const (
-	EOM_TOKEN                        = "<|EOM|>"
-	defaultExecutorCooldown          = 5 * time.Second
-	defaultDialTimeout               = 3 * time.Second
-	defaultIOTimeout                 = 60 * time.Second
-	defaultMaxConnectionsPerExecutor = 4
+    EOM_TOKEN = "<|EOM|>"
 )
 
 type executorNode struct {
@@ -228,26 +224,14 @@ func NewStatefulPythonTool(ctx context.Context, cfg *config.Config, logger *zap.
 		return nil, errors.New("config is required")
 	}
 	addresses := cfg.PythonExecutorAddresses
-	cooldown := cfg.PythonExecutorCooldownSeconds
-	if cooldown <= 0 {
-		cooldown = defaultExecutorCooldown
-	}
+    cooldown := cfg.PythonExecutorCooldownSeconds
 	pool, err := newExecutorPool(addresses, cooldown)
 	if err != nil {
 		return nil, err
 	}
-	dialTimeout := cfg.PythonExecutorDialTimeoutSeconds
-	if dialTimeout <= 0 {
-		dialTimeout = defaultDialTimeout
-	}
-	ioTimeout := cfg.PythonExecutorIOTimeoutSeconds
-	if ioTimeout <= 0 {
-		ioTimeout = defaultIOTimeout
-	}
-	maxConnections := cfg.PythonExecutorMaxConnections
-	if maxConnections <= 0 {
-		maxConnections = defaultMaxConnectionsPerExecutor
-	}
+    dialTimeout := cfg.PythonExecutorDialTimeoutSeconds
+    ioTimeout := cfg.PythonExecutorIOTimeoutSeconds
+    maxConnections := cfg.PythonExecutorMaxConnections
 	tool := &StatefulPythonTool{
 		pool:                      pool,
 		logger:                    logger,
@@ -561,4 +545,3 @@ func extractMarkdownCode(text string) string {
 	code := text[codeStart : codeStart+endIdx]
 	return strings.TrimSpace(code)
 }
-

@@ -1,12 +1,13 @@
 package rag
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"regexp"
-	"strconv"
-	"strings"
+    "context"
+    "encoding/json"
+    "fmt"
+    "regexp"
+    "strconv"
+    "strings"
+    "time"
 
 	"stats-agent/web/format"
 	"stats-agent/web/types"
@@ -102,6 +103,11 @@ func (r *RAG) prepareDocumentForMessage(
 		processed[index+1] = true
 		metadata["role"] = "fact"
 
+		// Capture tool content hash for downstream state ingestion
+		if toolMessage.ContentHash != "" {
+			metadata["tool_content_hash"] = toolMessage.ContentHash
+		}
+
 		assistantContent := canonicalizeFactText(message.Content)
 		toolContent := canonicalizeFactText(toolMessage.Content)
 
@@ -172,6 +178,13 @@ func (r *RAG) prepareDocumentForMessage(
 			} else {
 				contentToEmbed = strings.TrimSpace(summary)
 			}
+
+			// Attempt State Card ingestion (evidence-only, validated) using assistant+tool pair
+			func() {
+				ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
+				defer cancel()
+				r.ingestStateCard(ctx2, sessionID, metadata, code, result)
+			}()
 		} else {
 			contentToEmbed = "An assistant action with a tool execution occurred."
 		}
@@ -313,10 +326,7 @@ func (r *RAG) persistPreparedDocument(ctx context.Context, data *ragDocumentData
 			zap.String("document_id", data.Metadata["document_id"]))
 	}
 
-	tokenLimit := r.embeddingTokenTarget
-	if tokenLimit <= 0 {
-		tokenLimit = 480
-	}
+    tokenLimit := r.embeddingTokenTarget
 
 	role := structuralMetadata["role"]
 
@@ -401,16 +411,10 @@ func (r *RAG) persistConversationChunks(ctx context.Context, baseMetadata map[st
 	chunkIndex := 0
 
 	// Use conversation chunk size from config (1500 tokens by default)
-	chunkSize := r.cfg.ConversationChunkSize
-	if chunkSize <= 0 {
-		chunkSize = 1500 // Default if not configured
-	}
+    chunkSize := r.cfg.ConversationChunkSize
 
 	// Get overlap ratio from config (20% by default)
-	overlapRatio := r.cfg.ConversationChunkOverlap
-	if overlapRatio <= 0 {
-		overlapRatio = 0.20
-	}
+    overlapRatio := r.cfg.ConversationChunkOverlap
 
 	// Calculate overlap target in tokens
 	targetOverlapTokens := int(float64(chunkSize) * overlapRatio) // ~300 tokens for 1500 @ 20%
@@ -595,10 +599,7 @@ func (r *RAG) persistDocumentChunks(ctx context.Context, baseMetadata map[string
 	chunkIndex := 0
 
 	// Use document chunk size from config (3500 tokens by default)
-	chunkSize := r.cfg.DocumentChunkSize
-	if chunkSize <= 0 {
-		chunkSize = 3500 // Default if not configured
-	}
+    chunkSize := r.cfg.DocumentChunkSize
 
 	// Word-based chunking: split by whitespace
 	words := strings.Fields(content)

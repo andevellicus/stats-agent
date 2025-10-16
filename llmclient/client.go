@@ -284,18 +284,22 @@ func (c *Client) ChatStream(ctx context.Context, host string, messages []types.A
 }
 
 func (c *Client) backoffSleep(attempt int) {
-	// exponential backoff with jitter (±10%)
-	base := c.cfg.RetryDelaySeconds
-	if base <= 0 {
-		base = 1 * time.Second
-	}
-	d := base * time.Duration(1<<attempt)
-	// cap to avoid excessively long waits
-	if d > 30*time.Second {
-		d = 30 * time.Second
-	}
-	jitter := time.Duration(float64(d) * 0.1)
-	time.Sleep(d - jitter + time.Duration(time.Now().UnixNano()%int64(2*jitter+1)))
+    // Exponential backoff with configurable jitter and cap
+    base := c.cfg.RetryDelaySeconds
+    if base <= 0 {
+        base = time.Second // config normalization should prevent this
+    }
+    d := base * time.Duration(1<<attempt)
+    maxWait := c.cfg.LLMBackoffMaxSeconds
+    if maxWait > 0 && d > maxWait {
+        d = maxWait
+    }
+    jitterRatio := c.cfg.LLMBackoffJitterRatio
+    if jitterRatio < 0 || jitterRatio > 1 {
+        jitterRatio = 0.1
+    }
+    jitter := time.Duration(float64(d) * jitterRatio)
+    time.Sleep(d - jitter + time.Duration(time.Now().UnixNano()%int64(2*jitter+1)))
 }
 
 // Embed generates an embedding vector for the provided document using the

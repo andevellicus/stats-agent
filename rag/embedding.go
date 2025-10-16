@@ -28,10 +28,7 @@ func (r *RAG) ensureEmbeddingTokenLimit(ctx context.Context, content string) str
 		return content
 	}
 
-	targetTokens := r.embeddingTokenTarget
-	if targetTokens <= 0 {
-		targetTokens = 480 // BGE default
-	}
+    targetTokens := r.embeddingTokenTarget
 
 	if tokenCount <= targetTokens {
 		return content
@@ -138,10 +135,7 @@ func (r *RAG) createEmbeddingWindows(ctx context.Context, content string) ([]Emb
 		return nil, nil
 	}
 
-	targetTokens := r.embeddingTokenTarget
-	if targetTokens <= 0 {
-		targetTokens = 480 // BGE default
-	}
+    targetTokens := r.embeddingTokenTarget
 
 	// Check total token count
 	totalTokens, err := r.countTokensForEmbedding(ctx, trimmed)

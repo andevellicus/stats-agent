@@ -232,9 +232,6 @@ func (r *RAG) renderRecordsToMemory(ctx context.Context, records []documentRecor
 }
 
 func extractSimpleMetadata(query string, maxFilters int) map[string]string {
-	if maxFilters <= 0 {
-		maxFilters = 3
-	}
 
 	filters := make(map[string]string)
 	lower := strings.ToLower(query)

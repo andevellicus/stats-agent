@@ -16,11 +16,11 @@ import (
 
 // RAGDocument represents a document in the rag_documents table (content and metadata only).
 type RAGDocument struct {
-	ID          uuid.UUID
-	Content     string
-	Metadata    map[string]string
-	ContentHash string
-	CreatedAt   time.Time
+    ID          uuid.UUID
+    Content     string
+    Metadata    map[string]string
+    ContentHash string
+    CreatedAt   time.Time
 }
 
 // RAGEmbedding represents an embedding window in the rag_embeddings table.
@@ -180,6 +180,85 @@ func (s *PostgresStore) UpsertRAGDocument(ctx context.Context, documentID uuid.U
 	}
 
 	return nil
+}
+
+// FindStateDocument returns the most recent state document for a (sessionID, dataset, stage).
+func (s *PostgresStore) FindStateDocument(ctx context.Context, sessionID, dataset, stage string) (uuid.UUID, string, map[string]string, error) {
+    if sessionID == "" || dataset == "" || stage == "" {
+        return uuid.Nil, "", nil, sql.ErrNoRows
+    }
+    const query = `
+        SELECT id, content, metadata
+        FROM rag_documents
+        WHERE (metadata ->> 'session_id') = $1
+          AND (metadata ->> 'type') = 'state'
+          AND (metadata ->> 'dataset') = $2
+          AND (metadata ->> 'stage') = $3
+        ORDER BY created_at DESC
+        LIMIT 1`
+
+    var (
+        id       uuid.UUID
+        content  string
+        metaJSON []byte
+    )
+    err := s.DB.QueryRowContext(ctx, query, sessionID, dataset, stage).Scan(&id, &content, &metaJSON)
+    if err != nil {
+        return uuid.Nil, "", nil, err
+    }
+    meta := make(map[string]string)
+    if len(metaJSON) > 0 {
+        if err := json.Unmarshal(metaJSON, &meta); err != nil {
+            return uuid.Nil, "", nil, err
+        }
+    }
+    return id, content, meta, nil
+}
+
+// ListStateDocuments lists all state documents for a session ordered by newest first.
+func (s *PostgresStore) ListStateDocuments(ctx context.Context, sessionID string) ([]RAGDocument, error) {
+    const query = `
+        SELECT id, content, metadata, content_hash, created_at
+        FROM rag_documents
+        WHERE (metadata ->> 'session_id') = $1 AND (metadata ->> 'type') = 'state'
+        ORDER BY created_at DESC`
+
+    rows, err := s.DB.QueryContext(ctx, query, sessionID)
+    if err != nil {
+        return nil, err
+    }
+    defer rows.Close()
+
+    var docs []RAGDocument
+    for rows.Next() {
+        var (
+            id         uuid.UUID
+            content    string
+            metaJSON   []byte
+            hash       sql.NullString
+            createdAt  time.Time
+        )
+        if err := rows.Scan(&id, &content, &metaJSON, &hash, &createdAt); err != nil {
+            return nil, err
+        }
+        meta := make(map[string]string)
+        if len(metaJSON) > 0 {
+            if err := json.Unmarshal(metaJSON, &meta); err != nil {
+                return nil, err
+            }
+        }
+        docs = append(docs, RAGDocument{ID: id, Content: content, Metadata: meta, ContentHash: hash.String, CreatedAt: createdAt})
+    }
+    if err := rows.Err(); err != nil {
+        return nil, err
+    }
+    return docs, nil
+}
+
+// DeleteRAGDocument deletes a rag document by id (cascades delete to embeddings via FK).
+func (s *PostgresStore) DeleteRAGDocument(ctx context.Context, id uuid.UUID) error {
+    _, err := s.DB.ExecContext(ctx, `DELETE FROM rag_documents WHERE id = $1`, id)
+    return err
 }
 
 // ListRAGDocuments returns all persisted RAG documents including their embeddings.

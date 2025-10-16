@@ -8,19 +8,23 @@ import (
 
 // ConversationLoop manages the agent's turn loop, error tracking, temperature adjustment, and breaking conditions.
 type ConversationLoop struct {
-	cfg                *config.Config
-	consecutiveErrors  int
-	currentTemperature float64 // Dynamic temperature based on error count
-	logger             *zap.Logger
+	cfg                  *config.Config
+	consecutiveErrors    int
+	currentTemperature   float64        // Dynamic temperature based on error count
+	logger               *zap.Logger
+	actionRetries        map[string]int // Track retries per action signature hash
+	maxRetriesPerAction  int            // Maximum retries allowed per unique action
 }
 
 // NewConversationLoop creates a new conversation loop instance.
 func NewConversationLoop(cfg *config.Config, logger *zap.Logger) *ConversationLoop {
 	return &ConversationLoop{
-		cfg:                cfg,
-		consecutiveErrors:  0,
-		currentTemperature: cfg.BaseTemperature,
-		logger:             logger,
+		cfg:                 cfg,
+		consecutiveErrors:   0,
+		currentTemperature:  cfg.BaseTemperature,
+		logger:              logger,
+		actionRetries:       make(map[string]int),
+		maxRetriesPerAction: 1, // Allow 1 retry per unique action
 	}
 }
 
@@ -51,8 +55,21 @@ func (c *ConversationLoop) GetCurrentTemperature() float64 {
 }
 
 // RecordError increments the consecutive error counter, increases temperature, and logs it.
-func (c *ConversationLoop) RecordError() {
+// Optionally accepts an actionHash to track retries per unique action.
+func (c *ConversationLoop) RecordError(actionHash ...string) {
 	c.consecutiveErrors++
+
+	// Track retries for this specific action if hash provided
+	if len(actionHash) > 0 && actionHash[0] != "" {
+		c.actionRetries[actionHash[0]]++
+
+		if c.actionRetries[actionHash[0]] > c.maxRetriesPerAction {
+			c.logger.Warn("Action exceeded retry budget, should try different approach",
+				zap.String("action_hash", actionHash[0]),
+				zap.Int("attempts", c.actionRetries[actionHash[0]]),
+				zap.Int("max_retries", c.maxRetriesPerAction))
+		}
+	}
 
 	// Calculate new temperature: base + (errors * step), capped at max
 	newTemp := c.cfg.BaseTemperature + (float64(c.consecutiveErrors) * c.cfg.TemperatureStep)
@@ -67,7 +84,8 @@ func (c *ConversationLoop) RecordError() {
 }
 
 // RecordSuccess resets the consecutive error counter and temperature to baseline.
-func (c *ConversationLoop) RecordSuccess() {
+// Optionally accepts an actionHash to clear retry counter for that action.
+func (c *ConversationLoop) RecordSuccess(actionHash ...string) {
 	if c.consecutiveErrors > 0 {
 		c.logger.Debug("Resetting consecutive error count and temperature after successful execution",
 			zap.Int("previous_errors", c.consecutiveErrors),
@@ -75,6 +93,11 @@ func (c *ConversationLoop) RecordSuccess() {
 			zap.Float64("reset_to", c.cfg.BaseTemperature))
 		c.consecutiveErrors = 0
 		c.currentTemperature = c.cfg.BaseTemperature
+	}
+
+	// Clear retry counter for this action on success
+	if len(actionHash) > 0 && actionHash[0] != "" {
+		delete(c.actionRetries, actionHash[0])
 	}
 }
 

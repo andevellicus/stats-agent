@@ -46,41 +46,43 @@ func buildMetadataContext(metadata map[string]string) string {
 	return "Extracted metadata:\n" + strings.Join(parts, "\n")
 }
 
-func (r *RAG) SummarizeLongTermMemory(ctx context.Context, context, latestUserMessage string) (string, error) {
-	latestUserMessage = strings.TrimSpace(latestUserMessage)
+// SummarizeState produces a concise memory block from retrieved state content.
+// It replaces the previous "long-term context" terminology with "state".
+func (r *RAG) SummarizeState(ctx context.Context, state, latestUserMessage string) (string, error) {
+    latestUserMessage = strings.TrimSpace(latestUserMessage)
 
-	systemPrompt := prompts.SummarizeMemory()
+    systemPrompt := prompts.SummarizeMemory()
 
-	if latestUserMessage == "" {
-		latestUserMessage = "(no specific question provided)"
-	}
+    if latestUserMessage == "" {
+        latestUserMessage = "(no specific question provided)"
+    }
 
-	userPrompt := fmt.Sprintf(`User's current question:
+    userPrompt := fmt.Sprintf(`User's current question:
 "%s"
 
-Conversation history to extract from:
+State to extract from:
 %s
 
-Extract relevant facts following the rules and examples above:`, latestUserMessage, context)
+Extract relevant facts following the rules and examples above:`, latestUserMessage, state)
 
-	messages := []types.AgentMessage{
-		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: userPrompt},
-	}
+    messages := []types.AgentMessage{
+        {Role: "system", Content: systemPrompt},
+        {Role: "user", Content: userPrompt},
+    }
 
-	// Non-streaming summarization (use server default temperature)
-	summary, err := llmclient.New(r.cfg, r.logger).Chat(ctx, r.cfg.SummarizationLLMHost, messages, nil)
-	if err != nil {
-		return "", fmt.Errorf("llm chat call failed for memory summary: %w", err)
-	}
+    // Non-streaming summarization (use server default temperature)
+    summary, err := llmclient.New(r.cfg, r.logger).Chat(ctx, r.cfg.SummarizationLLMHost, messages, nil)
+    if err != nil {
+        return "", fmt.Errorf("llm chat call failed for state summary: %w", err)
+    }
 
-	summary = strings.TrimSpace(summary)
-	if summary == "" {
-		return "", fmt.Errorf("llm returned an empty summary for memory")
-	}
+    summary = strings.TrimSpace(summary)
+    if summary == "" {
+        return "", fmt.Errorf("llm returned an empty summary for state")
+    }
 
-	// Wrap the summary in memory tags
-	return fmt.Sprintf("<memory>\n%s\n</memory>", summary), nil
+    // Wrap the summary in memory tags
+    return fmt.Sprintf("<memory>\n%s\n</memory>", summary), nil
 }
 
 func (r *RAG) generateFactSummary(ctx context.Context, code, result string, metadata map[string]string) (string, error) {

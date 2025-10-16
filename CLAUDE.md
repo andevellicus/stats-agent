@@ -97,7 +97,7 @@ The codebase follows a **layered error handling strategy** where each architectu
 - **Logging**:
   - `logger.Error()` + break loop for unrecoverable failures
   - `logger.Warn()` for degraded mode, continue execution
-- **Example**: RAG query failure logs warning but agent continues without long-term context
+- **Example**: RAG query failure logs warning but agent continues without state
 - **Rationale**: Maximize availability - graceful degradation is better than failure
 
 ### 4. Service Layer (web/services/)
@@ -130,9 +130,9 @@ func (s *PostgresStore) GetSession(id uuid.UUID) error {
 
 // Business layer - log and handle gracefully
 func (a *Agent) Run(ctx context.Context, input string) {
-    longTermContext, err := a.rag.Query(ctx, input)
+    state, err := a.rag.Query(ctx, input)
     if err != nil {
-        a.logger.Warn("RAG unavailable, continuing without long-term context",
+        a.logger.Warn("RAG unavailable, continuing without state",
             zap.Error(err))
         // Continue execution with empty context
     }
@@ -411,10 +411,10 @@ To see debug logs (including LLM responses), set `LOG_LEVEL: debug` in `config.y
 ## Agent Execution Flow
 
 1. User input is appended to message history
-2. RAG query retrieves relevant long-term context (top 3 results by default)
+2. RAG query retrieves relevant state (top 3 results by default)
 3. Agent enters turn loop (max 30 turns):
    - Check consecutive error count (break if ≥5)
-   - Prepend long-term context to current history
+   - Prepend state to current history
    - Stream LLM response chunk-by-chunk
    - If response contains markdown code blocks (` ```python ... ``` `), extract and execute code
    - Append execution results as "tool" message

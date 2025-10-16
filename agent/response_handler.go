@@ -22,21 +22,36 @@ func NewResponseHandler(cfg *config.Config, logger *zap.Logger) *ResponseHandler
 	}
 }
 
-// BuildMessagesForLLM combines long-term context with current history for LLM input.
-// If longTermContext is not empty, it's prepended as a system message.
-func (r *ResponseHandler) BuildMessagesForLLM(longTermContext string, history []types.AgentMessage) []types.AgentMessage {
-	var messagesForLLM []types.AgentMessage
+// BuildMessagesForLLM combines retrieved state with current history for LLM input.
+// If state is not empty, it's prepended as a system message.
+func (r *ResponseHandler) BuildMessagesForLLM(state string, history []types.AgentMessage) []types.AgentMessage {
+    var messagesForLLM []types.AgentMessage
 
-	if longTermContext != "" {
-		messagesForLLM = append(messagesForLLM, types.AgentMessage{
-			Role:    "system",
-			Content: longTermContext,
-		})
-	}
+    if state != "" {
+        messagesForLLM = append(messagesForLLM, types.AgentMessage{
+            Role:    "system",
+            Content: state,
+        })
+    }
 
 	messagesForLLM = append(messagesForLLM, history...)
 
 	return messagesForLLM
+}
+
+// BuildMessagesForLLMWithEvidence prepends retrieved state and an optional
+// ephemeral evidence block (not persisted) before appending history.
+func (r *ResponseHandler) BuildMessagesForLLMWithEvidence(state, evidence string, history []types.AgentMessage) []types.AgentMessage {
+    var messagesForLLM []types.AgentMessage
+
+    if state != "" {
+        messagesForLLM = append(messagesForLLM, types.AgentMessage{Role: "system", Content: state})
+    }
+    if strings.TrimSpace(evidence) != "" {
+        messagesForLLM = append(messagesForLLM, types.AgentMessage{Role: "system", Content: evidence})
+    }
+    messagesForLLM = append(messagesForLLM, history...)
+    return messagesForLLM
 }
 
 // CollectStreamedResponse reads chunks from a streaming response channel and builds

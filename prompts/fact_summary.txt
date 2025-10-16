@@ -11,6 +11,13 @@ RULES:
 6. For errors, state what failed and why
 7. **CRITICALLY IMPORTANT**: END your entire response with metadata tags in square brackets on the same line as the last sentence
 
+STRICT CONSTRAINTS:
+- Use exact dataset and column names as they appear in the code/output. Do not rename keys (e.g., do not change "SDH Side" to "SDH_Side").
+- Cite only numbers that appear verbatim in the tool output (e.g., p=0.032, W=0.982). Do not invent or round beyond what is shown.
+- If n/sample size is not present in the output, do not assume or fabricate it.
+- Do not propose re-running base checks (listing columns, printing head, or global missingness) if they are already shown; summarize the analysis action and result.
+- If the output only lists columns/missingness, state briefly that base checks are complete and suggest the next test in one sentence (e.g., chi-square Failure vs Gender with Cramér's V).
+
 METADATA TAGS FORMAT:
 **Your response MUST end with metadata tags in square brackets: [key1:value1 | key2:value2 | ...]**
 

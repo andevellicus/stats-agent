@@ -52,12 +52,8 @@ func (r *RAG) AddPDFPagesToRAG(ctx context.Context, sessionID, filename string, 
 		// Filter metadata for JSONB storage
 		structuralMetadata := filterStructuralMetadata(metadata)
 
-		// Check if we need to chunk this page based on token count
-		// Use document chunk size (3500 tokens by default)
-		chunkSize := r.cfg.DocumentChunkSize
-		if chunkSize <= 0 {
-			chunkSize = 3500
-		}
+        // Check if we need to chunk this page based on token count (uses configured DocumentChunkSize)
+        chunkSize := r.cfg.DocumentChunkSize
 
 		pageTokens, err := r.countTokensForEmbedding(ctx, fullContent)
 		if err != nil {

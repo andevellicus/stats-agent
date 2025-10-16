@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	defaultContextSoftLimitRatio            = 0.75
+    defaultContextSoftLimitRatio            = 0.75
 	defaultBaseTemperature                  = 0.15
 	defaultMaxTemperature                   = 0.5
 	defaultTemperatureStep                  = 0.1
@@ -28,6 +28,7 @@ const (
 	defaultHybridBM25Weight                 = 0.3
 	defaultHybridFactBoost                  = 1.3
 	defaultHybridSummaryBoost               = 1.2
+	defaultHybridStateBoost                 = 1.4
 	defaultHybridErrorPenalty               = 0.8
 	defaultPDFTokenThreshold                = 0.75
 	defaultPDFFirstPagesPriority            = 3
@@ -40,9 +41,23 @@ const (
     defaultPDFHeaderFooterRepeatThreshold   = 0.6
     defaultPDFReferencesTrimEnabled         = true
     defaultPDFReferencesCitationDensity     = 0.5
+    // Retrieval defaults
+    defaultRAGResults                      = 3
     // Document mode defaults
     defaultDocumentModeEnabled              = true
     defaultDocumentModeRAGResults           = 5
+    defaultWebPort                          = 8080
+    // LLM backoff defaults
+    defaultRetryDelaySeconds                = 2 * time.Second
+    defaultLLMBackoffMaxSeconds             = 30 * time.Second
+    defaultLLMBackoffJitterRatio            = 0.10
+    // Chunking defaults
+    defaultConversationChunkSize            = 1500
+    defaultConversationChunkOverlap         = 0.20
+    defaultDocumentChunkSize                = 3500
+    defaultDocumentChunkOverlap             = 0.0
+    // Completion headroom for assistant response
+    defaultResponseTokenBudget              = 512
 )
 
 // Config holds the application's configuration
@@ -60,7 +75,9 @@ type Config struct {
 	ContextLength                    int           `mapstructure:"CONTEXT_LENGTH"`
 	ContextSoftLimitRatio            float64       `mapstructure:"CONTEXT_SOFT_LIMIT_RATIO"`
 	MaxRetries                       int           `mapstructure:"MAX_RETRIES"`
-	RetryDelaySeconds                time.Duration `mapstructure:"RETRY_DELAY_SECONDS"`
+    RetryDelaySeconds                time.Duration `mapstructure:"RETRY_DELAY_SECONDS"`
+    LLMBackoffMaxSeconds             time.Duration `mapstructure:"LLM_BACKOFF_MAX_SECONDS"`
+    LLMBackoffJitterRatio            float64       `mapstructure:"LLM_BACKOFF_JITTER_RATIO"`
 	ConsecutiveErrors                int           `mapstructure:"CONSECUTIVE_ERRORS"`
 	LLMRequestTimeout                time.Duration `mapstructure:"LLM_REQUEST_TIMEOUT"`
 	BaseTemperature                  float64       `mapstructure:"BASE_TEMPERATURE"`
@@ -93,6 +110,7 @@ type Config struct {
 	HybridBM25Weight                 float64       `mapstructure:"HYBRID_BM25_WEIGHT"`
 	HybridFactBoost                  float64       `mapstructure:"HYBRID_FACT_BOOST"`
 	HybridSummaryBoost               float64       `mapstructure:"HYBRID_SUMMARY_BOOST"`
+	HybridStateBoost                 float64       `mapstructure:"HYBRID_STATE_BOOST"`
 	HybridErrorPenalty               float64       `mapstructure:"HYBRID_ERROR_PENALTY"`
 	PDFTokenThreshold                float64       `mapstructure:"PDF_TOKEN_THRESHOLD"`
 	PDFFirstPagesPriority            int           `mapstructure:"PDF_FIRST_PAGES_PRIORITY"`
@@ -117,6 +135,7 @@ type Config struct {
     // Document mode configuration
     DocumentModeEnabled              bool          `mapstructure:"DOCUMENT_MODE_ENABLED"`
     DocumentModeRAGResults           int           `mapstructure:"DOCUMENT_MODE_RAG_RESULTS"`
+    ResponseTokenBudget              int           `mapstructure:"RESPONSE_TOKEN_BUDGET"`
 }
 
 func Load(logger *zap.Logger) *Config {
@@ -138,8 +157,10 @@ func Load(logger *zap.Logger) *Config {
 	viper.SetDefault("SUMMARIZATION_LLM_HOST", "http://localhost:8082")
 	viper.SetDefault("CONTEXT_LENGTH", 4096)
 	viper.SetDefault("CONTEXT_SOFT_LIMIT_RATIO", defaultContextSoftLimitRatio)
-	viper.SetDefault("MAX_RETRIES", 5)
-	viper.SetDefault("RETRY_DELAY_SECONDS", 2)
+    viper.SetDefault("MAX_RETRIES", 5)
+    viper.SetDefault("RETRY_DELAY_SECONDS", 2)
+    viper.SetDefault("LLM_BACKOFF_MAX_SECONDS", 30)
+    viper.SetDefault("LLM_BACKOFF_JITTER_RATIO", defaultLLMBackoffJitterRatio)
 	viper.SetDefault("CONSECUTIVE_ERRORS", 3)
 	viper.SetDefault("LLM_REQUEST_TIMEOUT", 300)
 	viper.SetDefault("BASE_TEMPERATURE", defaultBaseTemperature)
@@ -163,16 +184,17 @@ func Load(logger *zap.Logger) *Config {
     viper.SetDefault("EMBEDDING_TOKEN_SOFT_LIMIT", 450)
     viper.SetDefault("EMBEDDING_TOKEN_TARGET", 400)
     viper.SetDefault("MIN_TOKEN_CHECK_CHAR_THRESHOLD", 100)
-	viper.SetDefault("MAX_HYBRID_CANDIDATES", 100)
+    viper.SetDefault("MAX_HYBRID_CANDIDATES", 100)
 	viper.SetDefault("HYBRID_SEMANTIC_WEIGHT", defaultHybridSemanticWeight)
 	viper.SetDefault("HYBRID_BM25_WEIGHT", defaultHybridBM25Weight)
 	viper.SetDefault("HYBRID_FACT_BOOST", defaultHybridFactBoost)
 	viper.SetDefault("HYBRID_SUMMARY_BOOST", defaultHybridSummaryBoost)
+	viper.SetDefault("HYBRID_STATE_BOOST", defaultHybridStateBoost)
 	viper.SetDefault("HYBRID_ERROR_PENALTY", defaultHybridErrorPenalty)
-	viper.SetDefault("CONVERSATION_CHUNK_SIZE", 1500)
-	viper.SetDefault("CONVERSATION_CHUNK_OVERLAP", 0.20)
-	viper.SetDefault("DOCUMENT_CHUNK_SIZE", 3500)
-	viper.SetDefault("DOCUMENT_CHUNK_OVERLAP", 0.0)
+    viper.SetDefault("CONVERSATION_CHUNK_SIZE", defaultConversationChunkSize)
+    viper.SetDefault("CONVERSATION_CHUNK_OVERLAP", defaultConversationChunkOverlap)
+    viper.SetDefault("DOCUMENT_CHUNK_SIZE", defaultDocumentChunkSize)
+    viper.SetDefault("DOCUMENT_CHUNK_OVERLAP", defaultDocumentChunkOverlap)
 	viper.SetDefault("PDF_TOKEN_THRESHOLD", defaultPDFTokenThreshold)
 	viper.SetDefault("PDF_FIRST_PAGES_PRIORITY", defaultPDFFirstPagesPriority)
 	viper.SetDefault("PDF_ENABLE_TABLE_DETECTION", defaultPDFEnableTableDetection)
@@ -193,9 +215,11 @@ func Load(logger *zap.Logger) *Config {
     viper.SetDefault("PDF_HEADER_FOOTER_REPEAT_THRESHOLD", defaultPDFHeaderFooterRepeatThreshold)
     viper.SetDefault("PDF_REFERENCES_TRIM_ENABLED", defaultPDFReferencesTrimEnabled)
     viper.SetDefault("PDF_REFERENCES_CITATION_DENSITY", defaultPDFReferencesCitationDensity)
-    // Document mode defaults
+    // Retrieval + Document mode defaults
+    viper.SetDefault("RAG_RESULTS", defaultRAGResults)
     viper.SetDefault("DOCUMENT_MODE_ENABLED", defaultDocumentModeEnabled)
     viper.SetDefault("DOCUMENT_MODE_RAG_RESULTS", defaultDocumentModeRAGResults)
+    viper.SetDefault("RESPONSE_TOKEN_BUDGET", defaultResponseTokenBudget)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if logger != nil {
@@ -246,7 +270,8 @@ func Load(logger *zap.Logger) *Config {
 	}
 
 	// Convert seconds/hours to proper time.Duration
-	config.RetryDelaySeconds = config.RetryDelaySeconds * time.Second
+    config.RetryDelaySeconds = config.RetryDelaySeconds * time.Second
+    config.LLMBackoffMaxSeconds = config.LLMBackoffMaxSeconds * time.Second
 	config.LLMRequestTimeout = config.LLMRequestTimeout * time.Second
 	config.CleanupInterval = config.CleanupInterval * time.Hour
 	config.SessionRetentionAge = config.SessionRetentionAge * time.Hour
@@ -254,9 +279,18 @@ func Load(logger *zap.Logger) *Config {
 	config.PythonExecutorDialTimeoutSeconds = config.PythonExecutorDialTimeoutSeconds * time.Second
 	config.PythonExecutorIOTimeoutSeconds = config.PythonExecutorIOTimeoutSeconds * time.Second
 
-	if config.PythonExecutorCooldownSeconds <= 0 {
-		config.PythonExecutorCooldownSeconds = defaultPythonExecutorCooldownSeconds
-	}
+    if config.PythonExecutorCooldownSeconds <= 0 {
+        config.PythonExecutorCooldownSeconds = defaultPythonExecutorCooldownSeconds
+    }
+    if config.RetryDelaySeconds <= 0 {
+        config.RetryDelaySeconds = defaultRetryDelaySeconds
+    }
+    if config.LLMBackoffMaxSeconds <= 0 {
+        config.LLMBackoffMaxSeconds = defaultLLMBackoffMaxSeconds
+    }
+    if config.LLMBackoffJitterRatio < 0 || config.LLMBackoffJitterRatio > 1 {
+        config.LLMBackoffJitterRatio = defaultLLMBackoffJitterRatio
+    }
 	if config.PythonExecutorDialTimeoutSeconds <= 0 {
 		config.PythonExecutorDialTimeoutSeconds = defaultPythonExecutorDialTimeoutSeconds
 	}
@@ -297,6 +331,9 @@ func Load(logger *zap.Logger) *Config {
 	if config.HybridSummaryBoost <= 0 {
 		config.HybridSummaryBoost = defaultHybridSummaryBoost
 	}
+	if config.HybridStateBoost <= 0 {
+		config.HybridStateBoost = defaultHybridStateBoost
+	}
 	if config.HybridErrorPenalty <= 0 || config.HybridErrorPenalty >= 1 {
 		config.HybridErrorPenalty = defaultHybridErrorPenalty
 	}
@@ -308,26 +345,42 @@ func Load(logger *zap.Logger) *Config {
 		}
 		config.PDFTokenThreshold = defaultPDFTokenThreshold
 	}
-	if config.PDFFirstPagesPriority < 0 {
-		config.PDFFirstPagesPriority = defaultPDFFirstPagesPriority
-	}
-	if config.WebPort <= 0 || config.WebPort > 65535 {
-		if logger != nil {
-			logger.Warn("Invalid web port; using default",
-				zap.Int("port", config.WebPort),
-				zap.Int("default", 8080))
-		}
-		config.WebPort = 8080
-	}
+    if config.PDFFirstPagesPriority < 0 {
+        config.PDFFirstPagesPriority = defaultPDFFirstPagesPriority
+    }
+    // Ensure chunking defaults are valid
+    if config.ConversationChunkSize <= 0 {
+        config.ConversationChunkSize = defaultConversationChunkSize
+    }
+    if config.ConversationChunkOverlap <= 0 {
+        config.ConversationChunkOverlap = defaultConversationChunkOverlap
+    }
+    if config.DocumentChunkSize <= 0 {
+        config.DocumentChunkSize = defaultDocumentChunkSize
+    }
+    if config.DocumentChunkOverlap < 0 { // allow 0.0
+        config.DocumentChunkOverlap = defaultDocumentChunkOverlap
+    }
+    if config.WebPort <= 0 || config.WebPort > 65535 {
+        if logger != nil {
+            logger.Warn("Invalid web port; using default",
+                zap.Int("port", config.WebPort),
+                zap.Int("default", defaultWebPort))
+        }
+        config.WebPort = defaultWebPort
+    }
+    if config.ResponseTokenBudget <= 0 {
+        config.ResponseTokenBudget = defaultResponseTokenBudget
+    }
 
 	return &config
 }
 
 // ContextSoftLimitTokens returns the token count threshold that triggers memory compression.
 func (c *Config) ContextSoftLimitTokens() int {
-	ratio := c.ContextSoftLimitRatio
-	if ratio <= 0 || ratio >= 1 {
-		ratio = defaultContextSoftLimitRatio
-	}
-	return int(float64(c.ContextLength) * ratio)
+    ratio := c.ContextSoftLimitRatio
+    if ratio <= 0 || ratio >= 1 {
+        ratio = defaultContextSoftLimitRatio
+    }
+    return int(float64(c.ContextLength) * ratio)
 }
