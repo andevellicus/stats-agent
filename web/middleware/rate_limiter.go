@@ -181,7 +181,18 @@ func RateLimitMiddleware(limiter *SessionRateLimiter, limitType string) gin.Hand
 			return
 		}
 
-		sessionID := sessionIDValue.(uuid.UUID)
+		// SessionMiddleware stores *uuid.UUID in context
+		// For new users without a session yet, use IP address for rate limiting
+		var sessionID uuid.UUID
+		if sessionIDPtr, ok := sessionIDValue.(*uuid.UUID); ok && sessionIDPtr != nil {
+			sessionID = *sessionIDPtr
+		} else {
+			// No session created yet - use IP address for rate limiting
+			// This prevents abuse while allowing legitimate first-time users
+			clientIP := c.ClientIP()
+			// Create a deterministic UUID from IP for rate limiting purposes
+			sessionID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("ip:"+clientIP))
+		}
 		var allowed bool
 		var remaining, limit int
 		actualLimitType := limitType

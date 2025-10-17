@@ -124,9 +124,14 @@ func (h *ChatHandler) DeleteSession(c *gin.Context) {
 
 	// Check if this was the current session
 	currentSessionID, exists := c.Get("sessionID")
-	if exists && currentSessionID.(uuid.UUID) == sessionID {
-		// Deleting the current session - clear cookie and redirect to create new session
-		middleware.SetSecureCookie(c, middleware.SessionCookieName, "", -1)
+	if exists && currentSessionID != nil {
+		// SessionMiddleware stores *uuid.UUID in context
+		if currentSessionIDPtr, ok := currentSessionID.(*uuid.UUID); ok && currentSessionIDPtr != nil {
+			if *currentSessionIDPtr == sessionID {
+				// Deleting the current session - clear cookie and redirect to create new session
+				middleware.SetSecureCookie(c, middleware.SessionCookieName, "", -1)
+			}
+		}
 	}
 
 	// Always redirect to home page to refresh the UI
@@ -240,39 +245,60 @@ func (h *ChatHandler) LoadSession(c *gin.Context) {
 }
 
 func (h *ChatHandler) SendMessage(c *gin.Context) {
+	h.logger.Debug("SendMessage called")
+
 	var req ChatRequest
 	if err := c.ShouldBind(&req); err != nil {
 		h.logger.Error("Failed to bind chat request", zap.Error(err))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 		return
 	}
+	h.logger.Debug("Request bound successfully", zap.String("session_id", req.SessionID), zap.String("message", req.Message))
 
 	if req.Message == "" {
+		h.logger.Error("Empty message received")
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Message cannot be empty"})
 		return
 	}
 
 	sessionID, err := uuid.Parse(req.SessionID)
 	if err != nil {
+		h.logger.Error("Failed to parse session ID", zap.Error(err), zap.String("session_id", req.SessionID))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid session ID"})
 		return
 	}
+	h.logger.Debug("Session ID parsed", zap.String("session_id", sessionID.String()))
 
 	// Check if user and session need to be created
 	userIDPtr, userExists := c.Get("userID")
 	var userUUID *uuid.UUID
 	if userExists && userIDPtr != nil {
 		userUUID = userIDPtr.(*uuid.UUID)
+		if userUUID != nil {
+			h.logger.Debug("Existing user found", zap.String("user_id", userUUID.String()))
+		} else {
+			h.logger.Debug("User pointer is nil")
+		}
+	} else {
+		h.logger.Debug("No user in context", zap.Bool("exists", userExists))
 	}
 
 	sessionIDPtr, sessionExists := c.Get("sessionID")
 	var persistedSessionID *uuid.UUID
 	if sessionExists && sessionIDPtr != nil {
 		persistedSessionID = sessionIDPtr.(*uuid.UUID)
+		if persistedSessionID != nil {
+			h.logger.Debug("Existing session found", zap.String("session_id", persistedSessionID.String()))
+		} else {
+			h.logger.Debug("Session pointer is nil")
+		}
+	} else {
+		h.logger.Debug("No session in context", zap.Bool("exists", sessionExists))
 	}
 
 	// Create user if doesn't exist
 	if userUUID == nil {
+		h.logger.Debug("Creating new user")
 		var creationErr error
 		newUserID, creationErr := h.store.CreateUser(c.Request.Context())
 		if creationErr != nil {
@@ -285,10 +311,21 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 		userUUID = &newUserID
 		middleware.SetSecureCookie(c, middleware.UserCookieName, newUserID.String(), middleware.CookieMaxAge)
 		h.logger.Info("User created on first message", zap.String("user_id", newUserID.String()))
+	} else {
+		h.logger.Debug("User already exists, skipping creation")
 	}
 
 	// Create session if doesn't exist (or placeholder needs to be persisted)
-	if persistedSessionID == nil || *persistedSessionID != sessionID {
+	sessionNeedsCreation := true
+	if persistedSessionID != nil && *persistedSessionID == sessionID {
+		sessionNeedsCreation = false
+	}
+	h.logger.Debug("Session needs creation check",
+		zap.Bool("needs_creation", sessionNeedsCreation),
+		zap.Bool("persisted_is_nil", persistedSessionID == nil))
+
+	if sessionNeedsCreation {
+		h.logger.Debug("Creating new session", zap.String("user_id", userUUID.String()))
 		var creationErr error
 		newSessionID, creationErr := h.store.CreateSession(c.Request.Context(), userUUID)
 		if creationErr != nil {
@@ -298,8 +335,13 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not create session"})
 			return
 		}
+		h.logger.Debug("Session created successfully", zap.String("new_session_id", newSessionID.String()), zap.String("requested_session_id", sessionID.String()))
+
 		// If the frontend sent a placeholder ID, update the reference
 		if sessionID != newSessionID {
+			h.logger.Debug("Updating session ID from placeholder to persisted",
+				zap.String("placeholder", sessionID.String()),
+				zap.String("persisted", newSessionID.String()))
 			sessionID = newSessionID
 			req.SessionID = newSessionID.String()
 		}
@@ -315,6 +357,8 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 				zap.String("session_id", newSessionID.String()))
 			// Don't fail the entire request, workspace creation is less critical
 		}
+	} else {
+		h.logger.Debug("Session already exists, skipping creation")
 	}
 
 	// Handle potential file upload using upload service

@@ -13,12 +13,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// buildDeterministicStateID creates a stable UUID for a (sessionID, dataset, stage)
-func buildDeterministicStateID(sessionID, dataset, stage string) uuid.UUID {
-	basis := strings.Join([]string{strings.TrimSpace(sessionID), strings.TrimSpace(dataset), strings.TrimSpace(stage)}, "|")
-	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(basis))
-}
-
 // buildStateSignatureID returns a stable UUID for (session, dataset, stage, filtersKey).
 // Note: This is a signature identifier; for versioning we will create new document IDs per update.
 func buildStateSignatureID(sessionID, dataset, stage, filtersKey string) uuid.UUID {

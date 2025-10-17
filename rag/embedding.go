@@ -31,8 +31,6 @@ const (
 	embeddingShrinkFactorPre = 0.95
 	// embeddingShrinkMinRatio: minimum shrinking ratio to prevent over-aggressive truncation
 	embeddingShrinkMinRatio = 0.1
-	// embeddingProgressiveShrinkAttempts: progressive shrinking factors for handling backend size limits
-	embeddingProgressiveShrinkCount = 4
 )
 
 func (r *RAG) ensureEmbeddingTokenLimit(ctx context.Context, content string) string {

@@ -317,27 +317,19 @@ func (s *PostgresStore) UpdateSessionMode(ctx context.Context, sessionID uuid.UU
 // UpdateSessionUser removed - legacy claiming disabled
 
 func (s *PostgresStore) GetSessions(ctx context.Context, userID *uuid.UUID) ([]types.Session, error) {
-	var query string
-	var rows *sql.Rows
-	var err error
-
-	if userID != nil {
-		query = `
-			SELECT id, user_id, created_at, last_active, workspace_path, title, is_active, COALESCE(mode, 'dataset') as mode
-			FROM sessions
-			WHERE is_active = true AND user_id = $1
-			ORDER BY last_active DESC
-		`
-		rows, err = s.DB.QueryContext(ctx, query, userID)
-	} else {
-		query = `
-			SELECT id, user_id, created_at, last_active, workspace_path, title, is_active, COALESCE(mode, 'dataset') as mode
-			FROM sessions
-			WHERE is_active = true
-			ORDER BY last_active DESC
-		`
-		rows, err = s.DB.QueryContext(ctx, query)
+	// Only return sessions for authenticated users
+	// Return empty list if no user ID is provided (not authenticated)
+	if userID == nil {
+		return []types.Session{}, nil
 	}
+
+	query := `
+		SELECT id, user_id, created_at, last_active, workspace_path, title, is_active, COALESCE(mode, 'dataset') as mode
+		FROM sessions
+		WHERE is_active = true AND user_id = $1
+		ORDER BY last_active DESC
+	`
+	rows, err := s.DB.QueryContext(ctx, query, userID)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to query sessions: %w", err)

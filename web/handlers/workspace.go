@@ -44,7 +44,16 @@ func (h *WorkspaceHandler) ServeFile(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
-	userID := userIDValue.(uuid.UUID)
+
+	// SessionMiddleware stores *uuid.UUID in context
+	var userID uuid.UUID
+	if userIDPtr, ok := userIDValue.(*uuid.UUID); ok && userIDPtr != nil {
+		userID = *userIDPtr
+	} else {
+		h.logger.Error("Invalid user ID in context")
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
 
     // Verify the session exists
     session, err := h.store.GetSessionByID(c.Request.Context(), sessionID)
