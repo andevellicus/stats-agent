@@ -36,7 +36,7 @@ func (a *Agent) RunDocumentMode(ctx context.Context, input string, sessionID str
 	defer ragCancel()
 	// Document mode doesn't use post-query pruning (simpler flow)
 	// Document mode doesn't use action cache (no code execution in this mode)
-	state, err := a.rag.Query(ragCtx, sessionID, input, ragResults, excludeHashes, nil, "")
+	state, err := a.rag.Query(ragCtx, sessionID, input, ragResults, excludeHashes, nil, "", "document")
 	if err != nil {
 		a.logger.Warn("Failed to query RAG for state, continuing without it",
 			zap.Error(err),

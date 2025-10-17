@@ -99,7 +99,7 @@ func (r *RAG) getRelevantContent(ctx context.Context, documentID uuid.UUID, meta
 	return strings.Join(contextParts, " "), nil
 }
 
-func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, nResults int, excludeHashes []string, historyDocIDs []string, doneLedger string) (string, int, error) {
+func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, nResults int, excludeHashes []string, historyDocIDs []string, doneLedger string, mode string) (string, int, error) {
 	if nResults <= 0 {
 		return "", 0, nil
 	}
@@ -301,16 +301,36 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 
 		role := cand.Metadata["role"]
 		docType := cand.Metadata["type"]
+
+		// Select mode-specific boosts based on session mode
+		// Defaults to dataset mode if mode is unspecified
+		var factBoost, summaryBoost, documentBoost float64
+		if mode == "document" {
+			factBoost = r.cfg.HybridDocumentFactBoost
+			summaryBoost = r.cfg.HybridDocumentSummaryBoost
+			documentBoost = r.cfg.HybridDocumentDocumentBoost
+		} else {
+			// Dataset mode (or unspecified - use dataset defaults)
+			factBoost = r.cfg.HybridDatasetFactBoost
+			summaryBoost = r.cfg.HybridDatasetSummaryBoost
+			documentBoost = r.cfg.HybridDatasetDocumentBoost
+		}
+
+		// Apply mode-specific boosts
 		// Only boost conversation facts (not document chunks)
         if role == "fact" && docType != "chunk" && docType != "document_chunk" {
-            combined *= r.cfg.HybridFactBoost
+            combined *= factBoost
         }
         if cand.Metadata["type"] == "summary" {
-            combined *= r.cfg.HybridSummaryBoost
+            combined *= summaryBoost
         }
         if cand.Metadata["type"] == "state" {
             combined *= r.cfg.HybridStateBoost
         }
+		// Apply document boost for PDFs and documents
+		if role == "document" || docType == "pdf" || docType == "document_chunk" {
+			combined *= documentBoost
+		}
 		if cand.Content != "" && strings.Contains(cand.Content, "Error:") && !isQueryForError {
 			combined *= r.cfg.HybridErrorPenalty
 		}

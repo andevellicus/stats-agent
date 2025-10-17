@@ -26,10 +26,15 @@ const (
 	defaultMaxHybridCandidates              = 100
 	defaultHybridSemanticWeight             = 0.7
 	defaultHybridBM25Weight                 = 0.3
-	defaultHybridFactBoost                  = 1.3
-	defaultHybridSummaryBoost               = 1.2
 	defaultHybridStateBoost                 = 1.4
 	defaultHybridErrorPenalty               = 0.8
+	// Mode-specific boost defaults
+	defaultHybridDatasetFactBoost           = 1.3
+	defaultHybridDatasetSummaryBoost        = 1.2
+	defaultHybridDatasetDocumentBoost       = 1.0
+	defaultHybridDocumentFactBoost          = 1.0
+	defaultHybridDocumentSummaryBoost       = 1.5
+	defaultHybridDocumentDocumentBoost      = 1.6
 	defaultPDFTokenThreshold                = 0.75
 	defaultPDFFirstPagesPriority            = 3
 	defaultPDFEnableTableDetection          = true
@@ -108,10 +113,15 @@ type Config struct {
 	MaxHybridCandidates              int           `mapstructure:"MAX_HYBRID_CANDIDATES"`
 	HybridSemanticWeight             float64       `mapstructure:"HYBRID_SEMANTIC_WEIGHT"`
 	HybridBM25Weight                 float64       `mapstructure:"HYBRID_BM25_WEIGHT"`
-	HybridFactBoost                  float64       `mapstructure:"HYBRID_FACT_BOOST"`
-	HybridSummaryBoost               float64       `mapstructure:"HYBRID_SUMMARY_BOOST"`
 	HybridStateBoost                 float64       `mapstructure:"HYBRID_STATE_BOOST"`
 	HybridErrorPenalty               float64       `mapstructure:"HYBRID_ERROR_PENALTY"`
+	// Mode-specific boosts
+	HybridDatasetFactBoost           float64       `mapstructure:"HYBRID_DATASET_FACT_BOOST"`
+	HybridDatasetSummaryBoost        float64       `mapstructure:"HYBRID_DATASET_SUMMARY_BOOST"`
+	HybridDatasetDocumentBoost       float64       `mapstructure:"HYBRID_DATASET_DOCUMENT_BOOST"`
+	HybridDocumentFactBoost          float64       `mapstructure:"HYBRID_DOCUMENT_FACT_BOOST"`
+	HybridDocumentSummaryBoost       float64       `mapstructure:"HYBRID_DOCUMENT_SUMMARY_BOOST"`
+	HybridDocumentDocumentBoost      float64       `mapstructure:"HYBRID_DOCUMENT_DOCUMENT_BOOST"`
 	PDFTokenThreshold                float64       `mapstructure:"PDF_TOKEN_THRESHOLD"`
 	PDFFirstPagesPriority            int           `mapstructure:"PDF_FIRST_PAGES_PRIORITY"`
 	PDFEnableTableDetection          bool          `mapstructure:"PDF_ENABLE_TABLE_DETECTION"`
@@ -187,10 +197,15 @@ func Load(logger *zap.Logger) *Config {
     viper.SetDefault("MAX_HYBRID_CANDIDATES", 100)
 	viper.SetDefault("HYBRID_SEMANTIC_WEIGHT", defaultHybridSemanticWeight)
 	viper.SetDefault("HYBRID_BM25_WEIGHT", defaultHybridBM25Weight)
-	viper.SetDefault("HYBRID_FACT_BOOST", defaultHybridFactBoost)
-	viper.SetDefault("HYBRID_SUMMARY_BOOST", defaultHybridSummaryBoost)
 	viper.SetDefault("HYBRID_STATE_BOOST", defaultHybridStateBoost)
 	viper.SetDefault("HYBRID_ERROR_PENALTY", defaultHybridErrorPenalty)
+	// Mode-specific boost defaults
+	viper.SetDefault("HYBRID_DATASET_FACT_BOOST", defaultHybridDatasetFactBoost)
+	viper.SetDefault("HYBRID_DATASET_SUMMARY_BOOST", defaultHybridDatasetSummaryBoost)
+	viper.SetDefault("HYBRID_DATASET_DOCUMENT_BOOST", defaultHybridDatasetDocumentBoost)
+	viper.SetDefault("HYBRID_DOCUMENT_FACT_BOOST", defaultHybridDocumentFactBoost)
+	viper.SetDefault("HYBRID_DOCUMENT_SUMMARY_BOOST", defaultHybridDocumentSummaryBoost)
+	viper.SetDefault("HYBRID_DOCUMENT_DOCUMENT_BOOST", defaultHybridDocumentDocumentBoost)
     viper.SetDefault("CONVERSATION_CHUNK_SIZE", defaultConversationChunkSize)
     viper.SetDefault("CONVERSATION_CHUNK_OVERLAP", defaultConversationChunkOverlap)
     viper.SetDefault("DOCUMENT_CHUNK_SIZE", defaultDocumentChunkSize)
@@ -325,17 +340,30 @@ func Load(logger *zap.Logger) *Config {
 		config.HybridSemanticWeight = defaultHybridSemanticWeight
 		config.HybridBM25Weight = defaultHybridBM25Weight
 	}
-	if config.HybridFactBoost <= 0 {
-		config.HybridFactBoost = defaultHybridFactBoost
-	}
-	if config.HybridSummaryBoost <= 0 {
-		config.HybridSummaryBoost = defaultHybridSummaryBoost
-	}
 	if config.HybridStateBoost <= 0 {
 		config.HybridStateBoost = defaultHybridStateBoost
 	}
 	if config.HybridErrorPenalty <= 0 || config.HybridErrorPenalty >= 1 {
 		config.HybridErrorPenalty = defaultHybridErrorPenalty
+	}
+	// Mode-specific boost validation
+	if config.HybridDatasetFactBoost <= 0 {
+		config.HybridDatasetFactBoost = defaultHybridDatasetFactBoost
+	}
+	if config.HybridDatasetSummaryBoost <= 0 {
+		config.HybridDatasetSummaryBoost = defaultHybridDatasetSummaryBoost
+	}
+	if config.HybridDatasetDocumentBoost <= 0 {
+		config.HybridDatasetDocumentBoost = defaultHybridDatasetDocumentBoost
+	}
+	if config.HybridDocumentFactBoost <= 0 {
+		config.HybridDocumentFactBoost = defaultHybridDocumentFactBoost
+	}
+	if config.HybridDocumentSummaryBoost <= 0 {
+		config.HybridDocumentSummaryBoost = defaultHybridDocumentSummaryBoost
+	}
+	if config.HybridDocumentDocumentBoost <= 0 {
+		config.HybridDocumentDocumentBoost = defaultHybridDocumentDocumentBoost
 	}
 	if config.PDFTokenThreshold <= 0 || config.PDFTokenThreshold > 1 {
 		if logger != nil {

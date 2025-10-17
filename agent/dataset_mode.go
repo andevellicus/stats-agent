@@ -114,7 +114,7 @@ func (a *Agent) RunDatasetMode(ctx context.Context, input string, sessionID stri
 		// Add timeout to RAG query to avoid hangs
 		ragCtx, ragCancel := context.WithTimeout(ctx, a.cfg.LLMRequestTimeout)
 		defer ragCancel()
-		state, err := a.rag.Query(ragCtx, sessionID, queryText, a.cfg.RAGResults, excludeHashes, historyDocIDs, doneLedger)
+		state, err := a.rag.Query(ragCtx, sessionID, queryText, a.cfg.RAGResults, excludeHashes, historyDocIDs, doneLedger, "dataset")
 		if err != nil {
 			a.logger.Warn("Failed to query RAG for state, continuing without it",
 				zap.Error(err),
