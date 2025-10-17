@@ -25,7 +25,8 @@
         X-Content-Type-Options "nosniff"
         X-Frame-Options "DENY"
         Referrer-Policy "no-referrer-when-downgrade"
-        Content-Security-Policy "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:"
+        # Self-hosted assets only; allow inline style for templ components and Tailwind utilities
+        Content-Security-Policy "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'"
     }
 
     # Fallback for unknown routes
@@ -36,4 +37,3 @@
         }
     }
 }
-

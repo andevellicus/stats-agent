@@ -20,6 +20,30 @@ func getLLMResponse(ctx context.Context, llamaCppHost string, messages []types.A
     systemMessage := types.AgentMessage{Role: "system", Content: buildSystemPrompt()}
     chatMessages := append([]types.AgentMessage{systemMessage}, messages...)
 
+    // Debug trace: summarize roles and sizes to verify payload construction
+    if logger != nil {
+        var users, assistants, systems, tools int
+        for _, m := range chatMessages {
+            switch m.Role {
+            case "user":
+                users++
+            case "assistant":
+                assistants++
+            case "system":
+                systems++
+            case "tool":
+                tools++
+            }
+        }
+        logger.Debug("Sending messages to LLM",
+            zap.Int("total", len(chatMessages)),
+            zap.Int("users", users),
+            zap.Int("assistants", assistants),
+            zap.Int("systems", systems),
+            zap.Int("tools", tools),
+        )
+    }
+
     client := llmclient.New(cfg, logger)
     return client.ChatStream(ctx, llamaCppHost, chatMessages, temperature)
 }
@@ -31,6 +55,29 @@ func getLLMResponseForDocumentMode(ctx context.Context, llamaCppHost string, mes
 
     // Use a slightly higher temperature for document Q&A (more natural language)
     temperature := 0.3
+
+    if logger != nil {
+        var users, assistants, systems, tools int
+        for _, m := range chatMessages {
+            switch m.Role {
+            case "user":
+                users++
+            case "assistant":
+                assistants++
+            case "system":
+                systems++
+            case "tool":
+                tools++
+            }
+        }
+        logger.Debug("Doc mode: sending messages to LLM",
+            zap.Int("total", len(chatMessages)),
+            zap.Int("users", users),
+            zap.Int("assistants", assistants),
+            zap.Int("systems", systems),
+            zap.Int("tools", tools),
+        )
+    }
     client := llmclient.New(cfg, logger)
     return client.ChatStream(ctx, llamaCppHost, chatMessages, &temperature)
 }

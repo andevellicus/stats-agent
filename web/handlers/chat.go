@@ -68,9 +68,9 @@ func NewChatHandler(
 }
 
 func (h *ChatHandler) NewChat(c *gin.Context) {
-	c.Header("Cache-Control", "no-cache, no-store, must-revalidate") // Add this line
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
 	// By setting the cookie's max age to -1, we tell the browser to delete it.
-	c.SetCookie(middleware.SessionCookieName, "", -1, "/", "", false, true)
+	middleware.SetSecureCookie(c, middleware.SessionCookieName, "", -1)
 	// Redirect to the home page. The session middleware will now see no cookie and create a new session.
 	c.Redirect(http.StatusFound, "/")
 }
@@ -127,7 +127,7 @@ func (h *ChatHandler) DeleteSession(c *gin.Context) {
 	currentSessionID, exists := c.Get("sessionID")
 	if exists && currentSessionID.(uuid.UUID) == sessionID {
 		// Deleting the current session - clear cookie and redirect to create new session
-		c.SetCookie(middleware.SessionCookieName, "", -1, "/", "", false, true)
+		middleware.SetSecureCookie(c, middleware.SessionCookieName, "", -1)
 	}
 
 	// Always redirect to home page to refresh the UI
@@ -211,7 +211,7 @@ func (h *ChatHandler) LoadSession(c *gin.Context) {
 			c.String(http.StatusInternalServerError, "Could not create new session")
 			return
 		}
-		c.SetCookie(middleware.SessionCookieName, newSessionID.String(), middleware.CookieMaxAge, "/", "", false, true)
+		middleware.SetSecureCookie(c, middleware.SessionCookieName, newSessionID.String(), middleware.CookieMaxAge)
 		c.Redirect(http.StatusFound, fmt.Sprintf("/chat/%s", newSessionID.String()))
 		return
 	}
@@ -456,7 +456,7 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 		}
 	}
 
-	// Document-ready gating: if user asks a document question but no PDF embeddings exist yet,
+    // Document-ready gating: if user asks a document question but no PDF embeddings exist yet,
 	// return a short assistant response and do not start the agent. Applies only to PDFs.
 	// Check if session has any tracked PDFs
 	files, _ := h.store.GetFilesBySession(ctx, sessionID)
@@ -494,7 +494,41 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 		}
 	}
 
-	// Convert messages to agent history format, excluding the current user message
+    // Dataset-ready gating: if this is the first turn, no dataset files exist yet,
+    // and the user message doesn't look like a stats/data question, reply with a short
+    // nudge and do not start the agent.
+    if len(messages) == 1 {
+        files, _ := h.store.GetFilesBySession(ctx, sessionID)
+        hasDataset := false
+        for _, f := range files {
+            lf := strings.ToLower(f.Filename)
+            if strings.HasSuffix(lf, ".csv") || strings.HasSuffix(lf, ".xlsx") || strings.HasSuffix(lf, ".xls") {
+                hasDataset = true
+                break
+            }
+        }
+        if !hasDataset && !isDatasetQuestion(userMessage.Content) && !isDocumentQuestion(userMessage.Content) {
+            assistantID := uuid.New().String()
+            content := "I’m your statistics partner. Upload a CSV/Excel file or ask a question about your dataset (e.g., ‘Describe columns’, ‘Compute correlation A vs B’, ‘Check normality’). Once a file is present, I’ll load it and continue step‑by‑step."
+            if err := h.store.CreateMessage(ctx, types.ChatMessage{
+                ID:        assistantID,
+                SessionID: sessionID.String(),
+                Role:      "assistant",
+                Content:   content,
+                Rendered:  content,
+            }); err != nil {
+                h.logger.Warn("Failed to persist dataset gating assistant message", zap.Error(err))
+            }
+
+            h.streamService.WriteSSEData(ctx, c.Writer, services.StreamData{Type: "remove_loader", Content: "loading-" + userMessageID}, &mu)
+            h.streamService.WriteSSEData(ctx, c.Writer, services.StreamData{Type: "create_container", Content: assistantID}, &mu)
+            h.streamService.WriteSSEData(ctx, c.Writer, services.StreamData{Type: "chunk", Content: content}, &mu)
+            h.streamService.WriteSSEData(ctx, c.Writer, services.StreamData{Type: "end"}, &mu)
+            return
+        }
+    }
+
+    // Convert messages to agent history format, excluding the current user message
 	// because agent.Run() appends the incoming input again. This prevents
 	// duplicating the latest user message in the LLM history.
 	filtered := make([]types.ChatMessage, 0, len(messages))
@@ -541,6 +575,31 @@ func isDocumentQuestion(s string) bool {
 	}
 
 	return false
+}
+
+// isDatasetQuestion heuristically detects questions about datasets/analysis (not PDFs).
+func isDatasetQuestion(s string) bool {
+    ls := strings.ToLower(s)
+    // Strong dataset signals
+    strong := []string{
+        "data", "dataset", "csv", "excel", "column", "columns", "variable", "variables",
+        "describe", "load", "plot", "histogram", "boxplot", "mean", "median", "correlation",
+        "regression", "anova", "t-test", "ttest", "p-value", "normality", "shapiro", "levene",
+        "chi-square", "chi2", "cramer", "mann-whitney", "wilcoxon", "kruskal-wallis",
+    }
+    for _, k := range strong {
+        if strings.Contains(ls, k) {
+            return true
+        }
+    }
+    // Code-ish hints
+    codeHints := []string{"```python", "pd.", "df =", "import ", "from ", "print("}
+    for _, k := range codeHints {
+        if strings.Contains(ls, k) {
+            return true
+        }
+    }
+    return false
 }
 
 // Helper functions that remain in the handler for presentation logic

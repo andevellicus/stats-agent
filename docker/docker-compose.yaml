@@ -3,19 +3,45 @@ x-python-executor: &python-executor
     context: ./executor
     dockerfile: python.Dockerfile
   env_file: .env
-  user: "${UID}:${GID}"
+  # Remove user override - Dockerfile handles this with non-root user
   volumes:
     - ../workspaces:/app/workspaces
   restart: unless-stopped
+  # Security constraints
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  cap_add:
+    - CHOWN
+    - SETUID
+    - SETGID
+  # Resource limits (prevent DOS)
+  deploy:
+    resources:
+      limits:
+        cpus: '2.0'
+        memory: 4G
+        pids: 512
+      reservations:
+        memory: 1G
+  # Network isolation - no internet access
+  # Comment out if your Python code needs to download data from internet
+  network_mode: bridge
+  # Uncomment to disable network entirely:
+  # network_mode: none
 
 services:
   postgres:
     image: pgvector/pgvector:pg15
     container_name: stats-agent-postgres
+    env_file: .env
     environment:
-      POSTGRES_DB: stats_agent
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: ${DB_NAME:-stats_agent}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    # Port removed - only accessible via Docker network (more secure)
+    # If you need to connect from host for debugging, uncomment the line below:
     ports:
       - "5432:5432"
     volumes:

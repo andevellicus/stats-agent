@@ -507,41 +507,104 @@ func (t *StatefulPythonTool) ExecutePythonCode(ctx context.Context, text string,
 		return "", "", false
 	}
 
-	t.logger.Info("Executing Python code", zap.String("code", pythonCode), zap.String("session_id", sessionID))
+	// Log execution without full code (which could contain sensitive data)
+	codeLines := strings.Count(pythonCode, "\n") + 1
+	t.logger.Info("Executing Python code",
+		zap.String("session_id", sessionID),
+		zap.Int("code_lines", codeLines))
 
 	execResult, err := t.Call(ctx, pythonCode, sessionID)
 	if err != nil {
-		t.logger.Error("Error executing Python code", zap.Error(err))
+		t.logger.Error("Error executing Python code", zap.Error(err), zap.String("session_id", sessionID))
 		execResult = "Error: " + err.Error()
 	} else {
-		t.logger.Debug("Python code executed successfully", zap.String("result_preview", execResult[:min(100, len(execResult))]))
+		// Only log result preview in debug mode, and sanitize it
+		if t.logger.Core().Enabled(zap.DebugLevel) {
+			preview := sanitizeLogOutput(execResult, 100)
+			t.logger.Debug("Python code executed successfully",
+				zap.String("session_id", sessionID),
+				zap.String("result_preview", preview))
+		}
 	}
 
 	return pythonCode, execResult, true
 }
 
+// sanitizeLogOutput truncates and removes potentially sensitive patterns from log output
+func sanitizeLogOutput(s string, maxLen int) string {
+	// Truncate to max length
+	if len(s) > maxLen {
+		s = s[:maxLen] + "..."
+	}
+
+	// Remove common patterns that might contain secrets
+	// (passwords, tokens, keys, etc.)
+	sensitive := []string{
+		"password", "passwd", "pwd",
+		"token", "api_key", "apikey", "secret",
+		"credentials", "auth",
+	}
+
+	lower := strings.ToLower(s)
+	for _, pattern := range sensitive {
+		if strings.Contains(lower, pattern) {
+			return "[Output contains potentially sensitive data - not logged]"
+		}
+	}
+
+	return s
+}
+
 // extractMarkdownCode extracts Python code from markdown code blocks (```python ... ```)
 func extractMarkdownCode(text string) string {
-	// Find ```python
-	startMarker := "```python"
-	startIdx := strings.Index(text, startMarker)
-	if startIdx == -1 {
-		return ""
-	}
+    // Preferred path: explicit ```python fences
+    if startIdx := strings.Index(text, "```python"); startIdx != -1 {
+        codeStart := startIdx + len("```python")
+        if codeStart < len(text) && text[codeStart] == '\n' {
+            codeStart++
+        }
+        if endRel := strings.Index(text[codeStart:], "```"); endRel != -1 {
+            code := text[codeStart : codeStart+endRel]
+            return strings.TrimSpace(code)
+        }
+        return ""
+    }
 
-	// Skip past the opening marker and any immediate newline
-	codeStart := startIdx + len(startMarker)
-	if codeStart < len(text) && text[codeStart] == '\n' {
-		codeStart++
-	}
+    // Fallback: generic ``` fences that look like Python
+    // Find first generic opening fence
+    open := "```"
+    gStart := strings.Index(text, open)
+    if gStart == -1 {
+        return ""
+    }
+    codeStart := gStart + len(open)
+    if codeStart < len(text) && text[codeStart] == '\n' {
+        codeStart++
+    }
+    // Find its closing fence
+    gEndRel := strings.Index(text[codeStart:], open)
+    if gEndRel == -1 {
+        return ""
+    }
+    candidate := strings.TrimSpace(text[codeStart : codeStart+gEndRel])
+    if looksLikePython(candidate) {
+        return candidate
+    }
+    return ""
+}
 
-	// Find closing ```
-	endMarker := "```"
-	endIdx := strings.Index(text[codeStart:], endMarker)
-	if endIdx == -1 {
-		return ""
-	}
-
-	code := text[codeStart : codeStart+endIdx]
-	return strings.TrimSpace(code)
+// looksLikePython returns true if the snippet contains pythonic tokens.
+func looksLikePython(code string) bool {
+    lc := strings.ToLower(code)
+    // Common Python/data-science tokens
+    tokens := []string{
+        "import ", "from ", "pd.", "plt.", "sns.", "stats.",
+        "df =", "print(", "def ", "for ", "in ", "os.", "np.",
+    }
+    for _, t := range tokens {
+        if strings.Contains(lc, t) {
+            return true
+        }
+    }
+    return false
 }

@@ -28,7 +28,7 @@ CONSECUTIVE_ERRORS: 5
 LLM_REQUEST_TIMEOUT: 300
 
 # --- Dynamic Temperature Adjustment ---
-BASE_TEMPERATURE: 0.4    # Starting temperature for fine-tuned model (deterministic)
+BASE_TEMPERATURE: 0.2    # Starting temperature for fine-tuned model (deterministic)
 MAX_TEMPERATURE: 0.7      # Maximum temperature cap (prevents wild outputs)
 TEMPERATURE_STEP: 0.1     # Increase per consecutive error (encourages exploration)
 

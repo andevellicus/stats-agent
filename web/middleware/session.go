@@ -1,9 +1,10 @@
 package middleware
 
 import (
-	"database/sql"
-	"net/http"
-	"stats-agent/database"
+    "database/sql"
+    "net/http"
+    "stats-agent/database"
+    "strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -13,6 +14,58 @@ import (
 const SessionCookieName = "stats_agent_session"
 const UserCookieName = "stats_agent_user"
 const CookieMaxAge = 30 * 24 * 60 * 60 // 30 days
+
+// isSecureRequest checks if the request was made over HTTPS
+// This handles both direct HTTPS and proxied HTTPS (via X-Forwarded-Proto header)
+func isSecureRequest(c *gin.Context) bool {
+    // Direct TLS
+    if c.Request.TLS != nil {
+        return true
+    }
+    // Standard proxy headers
+    if v := c.GetHeader("X-Forwarded-Proto"); v == "https" {
+        return true
+    }
+    if v := c.GetHeader("X-Forwarded-Scheme"); v == "https" {
+        return true
+    }
+    if v := c.GetHeader("X-Forwarded-SSL"); v == "on" || v == "1" || v == "true" {
+        return true
+    }
+    // RFC 7239 Forwarded header: e.g., Forwarded: proto=https; host=example.com
+    if fwd := c.GetHeader("Forwarded"); fwd != "" {
+        // Case-insensitive contains check
+        if strings.Contains(strings.ToLower(fwd), "proto=https") {
+            return true
+        }
+    }
+    // Cloudflare header
+    if cf := c.GetHeader("Cf-Visitor"); cf != "" {
+        // cf-visitor: {"scheme":"https"}
+        if strings.Contains(cf, "\"https\"") {
+            return true
+        }
+    }
+    return false
+}
+
+// setSecureCookie sets a cookie with appropriate security flags
+func setSecureCookie(c *gin.Context, name, value string) {
+    secure := isSecureRequest(c)
+    // Use SameSite=Lax to allow normal navigation and HTMX/SSE flows across
+    // common reverse-proxy setups while still mitigating CSRF.
+    // Strict can prevent cookies from being sent in legitimate top-level
+    // navigations or event stream requests depending on referrers.
+    c.SetCookie(name, value, CookieMaxAge, "/", "", secure, true)
+    c.SetSameSite(http.SameSiteLaxMode)
+}
+
+// SetSecureCookie is a public wrapper for use by handlers
+func SetSecureCookie(c *gin.Context, name, value string, maxAge int) {
+    secure := isSecureRequest(c)
+    c.SetCookie(name, value, maxAge, "/", "", secure, true)
+    c.SetSameSite(http.SameSiteLaxMode)
+}
 
 func SessionMiddleware(store *database.PostgresStore) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -63,8 +116,8 @@ func SessionMiddleware(store *database.PostgresStore) gin.HandlerFunc {
 				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
 				return
 			}
-			// Set the user cookie with a long expiration
-			c.SetCookie(UserCookieName, userID.String(), CookieMaxAge, "/", "", false, true)
+			// Set the user cookie with secure flags
+			setSecureCookie(c, UserCookieName, userID.String())
 		}
 
 		// Now handle session
@@ -121,7 +174,8 @@ func SessionMiddleware(store *database.PostgresStore) gin.HandlerFunc {
 				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to create session"})
 				return
 			}
-			c.SetCookie(SessionCookieName, sessionID.String(), CookieMaxAge, "/", "", false, true)
+			// Set the session cookie with secure flags
+			setSecureCookie(c, SessionCookieName, sessionID.String())
 		}
 
 		c.Set("userID", userID)

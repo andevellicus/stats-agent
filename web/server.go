@@ -27,13 +27,23 @@ type Server struct {
 }
 
 func NewServer(agent *agent.Agent, logger *zap.Logger, config *config.Config, store *database.PostgresStore) *Server {
-	gin.SetMode(gin.ReleaseMode)
+    gin.SetMode(gin.ReleaseMode)
 
+	// Create workspaces directory with 0755 permissions
+	// Note: We need 755 (not 700) so Docker containers can create session subdirectories.
+	// Security is enforced at the HTTP handler level (session ownership verification)
+	// rather than filesystem permissions alone.
 	if err := os.MkdirAll("workspaces", 0755); err != nil {
 		logger.Fatal("Failed to create workspaces directory", zap.Error(err))
 	}
 
-	router := gin.New()
+    router := gin.New()
+    // Trust common proxy ranges so forwarded headers (X-Forwarded-Proto, etc.)
+    // are honored properly in handlers and middleware.
+    _ = router.SetTrustedProxies([]string{"0.0.0.0/0", "::/0"})
+
+    // Basic request logging to surface incoming method/paths while debugging
+    router.Use(gin.Logger())
 
 	router.Use(gin.Recovery())
 	router.Use(func(c *gin.Context) {
@@ -58,7 +68,10 @@ func NewServer(agent *agent.Agent, logger *zap.Logger, config *config.Config, st
 
 func (s *Server) setupRoutes() {
 	s.router.Static("/static", "./web/static")
-	s.router.Static("/workspaces", "./workspaces")
+
+	// Workspace files now require authentication (no longer static serving)
+	workspaceHandler := handlers.NewWorkspaceHandler(s.store, s.logger)
+	s.router.GET("/workspaces/:sessionID/*filepath", workspaceHandler.ServeFile)
 
 	// Initialize services
 	fileService := services.NewFileService(s.store, s.logger)
