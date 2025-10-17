@@ -55,9 +55,9 @@ type embeddingResponse []struct {
 }
 
 type Client struct {
-	cfg        *config.Config
-	httpClient *http.Client
-	logger     *zap.Logger
+    cfg        *config.Config
+    httpClient *http.Client
+    logger     *zap.Logger
 }
 
 func New(cfg *config.Config, logger *zap.Logger) *Client {
@@ -305,61 +305,186 @@ func (c *Client) backoffSleep(attempt int) {
 // Embed generates an embedding vector for the provided document using the
 // llama.cpp-compatible embeddings endpoint.
 func (c *Client) Embed(ctx context.Context, host string, doc string) ([]float32, error) {
-	reqBody := embeddingRequest{Content: doc}
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("marshal embedding request: %w", err)
-	}
+    // OpenAI-style request/response
+    type reqBody struct {
+        Input []string `json:"input"`
+    }
+    type respBody struct {
+        Data []struct {
+            Embedding []float32 `json:"embedding"`
+            Index     int       `json:"index"`
+        } `json:"data"`
+    }
 
-	url := fmt.Sprintf("%s/v1/embeddings", strings.TrimRight(host, "/"))
-	var resp *http.Response
-	var lastErr error
-	for attempt := 0; attempt < c.cfg.MaxRetries; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonBody))
-		if err != nil {
-			return nil, fmt.Errorf("create embedding request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
+    jsonBody, err := json.Marshal(reqBody{Input: []string{doc}})
+    if err != nil {
+        return nil, fmt.Errorf("marshal embedding request: %w", err)
+    }
 
-		r, err := c.httpClient.Do(req)
-		if err != nil {
-			lastErr = err
-			if ctx.Err() != nil {
-				break
-			}
-			continue
-		}
+    url := fmt.Sprintf("%s/v1/embeddings", strings.TrimRight(host, "/"))
+    var resp *http.Response
+    var lastErr error
+    for attempt := 0; attempt < c.cfg.MaxRetries; attempt++ {
+        req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonBody))
+        if err != nil {
+            return nil, fmt.Errorf("create embedding request: %w", err)
+        }
+        req.Header.Set("Content-Type", "application/json")
 
-		if r.StatusCode == http.StatusServiceUnavailable {
-			io.Copy(io.Discard, r.Body)
-			r.Body.Close()
-			c.logger.Warn("Embedding model loading, retrying")
-			c.backoffSleep(attempt)
-			continue
-		}
+        r, err := c.httpClient.Do(req)
+        if err != nil {
+            lastErr = err
+            if ctx.Err() != nil {
+                break
+            }
+            c.backoffSleep(attempt)
+            continue
+        }
 
-		resp = r
-		break
-	}
-	if resp == nil {
-		return nil, fmt.Errorf("no response from embedding server: %w", lastErr)
-	}
-	defer resp.Body.Close()
+        if r.StatusCode == http.StatusServiceUnavailable {
+            io.Copy(io.Discard, r.Body)
+            r.Body.Close()
+            c.backoffSleep(attempt)
+            continue
+        }
 
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read embedding response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("embedding server status %s: %s", resp.Status, string(bodyBytes))
-	}
+        resp = r
+        break
+    }
+    if resp == nil {
+        return nil, fmt.Errorf("no response from embedding server: %w", lastErr)
+    }
+    defer resp.Body.Close()
 
-	var er embeddingResponse
-	if err := json.Unmarshal(bodyBytes, &er); err != nil {
-		return nil, fmt.Errorf("decode embedding response: %w", err)
-	}
-	if len(er) == 0 || len(er[0].Embedding) == 0 {
-		return nil, fmt.Errorf("embedding response was empty")
-	}
-	return er[0].Embedding[0], nil
+    if resp.StatusCode != http.StatusOK {
+        bodyBytes, _ := io.ReadAll(resp.Body)
+        return nil, fmt.Errorf("embedding server status %s: %s", resp.Status, strings.TrimSpace(string(bodyBytes)))
+    }
+
+    var rb respBody
+    if err := json.NewDecoder(resp.Body).Decode(&rb); err != nil {
+        return nil, fmt.Errorf("decode embedding response: %w", err)
+    }
+    if len(rb.Data) == 0 || len(rb.Data[0].Embedding) == 0 {
+        return nil, fmt.Errorf("embedding response was empty")
+    }
+    return rb.Data[0].Embedding, nil
+}
+
+// EmbedBatch generates embeddings for multiple documents.
+// Default implementation calls Embed sequentially for compatibility.
+// This preserves correctness even if the backend does not support true batching.
+func (c *Client) EmbedBatch(ctx context.Context, host string, docs []string) ([][]float32, error) {
+    if len(docs) == 0 {
+        return nil, nil
+    }
+
+    // Preferred: OpenAI-style batch request
+    type reqBody struct {
+        Input []string `json:"input"`
+    }
+    type respBody struct {
+        Data []struct {
+            Embedding []float32 `json:"embedding"`
+            Index     int       `json:"index"`
+        } `json:"data"`
+    }
+
+    body, err := json.Marshal(reqBody{Input: docs})
+    if err != nil {
+        return nil, fmt.Errorf("marshal embedding batch request: %w", err)
+    }
+
+    url := fmt.Sprintf("%s/v1/embeddings", strings.TrimRight(host, "/"))
+
+    var resp *http.Response
+    var lastErr error
+    for attempt := 0; attempt < c.cfg.MaxRetries; attempt++ {
+        req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+        if err != nil {
+            return nil, fmt.Errorf("create embedding batch request: %w", err)
+        }
+        req.Header.Set("Content-Type", "application/json")
+
+        r, err := c.httpClient.Do(req)
+        if err != nil {
+            lastErr = err
+            if ctx.Err() != nil {
+                break
+            }
+            c.backoffSleep(attempt)
+            continue
+        }
+
+        if r.StatusCode == http.StatusServiceUnavailable {
+            io.Copy(io.Discard, r.Body)
+            r.Body.Close()
+            c.backoffSleep(attempt)
+            continue
+        }
+
+        resp = r
+        break
+    }
+    if resp == nil {
+        // Fallback to sequential if batch request couldn't even be sent
+        c.logger.Warn("No batch response from embedding server; falling back to sequential", zap.Error(lastErr))
+        out := make([][]float32, len(docs))
+        for i, d := range docs {
+            vec, err := c.Embed(ctx, host, d)
+            if err != nil {
+                return nil, fmt.Errorf("embed doc %d: %w", i, err)
+            }
+            out[i] = vec
+        }
+        return out, nil
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        b, _ := io.ReadAll(resp.Body)
+        // Fallback to sequential when server rejects batch requests
+        c.logger.Warn("Embedding batch server returned non-200; falling back to sequential",
+            zap.String("status", resp.Status), zap.String("body", strings.TrimSpace(string(b))))
+        out := make([][]float32, len(docs))
+        for i, d := range docs {
+            vec, err := c.Embed(ctx, host, d)
+            if err != nil {
+                return nil, fmt.Errorf("embed doc %d: %w", i, err)
+            }
+            out[i] = vec
+        }
+        return out, nil
+    }
+
+    var rb respBody
+    if err := json.NewDecoder(resp.Body).Decode(&rb); err != nil {
+        // Fallback to sequential when response shape is unexpected
+        c.logger.Warn("Failed to decode embedding batch response; falling back to sequential", zap.Error(err))
+        out := make([][]float32, len(docs))
+        for i, d := range docs {
+            vec, err := c.Embed(ctx, host, d)
+            if err != nil {
+                return nil, fmt.Errorf("embed doc %d: %w", i, err)
+            }
+            out[i] = vec
+        }
+        return out, nil
+    }
+
+    // Map by index; ensure size consistency
+    out := make([][]float32, len(docs))
+    for _, item := range rb.Data {
+        if item.Index < 0 || item.Index >= len(docs) {
+            return nil, fmt.Errorf("invalid index %d in embedding batch response", item.Index)
+        }
+        out[item.Index] = item.Embedding
+    }
+    // Verify all filled
+    for i := range out {
+        if out[i] == nil {
+            return nil, fmt.Errorf("missing embedding for index %d in batch response", i)
+        }
+    }
+    return out, nil
 }

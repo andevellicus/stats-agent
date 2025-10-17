@@ -7,6 +7,7 @@ require (
 	github.com/gin-gonic/gin v1.11.0
 	github.com/gomarkdown/markdown v0.0.0-20250810172220-2e2c11897d1a
 	github.com/google/uuid v1.6.0
+	github.com/hashicorp/golang-lru v1.0.2
 	github.com/jackc/pgx/v5 v5.7.6
 	github.com/jdkato/prose/v2 v2.0.0
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728

@@ -1,20 +1,21 @@
 package rag
 
 import (
-	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
-	"regexp"
-	"strings"
-	"sync"
+    "context"
+    "crypto/sha256"
+    "encoding/hex"
+    "fmt"
+    "regexp"
+    "strings"
+    "sync"
 
-	"stats-agent/config"
-	"stats-agent/database"
-	"stats-agent/llmclient"
+    "stats-agent/config"
+    "stats-agent/database"
+    "stats-agent/llmclient"
 
-	"github.com/google/uuid"
-	"go.uber.org/zap"
+    "github.com/google/uuid"
+    lru "github.com/hashicorp/golang-lru"
+    "go.uber.org/zap"
 )
 
 // BGE-large-en-v1.5 has a 512 token hard limit; target and soft limits in config handle sizing.
@@ -23,17 +24,19 @@ import (
 type EmbeddingFunc func(ctx context.Context, text string) ([]float32, error)
 
 type RAG struct {
-	cfg                        *config.Config
-	store                      *database.PostgresStore
-	embedder                   EmbeddingFunc
-	logger                     *zap.Logger
+    cfg                        *config.Config
+    store                      *database.PostgresStore
+    embedder                   EmbeddingFunc
+    logger                     *zap.Logger
     embeddingTokenSoftLimit    int
     embeddingTokenTarget       int
     minTokenCheckCharThreshold int
-	maxHybridCandidates        int
-	datasetMu                  sync.RWMutex
-	sessionDatasets            map[string]string
-	sentenceSplitter           SentenceSplitter
+    maxHybridCandidates        int
+    datasetMu                  sync.RWMutex
+    sessionDatasets            map[string]string
+    sentenceSplitter           SentenceSplitter
+    tokenCache                 *lru.Cache
+    tokenCacheMu               sync.RWMutex
 }
 
 type factStoredContent struct {
@@ -84,18 +87,27 @@ func New(cfg *config.Config, store *database.PostgresStore, logger *zap.Logger) 
     minTokenThreshold := cfg.MinTokenCheckCharThreshold
     hybridCandidates := cfg.MaxHybridCandidates
 
-	r := &RAG{
-		cfg:                        cfg,
-		store:                      store,
-		embedder:                   embedder,
-		logger:                     logger,
+    // Initialize a modest-sized LRU for token counts. Size tuned for common chunking workloads.
+    var tc *lru.Cache
+    if cache, err := lru.New(8192); err == nil {
+        tc = cache
+    } else if logger != nil {
+        logger.Warn("Failed to create token LRU cache; continuing without cache", zap.Error(err))
+    }
+
+    r := &RAG{
+        cfg:                        cfg,
+        store:                      store,
+        embedder:                   embedder,
+        logger:                     logger,
         embeddingTokenSoftLimit:    embeddingSoftLimit,
         embeddingTokenTarget:       embeddingTarget,
         minTokenCheckCharThreshold: minTokenThreshold,
-		maxHybridCandidates:        hybridCandidates,
-		sessionDatasets:            make(map[string]string),
-		sentenceSplitter:           NewRegexSentenceSplitter(),
-	}
+        maxHybridCandidates:        hybridCandidates,
+        sessionDatasets:            make(map[string]string),
+        sentenceSplitter:           NewRegexSentenceSplitter(),
+        tokenCache:                 tc,
+    }
 
 	return r, nil
 }
@@ -319,8 +331,19 @@ func resolveRole(metadata map[string]string) string {
 }
 
 func createLlamaCppEmbedding(cfg *config.Config, logger *zap.Logger) EmbeddingFunc {
-	client := llmclient.New(cfg, logger)
-	return func(ctx context.Context, doc string) ([]float32, error) {
-		return client.Embed(ctx, cfg.EmbeddingLLMHost, doc)
-	}
+    client := llmclient.New(cfg, logger)
+    return func(ctx context.Context, doc string) ([]float32, error) {
+        return client.Embed(ctx, cfg.EmbeddingLLMHost, doc)
+    }
+}
+
+// embedBatch generates embeddings for multiple documents.
+// Uses a client helper and falls back to sequential calls when necessary.
+func (r *RAG) embedBatch(ctx context.Context, docs []string) ([][]float32, error) {
+    if len(docs) == 0 {
+        return nil, nil
+    }
+    client := llmclient.New(r.cfg, r.logger)
+    // Try batched client call first; if not implemented it will fall back to sequential.
+    return client.EmbedBatch(ctx, r.cfg.EmbeddingLLMHost, docs)
 }

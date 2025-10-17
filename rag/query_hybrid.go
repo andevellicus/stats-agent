@@ -99,6 +99,57 @@ func (r *RAG) getRelevantContent(ctx context.Context, documentID uuid.UUID, meta
 	return strings.Join(contextParts, " "), nil
 }
 
+// getRelevantContentBatch fetches parent document contents for a set of candidates using a single query.
+// It resolves lookup IDs from candidate metadata and returns a map of lookupID -> content.
+// Note: This returns stored full contents; window-aware slicing is still handled downstream when emitting.
+func (r *RAG) getRelevantContentBatch(ctx context.Context, candidates []*hybridCandidate) (map[string]string, error) {
+	result := make(map[string]string)
+	if len(candidates) == 0 {
+		return result, nil
+	}
+
+	// Collect unique lookup IDs for batch fetch
+	idSet := make(map[string]struct{})
+	for _, cand := range candidates {
+		if cand == nil {
+			continue
+		}
+		lookupID := ResolveLookupID(cand.DocumentID, cand.Metadata)
+		if lookupID == "" {
+			continue
+		}
+		idSet[lookupID] = struct{}{}
+	}
+
+	if len(idSet) == 0 {
+		return result, nil
+	}
+
+	// Convert to UUIDs (skip invalid)
+	lookupIDs := make([]uuid.UUID, 0, len(idSet))
+	for idStr := range idSet {
+		if id, err := uuid.Parse(idStr); err == nil {
+			lookupIDs = append(lookupIDs, id)
+		} else {
+			r.logger.Warn("Invalid lookup identifier for batch fetch", zap.String("lookup_id", idStr))
+		}
+	}
+
+	if len(lookupIDs) == 0 {
+		return result, nil
+	}
+
+	contents, err := r.store.GetDocumentsBatch(ctx, lookupIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	for idStr, content := range contents {
+		result[idStr] = content
+	}
+	return result, nil
+}
+
 func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, nResults int, excludeHashes []string, historyDocIDs []string, doneLedger string, mode string) (string, int, error) {
 	if nResults <= 0 {
 		return "", 0, nil
@@ -121,6 +172,7 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		candidateLimit = maxHybridCandidates
 	}
 
+	// Derive metadata hints
 	lowerQuery := strings.ToLower(query)
 	isQueryForError := strings.Contains(lowerQuery, "error")
 	metadataFilters := extractSimpleMetadata(query, r.cfg.MetadataFallbackMaxFilters)
@@ -143,67 +195,85 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 			metadataHints["role"] = "tool"
 		}
 	}
+
+	// 1) Gather candidates (vector + bm25 + batch parent content)
+	candidates, docContents, err := r.gatherCandidates(ctx, sessionID, query, candidateLimit, excludeHashes, minSemanticSimilarity, minBM25Score)
+	if err != nil {
+		r.logger.Warn("gatherCandidates failed", zap.Error(err))
+	}
+	if len(candidates) == 0 {
+		return "", 0, nil
+	}
+
+	// 2) Score and rank hybrid
+	candidateList := r.scoreHybrid(query, mode, metadataHints, candidates, isQueryForError)
+
+	// 3) Filter by history
+	filtered1 := r.filterHistory(candidateList, historyDocIDs)
+
+	// 4) Bucket summaries
+	filtered2 := r.bucketSummaries(filtered1)
+
+	// 5) Deduplicate via shingles/hash
+	filtered3 := r.deduplicateShingles(filtered2, excludeHashes)
+
+	// 6) Format output memory block
+	return r.formatMemoryBlock(ctx, filtered3, nResults, doneLedger, docContents, excludeHashes)
+}
+
+// gatherCandidates performs vector and BM25 searches, merges signals into candidates,
+// and primes candidate.Content using a batch document fetch for parent content.
+func (r *RAG) gatherCandidates(ctx context.Context, sessionID, query string, candidateLimit int, excludeHashes []string, minSemanticSimilarity, minBM25Score float64) (map[string]*hybridCandidate, map[string]string, error) {
 	candidates := make(map[string]*hybridCandidate)
 
-	// Perform vector similarity search using pgvector
+	// Vector search
 	queryEmbedding, err := r.embedder(ctx, query)
 	if err != nil {
-		r.logger.Warn("Failed to generate query embedding, using BM25 fallback only",
-			zap.Error(err))
+		r.logger.Warn("Failed to generate query embedding, using BM25 fallback only", zap.Error(err))
 	} else if len(queryEmbedding) > 0 {
 		semanticResults, err := r.store.VectorSearchRAGDocuments(ctx, queryEmbedding, candidateLimit, sessionID, excludeHashes)
 		if err != nil {
-			r.logger.Warn("Vector search failed, using BM25 fallback only",
-				zap.Error(err))
+			r.logger.Warn("Vector search failed, using BM25 fallback only", zap.Error(err))
 		} else {
 			for _, res := range semanticResults {
 				docID := res.DocumentID.String()
-
 				similarity := res.Similarity
 				if similarity < minSemanticSimilarity {
 					continue
 				}
-
 				embContent := res.EmbeddingContent
 				if embContent == "" {
 					embContent = res.Content
 				}
-
 				cand := ensureCandidate(candidates, docID, res.Metadata)
 				if similarity > cand.SemanticScore {
 					cand.SemanticScore = similarity
 					cand.Content = embContent
-					cand.WindowIndex = res.WindowIndex // Track which window matched
+					cand.WindowIndex = res.WindowIndex
 				}
 				cand.HasSemantic = true
 			}
 		}
 	}
 
+	// BM25 search
 	bm25Results, err := r.store.SearchRAGDocumentsBM25(ctx, query, candidateLimit, sessionID, excludeHashes)
 	if err != nil {
-		r.logger.Warn("BM25 search failed, falling back to semantic results only",
-			zap.Error(err),
-			zap.Int("candidate_limit", candidateLimit),
-			zap.String("session_id", sessionID))
+		r.logger.Warn("BM25 search failed, falling back to semantic results only", zap.Error(err), zap.Int("candidate_limit", candidateLimit), zap.String("session_id", sessionID))
 		bm25Results = nil
 	}
 	for _, bm := range bm25Results {
 		docID := bm.DocumentID.String()
-
 		combined := bm.BM25Score + bm.ExactMatchBonus
 		if combined < minBM25Score {
 			continue
 		}
-
 		cand := ensureCandidate(candidates, docID, bm.Metadata)
 		existingCombined := cand.BM25Score + cand.ExactBonus
-
 		embContent := bm.EmbeddingContent
 		if embContent == "" {
 			embContent = bm.Content
 		}
-
 		if combined > existingCombined {
 			cand.BM25Score = bm.BM25Score
 			cand.ExactBonus = bm.ExactMatchBonus
@@ -216,50 +286,62 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		cand.HasBM25 = true
 	}
 
-	if len(candidates) == 0 {
-		return "", 0, nil
-	}
-
+	// Batch fetch parent contents to prime cand.Content
 	docContents := make(map[string]string)
-
-	for _, cand := range candidates {
-		lookupID := ResolveLookupID(cand.DocumentID, cand.Metadata)
-		if lookupID == "" || lookupID == cand.DocumentID {
-			continue
+	if len(candidates) > 0 {
+		candSlice := make([]*hybridCandidate, 0, len(candidates))
+		for _, c := range candidates {
+			candSlice = append(candSlice, c)
 		}
-
-		if content, ok := docContents[lookupID]; ok {
-			cand.Content = content
-			continue
-		}
-
-		lookupUUID, err := uuid.Parse(lookupID)
-		if err != nil {
-			r.logger.Warn("Invalid lookup identifier for scoring",
-				zap.String("lookup_id", lookupID),
-				zap.String("document_id", cand.DocumentID))
-			continue
-		}
-
-		// Use window-aware content retrieval (passes WindowIndex for multi-vector docs)
-		content, err := r.getRelevantContent(ctx, lookupUUID, cand.Metadata, cand.WindowIndex)
-		if err != nil {
-			if !errors.Is(err, sql.ErrNoRows) {
-				r.logger.Warn("Failed to load parent content for scoring",
-					zap.Error(err),
-					zap.String("lookup_id", lookupID),
-					zap.String("document_id", cand.DocumentID),
-					zap.Int("window_index", cand.WindowIndex))
+		if contents, err := r.getRelevantContentBatch(ctx, candSlice); err == nil {
+			for id, content := range contents {
+				docContents[id] = content
 			}
-			continue
+			for _, cand := range candidates {
+				lookupID := ResolveLookupID(cand.DocumentID, cand.Metadata)
+				if lookupID == "" || lookupID == cand.DocumentID {
+					continue
+				}
+				if content, ok := docContents[lookupID]; ok {
+					cand.Content = content
+				}
+			}
+		} else {
+			r.logger.Warn("Batch content fetch failed; falling back to per-document retrieval", zap.Error(err))
+			for _, cand := range candidates {
+				lookupID := ResolveLookupID(cand.DocumentID, cand.Metadata)
+				if lookupID == "" || lookupID == cand.DocumentID {
+					continue
+				}
+				if content, ok := docContents[lookupID]; ok {
+					cand.Content = content
+					continue
+				}
+				lookupUUID, err := uuid.Parse(lookupID)
+				if err != nil {
+					r.logger.Warn("Invalid lookup identifier for scoring", zap.String("lookup_id", lookupID), zap.String("document_id", cand.DocumentID))
+					continue
+				}
+				content, err := r.getRelevantContent(ctx, lookupUUID, cand.Metadata, cand.WindowIndex)
+				if err != nil {
+					if !errors.Is(err, sql.ErrNoRows) {
+						r.logger.Warn("Failed to load parent content for scoring", zap.Error(err), zap.String("lookup_id", lookupID), zap.String("document_id", cand.DocumentID), zap.Int("window_index", cand.WindowIndex))
+					}
+					continue
+				}
+				docContents[lookupID] = content
+				cand.Content = content
+			}
 		}
-
-		docContents[lookupID] = content
-		cand.Content = content
 	}
 
-	var maxSemantic float64
-	var maxBM float64
+	return candidates, docContents, nil
+}
+
+// scoreHybrid normalizes and combines semantic and BM25 scores, applies mode-specific boosts,
+// metadata hints, and echo penalties, and returns a ranked candidate slice.
+func (r *RAG) scoreHybrid(query, mode string, metadataHints map[string]string, candidates map[string]*hybridCandidate, isQueryForError bool) []*hybridCandidate {
+	var maxSemantic, maxBM float64
 	for _, cand := range candidates {
 		if cand.SemanticScore > maxSemantic {
 			maxSemantic = cand.SemanticScore
@@ -282,7 +364,7 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		semanticWeight = 1
 	}
 
-	candidateList := make([]*hybridCandidate, 0, len(candidates))
+	out := make([]*hybridCandidate, 0, len(candidates))
 	for _, cand := range candidates {
 		weighted := 0.0
 		weightSum := 0.0
@@ -302,32 +384,26 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		role := cand.Metadata["role"]
 		docType := cand.Metadata["type"]
 
-		// Select mode-specific boosts based on session mode
-		// Defaults to dataset mode if mode is unspecified
 		var factBoost, summaryBoost, documentBoost float64
 		if mode == "document" {
 			factBoost = r.cfg.HybridDocumentFactBoost
 			summaryBoost = r.cfg.HybridDocumentSummaryBoost
 			documentBoost = r.cfg.HybridDocumentDocumentBoost
 		} else {
-			// Dataset mode (or unspecified - use dataset defaults)
 			factBoost = r.cfg.HybridDatasetFactBoost
 			summaryBoost = r.cfg.HybridDatasetSummaryBoost
 			documentBoost = r.cfg.HybridDatasetDocumentBoost
 		}
 
-		// Apply mode-specific boosts
-		// Only boost conversation facts (not document chunks)
-        if role == "fact" && docType != "chunk" && docType != "document_chunk" {
-            combined *= factBoost
-        }
-        if cand.Metadata["type"] == "summary" {
-            combined *= summaryBoost
-        }
-        if cand.Metadata["type"] == "state" {
-            combined *= r.cfg.HybridStateBoost
-        }
-		// Apply document boost for PDFs and documents
+		if role == "fact" && docType != "chunk" && docType != "document_chunk" {
+			combined *= factBoost
+		}
+		if docType == "summary" {
+			combined *= summaryBoost
+		}
+		if docType == "state" {
+			combined *= r.cfg.HybridStateBoost
+		}
 		if role == "document" || docType == "pdf" || docType == "document_chunk" {
 			combined *= documentBoost
 		}
@@ -371,71 +447,60 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 			}
 		}
 
-		// Penalize near-exact echoes of the user query to avoid retrieving
-		// the question itself instead of useful context.
 		if cand.Content != "" && isQueryEcho(query, cand.Content) {
-			combined *= 0.1 // heavy penalty for echoes
+			combined *= 0.1
 		}
-
 		cand.Score = combined
-		candidateList = append(candidateList, cand)
+		out = append(out, cand)
 	}
 
-	sort.Slice(candidateList, func(i, j int) bool {
-		if candidateList[i].Score == candidateList[j].Score {
-			return candidateList[i].DocumentID < candidateList[j].DocumentID
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Score == out[j].Score {
+			return out[i].DocumentID < out[j].DocumentID
 		}
-		return candidateList[i].Score > candidateList[j].Score
+		return out[i].Score > out[j].Score
 	})
+	return out
+}
 
-	// === POST-QUERY PRUNING: 3-STAGE FILTERING ===
-
-	// Build historyDocIDSet for O(1) lookup
+// filterHistory removes candidates whose document_id or resolved lookupID appears in history.
+func (r *RAG) filterHistory(candidateList []*hybridCandidate, historyDocIDs []string) []*hybridCandidate {
 	historyDocIDSet := make(map[string]bool, len(historyDocIDs))
 	for _, docID := range historyDocIDs {
 		if docID != "" {
 			historyDocIDSet[docID] = true
 		}
 	}
-
-	// FILTER 1: Drop candidates if document_id or lookupID is in history
-	filtered1 := make([]*hybridCandidate, 0, len(candidateList))
+	filtered := make([]*hybridCandidate, 0, len(candidateList))
 	for _, cand := range candidateList {
-		// Check direct document ID
 		if historyDocIDSet[cand.DocumentID] {
 			continue
 		}
-
-		// Check resolved lookup ID (parent/chunk relationships)
 		lookupID := ResolveLookupID(cand.DocumentID, cand.Metadata)
 		if lookupID != "" && historyDocIDSet[lookupID] {
 			continue
 		}
-
-		filtered1 = append(filtered1, cand)
+		filtered = append(filtered, cand)
 	}
+	return filtered
+}
 
-	// FILTER 2: Proper summary bucketing
-	// Group candidates by resolved parent ID, pick best summary if present, else best parent
+// bucketSummaries groups candidates by parent (lookupID) and keeps best summary or best non-summary.
+func (r *RAG) bucketSummaries(candidates []*hybridCandidate) []*hybridCandidate {
 	buckets := make(map[string][]*hybridCandidate)
-	for _, cand := range filtered1 {
+	for _, cand := range candidates {
 		lookupID := ResolveLookupID(cand.DocumentID, cand.Metadata)
 		if lookupID == "" {
 			lookupID = cand.DocumentID
 		}
 		buckets[lookupID] = append(buckets[lookupID], cand)
 	}
-
-	filtered2 := make([]*hybridCandidate, 0, len(buckets))
+	out := make([]*hybridCandidate, 0, len(buckets))
 	for _, bucket := range buckets {
 		if len(bucket) == 0 {
 			continue
 		}
-
-		// Find best summary in bucket
-		var bestSummary *hybridCandidate
-		var bestNonSummary *hybridCandidate
-
+		var bestSummary, bestNonSummary *hybridCandidate
 		for _, cand := range bucket {
 			if cand.Metadata["type"] == "summary" {
 				if bestSummary == nil || cand.Score > bestSummary.Score {
@@ -447,95 +512,90 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 				}
 			}
 		}
-
-		// Prefer summary if available, else use best non-summary
 		if bestSummary != nil {
-			filtered2 = append(filtered2, bestSummary)
+			out = append(out, bestSummary)
 		} else if bestNonSummary != nil {
-			filtered2 = append(filtered2, bestNonSummary)
+			out = append(out, bestNonSummary)
 		}
 	}
-
-	// Re-sort after bucketing
-	sort.Slice(filtered2, func(i, j int) bool {
-		if filtered2[i].Score == filtered2[j].Score {
-			return filtered2[i].DocumentID < filtered2[j].DocumentID
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Score == out[j].Score {
+			return out[i].DocumentID < out[j].DocumentID
 		}
-		return filtered2[i].Score > filtered2[j].Score
+		return out[i].Score > out[j].Score
 	})
+	return out
+}
 
-	// FILTER 3: Shingled containment similarity (5-gram, >0.9 threshold)
-	// Also add hash-based dedup fallback
-	filtered3 := make([]*hybridCandidate, 0, len(filtered2))
+// deduplicateShingles applies 5-gram containment dedup and hash-based fallback.
+func (r *RAG) deduplicateShingles(candidates []*hybridCandidate, excludeHashes []string) []*hybridCandidate {
+	filtered := make([]*hybridCandidate, 0, len(candidates))
 	seenContent := make(map[string]bool)
-
-	// Build set of history content hashes for fallback dedup
 	excludeHashSet := make(map[string]bool, len(excludeHashes))
-	for _, hash := range excludeHashes {
-		if hash != "" {
-			excludeHashSet[hash] = true
+	for _, h := range excludeHashes {
+		if h != "" {
+			excludeHashSet[h] = true
 		}
 	}
-
-	for _, cand := range filtered2 {
+	for _, cand := range candidates {
 		content := cand.Content
 		if content == "" {
-			// No content to check, include it
-			filtered3 = append(filtered3, cand)
+			filtered = append(filtered, cand)
 			continue
 		}
-
-		// Hash-based dedup fallback (belt-and-suspenders)
 		contentHash := HashContent(NormalizeForHash(content))
 		if contentHash != "" && excludeHashSet[contentHash] {
 			continue
 		}
-
-		// Check shingled containment against previously seen content
-		isDuplicate := false
+		isDup := false
 		for seenHash := range seenContent {
 			if containment5gram(content, seenHash) > 0.9 {
-				isDuplicate = true
+				isDup = true
 				break
 			}
 		}
-
-		if !isDuplicate {
-			filtered3 = append(filtered3, cand)
-			// Store normalized hash for future comparisons
+		if !isDup {
+			filtered = append(filtered, cand)
 			if contentHash != "" {
 				seenContent[contentHash] = true
 			}
 		}
 	}
+	return filtered
+}
 
-	// Replace candidateList with filtered results
-	candidateList = filtered3
-
+// formatMemoryBlock builds the final <memory> block from ranked candidates and returns it with count.
+func (r *RAG) formatMemoryBlock(ctx context.Context, candidateList []*hybridCandidate, nResults int, doneLedger string, docContents map[string]string, excludeHashes []string) (string, int, error) {
+	if docContents == nil {
+		docContents = make(map[string]string)
+	}
 	var contextBuilder strings.Builder
 	contextBuilder.WriteString("<memory>\n")
 
 	processedDocIDs := make(map[string]bool)
 	lastEmittedUser := ""
 	addedDocs := 0
+	excludeHashSet := make(map[string]bool, len(excludeHashes))
+	for _, h := range excludeHashes {
+		if h != "" {
+			excludeHashSet[h] = true
+		}
+	}
 
 	for _, cand := range candidateList {
 		if addedDocs >= nResults {
 			break
 		}
-
 		docID := cand.DocumentID
 		if docID == "" {
 			r.logger.Warn("Document is missing a document ID, skipping")
 			continue
 		}
-
 		lookupID := ResolveLookupID(cand.DocumentID, cand.Metadata)
 		if lookupID == "" {
 			r.logger.Warn("Unable to resolve lookup identifier for document", zap.String("document_id", docID))
 			continue
 		}
-
 		if processedDocIDs[lookupID] {
 			continue
 		}
@@ -544,26 +604,16 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		if !cached {
 			docUUID, err := uuid.Parse(lookupID)
 			if err != nil {
-				r.logger.Warn("Invalid document identifier stored in metadata",
-					zap.String("document_id", docID),
-					zap.String("lookup_id", lookupID),
-					zap.Error(err))
+				r.logger.Warn("Invalid document identifier stored in metadata", zap.String("document_id", docID), zap.String("lookup_id", lookupID), zap.Error(err))
 				continue
 			}
-
-			// Use window-aware retrieval for multi-vector documents
-			content, err = r.getRelevantContent(ctx, docUUID, cand.Metadata, cand.WindowIndex)
-			if err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					r.logger.Warn("No stored content found for document",
-						zap.String("document_id", docID),
-						zap.String("lookup_id", lookupID))
+			var err2 error
+			content, err2 = r.getRelevantContent(ctx, docUUID, cand.Metadata, cand.WindowIndex)
+			if err2 != nil {
+				if errors.Is(err2, sql.ErrNoRows) {
+					r.logger.Warn("No stored content found for document", zap.String("document_id", docID), zap.String("lookup_id", lookupID))
 				} else {
-					r.logger.Warn("Failed to load relevant content",
-						zap.String("document_id", docID),
-						zap.String("lookup_id", lookupID),
-						zap.Int("window_index", cand.WindowIndex),
-						zap.Error(err))
+					r.logger.Warn("Failed to load relevant content", zap.String("document_id", docID), zap.String("lookup_id", lookupID), zap.Int("window_index", cand.WindowIndex), zap.Error(err2))
 				}
 				continue
 			}
@@ -571,17 +621,11 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		}
 
 		role := resolveRole(cand.Metadata)
-
 		var lines []string
 		if role == "fact" {
 			var fact factStoredContent
 			if err := json.Unmarshal([]byte(content), &fact); err == nil && (fact.User != "" || fact.Assistant != "" || fact.Tool != "") {
-				// Check if assistant component is already in history
-				// Don't check tool - tool outputs can be identical across different queries
-				// e.g., "Check Age missingness" → "0" and "Check Gender missingness" → "0"
 				skipFact := false
-
-				// Fast path: check stored assistant_hash in metadata
 				if !skipFact && cand.Metadata != nil {
 					if storedAssistantHash := cand.Metadata["assistant_hash"]; storedAssistantHash != "" {
 						if excludeHashSet[storedAssistantHash] {
@@ -589,20 +633,15 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 						}
 					}
 				}
-
-				// Fallback: compute hash from assistant content (for older facts without assistant_hash)
 				if !skipFact && fact.Assistant != "" {
 					assistantHash := ComputeMessageContentHash("assistant", fact.Assistant)
 					if assistantHash != "" && excludeHashSet[assistantHash] {
 						skipFact = true
 					}
 				}
-
-				// Skip this fact if assistant is already in history
 				if skipFact {
 					continue
 				}
-
 				userTrimmed := canonicalizeFactText(fact.User)
 				if userTrimmed != "" && userTrimmed != lastEmittedUser {
 					lines = append(lines, fmt.Sprintf("- user: %s\n", userTrimmed))
@@ -614,32 +653,27 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 				if fact.Tool != "" {
 					lines = append(lines, fmt.Sprintf("- tool: %s\n", canonicalizeFactText(fact.Tool)))
 				}
-
 				for _, line := range lines {
 					contextBuilder.WriteString(line)
 				}
-
 				processedDocIDs[lookupID] = true
 				addedDocs++
 				continue
 			}
-
 			assistantContent := canonicalizeFactText(content)
 			if assistantContent != "" {
 				lines = append(lines, fmt.Sprintf("- assistant: %s\n", assistantContent))
 			}
-        } else {
-            label := role
-            if cand.Metadata["type"] == "state" || role == "state" {
-                label = "state"
-            }
-            lines = append(lines, fmt.Sprintf("- %s: %s\n", label, content))
-        }
-
+		} else {
+			label := role
+			if cand.Metadata["type"] == "state" || role == "state" {
+				label = "state"
+			}
+			lines = append(lines, fmt.Sprintf("- %s: %s\n", label, content))
+		}
 		for _, line := range lines {
 			contextBuilder.WriteString(line)
 		}
-
 		processedDocIDs[lookupID] = true
 		addedDocs++
 	}
@@ -647,14 +681,11 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 	if addedDocs == 0 {
 		return "", 0, nil
 	}
-
-	// Inject done ledger if provided
 	if doneLedger != "" {
 		contextBuilder.WriteString("\n")
 		contextBuilder.WriteString(doneLedger)
 		contextBuilder.WriteString("\n")
 	}
-
 	contextBuilder.WriteString("</memory>\n")
 	return contextBuilder.String(), addedDocs, nil
 }

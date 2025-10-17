@@ -4,6 +4,9 @@ import (
     "context"
     "fmt"
     "strings"
+    "crypto/sha256"
+    "encoding/hex"
+    "time"
 
     "stats-agent/llmclient"
 
@@ -54,7 +57,7 @@ func (r *RAG) ensureEmbeddingTokenLimit(ctx context.Context, content string) str
 		}
 
 		testText := strings.Join(accumulated, " ")
-		tokens, err := r.countTokensForEmbedding(ctx, testText)
+    tokens, err := r.countTokensForEmbedding(ctx, testText)
 		if err != nil {
 			// On error, fall back to character ratio truncation
 			if r.logger != nil {
@@ -97,20 +100,86 @@ func (r *RAG) ensureEmbeddingTokenLimit(ctx context.Context, content string) str
 		return string(runes[:safeLen])
 	}
 
-	result := strings.Join(accumulated, " ")
-	if r.logger != nil {
-		finalTokens, _ := r.countTokensForEmbedding(ctx, result)
-		r.logger.Debug("Truncated embedding content using token accumulation",
-			zap.Int("original_tokens", tokenCount),
-			zap.Int("final_tokens", finalTokens),
-			zap.Int("target_tokens", targetTokens),
-			zap.Int("original_words", len(words)),
-			zap.Int("final_words", len(accumulated)))
-	}
-	return result
+    result := strings.Join(accumulated, " ")
+    if r.logger != nil {
+        finalTokens, _ := r.countTokensForEmbedding(ctx, result)
+        r.logger.Debug("Truncated embedding content using token accumulation",
+            zap.Int("original_tokens", tokenCount),
+            zap.Int("final_tokens", finalTokens),
+            zap.Int("target_tokens", targetTokens),
+            zap.Int("original_words", len(words)),
+            zap.Int("final_words", len(accumulated)))
+    }
+    return result
+}
+
+// countTokensWithCache computes token counts with an LRU cache, heuristic estimation for long texts,
+// and asynchronous validation for long inputs to keep the cache warm.
+func (r *RAG) countTokensWithCache(ctx context.Context, text string) (int, error) {
+    trimmed := strings.TrimSpace(text)
+    if trimmed == "" {
+        return 0, nil
+    }
+
+    // Key: 8-byte prefix of sha256 for speed and low collision risk
+    sum := sha256.Sum256([]byte(trimmed))
+    key := hex.EncodeToString(sum[:8])
+
+    // Fast path: cache hit
+    if r.tokenCache != nil {
+        r.tokenCacheMu.RLock()
+        if val, ok := r.tokenCache.Get(key); ok {
+            if v, ok2 := val.(int); ok2 {
+                r.tokenCacheMu.RUnlock()
+                return v, nil
+            }
+        }
+        r.tokenCacheMu.RUnlock()
+    }
+
+    // For short inputs, compute exact synchronously
+    if len(trimmed) < 1000 {
+        count, err := r.countTokensForEmbeddingExact(ctx, trimmed)
+        if err == nil && r.tokenCache != nil {
+            r.tokenCacheMu.Lock()
+            r.tokenCache.Add(key, count)
+            r.tokenCacheMu.Unlock()
+        }
+        return count, err
+    }
+
+    // For long inputs, return an estimate and validate asynchronously
+    estimate := estimateTokens(trimmed)
+
+    if r.tokenCache != nil {
+        go func(txt string, cacheKey string) {
+            // Background context with timeout to avoid hanging
+            ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+            defer cancel()
+            if count, err := r.countTokensForEmbeddingExact(ctx2, txt); err == nil {
+                r.tokenCacheMu.Lock()
+                r.tokenCache.Add(cacheKey, count)
+                r.tokenCacheMu.Unlock()
+            }
+        }(trimmed, key)
+    }
+
+    return estimate, nil
+}
+
+// estimateTokens uses a conservative multiplier based on word count.
+func estimateTokens(text string) int {
+    // Roughly ~1.3 tokens per word for English (empirical)
+    return int(float64(len(strings.Fields(text))) * 1.3)
 }
 
 func (r *RAG) countTokensForEmbedding(ctx context.Context, text string) (int, error) {
+    // Route through cache-aware path
+    return r.countTokensWithCache(ctx, text)
+}
+
+// countTokensForEmbeddingExact hits the tokenize endpoint directly (no caching/estimation).
+func (r *RAG) countTokensForEmbeddingExact(ctx context.Context, text string) (int, error) {
     if r.cfg == nil || strings.TrimSpace(r.cfg.EmbeddingLLMHost) == "" {
         return 0, fmt.Errorf("embedding LLM host not configured")
     }
@@ -138,14 +207,14 @@ func (r *RAG) createEmbeddingWindows(ctx context.Context, content string) ([]Emb
     targetTokens := r.embeddingTokenTarget
 
 	// Check total token count
-	totalTokens, err := r.countTokensForEmbedding(ctx, trimmed)
+    totalTokens, err := r.countTokensForEmbedding(ctx, trimmed)
 	if err != nil {
 		return nil, fmt.Errorf("failed to count tokens: %w", err)
 	}
 
 	// If content fits in one window, create single embedding
 	if totalTokens <= targetTokens {
-		embedding, err := r.embedder(ctx, trimmed)
+        embedding, err := r.embedder(ctx, trimmed)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create embedding: %w", err)
 		}
@@ -164,7 +233,7 @@ func (r *RAG) createEmbeddingWindows(ctx context.Context, content string) ([]Emb
 	windowIndex := 0
 	currentPos := 0
 
-	for i := 0; i < len(words); {
+    for i := 0; i < len(words); {
 		accumulated := []string{}
 		startPos := currentPos
 
@@ -176,7 +245,7 @@ func (r *RAG) createEmbeddingWindows(ctx context.Context, content string) ([]Emb
 			// Check token count every N words or at the end
 			if (len(accumulated)%checkInterval == 0) || (j == len(words)-1) {
 				testText := strings.Join(accumulated, " ")
-				tokens, err := r.countTokensForEmbedding(ctx, testText)
+            tokens, err := r.countTokensForEmbedding(ctx, testText)
 				if err != nil {
 					return nil, fmt.Errorf("failed to count tokens for window: %w", err)
 				}
@@ -190,7 +259,7 @@ func (r *RAG) createEmbeddingWindows(ctx context.Context, content string) ([]Emb
 					for k := 0; k < wordsToRemove; k++ {
 						testWithOne := append(accumulated, words[j-wordsToRemove+k+1])
 						testText := strings.Join(testWithOne, " ")
-						tokens, _ := r.countTokensForEmbedding(ctx, testText)
+                tokens, _ := r.countTokensForEmbedding(ctx, testText)
 						if tokens <= targetTokens {
 							accumulated = testWithOne
 						} else {
@@ -208,7 +277,7 @@ func (r *RAG) createEmbeddingWindows(ctx context.Context, content string) ([]Emb
 		}
 
 		windowText := strings.Join(accumulated, " ")
-		embedding, err := r.embedder(ctx, windowText)
+        embedding, err := r.embedder(ctx, windowText)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create embedding for window %d: %w", windowIndex, err)
 		}
@@ -227,5 +296,144 @@ func (r *RAG) createEmbeddingWindows(ctx context.Context, content string) ([]Emb
 		windowIndex++
 	}
 
-	return windows, nil
+    return windows, nil
+}
+
+// createEmbeddingWindowsBatch splits each chunk into windows and generates embeddings in a single batch call.
+// It returns a slice of windows per input chunk, preserving order.
+func (r *RAG) createEmbeddingWindowsBatch(ctx context.Context, chunks []string) ([][]EmbeddingWindow, error) {
+    if len(chunks) == 0 {
+        return nil, nil
+    }
+
+    targetTokens := r.embeddingTokenTarget
+
+    // First pass: compute window texts and positions per chunk
+    type rawWindow struct {
+        chunkIdx   int
+        start      int
+        end        int
+        text       string
+        windowIdx  int
+    }
+    var allWindows []rawWindow
+    perChunkCounts := make([]int, len(chunks))
+
+    for ci, content := range chunks {
+        trimmed := strings.TrimSpace(content)
+        if trimmed == "" {
+            perChunkCounts[ci] = 0
+            continue
+        }
+
+        // Count total tokens with cache
+        totalTokens, err := r.countTokensForEmbedding(ctx, trimmed)
+        if err != nil {
+            return nil, fmt.Errorf("failed to count tokens: %w", err)
+        }
+
+        // One window fits
+        if totalTokens <= targetTokens {
+            allWindows = append(allWindows, rawWindow{
+                chunkIdx:  ci,
+                start:     0,
+                end:       len(trimmed),
+                text:      trimmed,
+                windowIdx: 0,
+            })
+            perChunkCounts[ci] = 1
+            continue
+        }
+
+        // Multi-window split mirroring createEmbeddingWindows logic
+        words := strings.Fields(trimmed)
+        windowIndex := 0
+        currentPos := 0
+        for i := 0; i < len(words); {
+            accumulated := []string{}
+            startPos := currentPos
+            const checkInterval = 10
+
+            for j := i; j < len(words); j++ {
+                accumulated = append(accumulated, words[j])
+                if (len(accumulated)%checkInterval == 0) || (j == len(words)-1) {
+                    testText := strings.Join(accumulated, " ")
+                    tokens, err := r.countTokensForEmbedding(ctx, testText)
+                    if err != nil {
+                        return nil, fmt.Errorf("failed to count tokens for window: %w", err)
+                    }
+                    if tokens > targetTokens {
+                        // Backtrack
+                        wordsToRemove := min(checkInterval, len(accumulated))
+                        accumulated = accumulated[:len(accumulated)-wordsToRemove]
+                        for k := 0; k < wordsToRemove; k++ {
+                            testWithOne := append(accumulated, words[j-wordsToRemove+k+1])
+                            testText := strings.Join(testWithOne, " ")
+                            tokens, _ := r.countTokensForEmbedding(ctx, testText)
+                            if tokens <= targetTokens {
+                                accumulated = testWithOne
+                            } else {
+                                break
+                            }
+                        }
+                        break
+                    }
+                }
+            }
+
+            if len(accumulated) == 0 {
+                accumulated = []string{words[i]}
+            }
+
+            windowText := strings.Join(accumulated, " ")
+            endPos := currentPos + len(windowText)
+
+            allWindows = append(allWindows, rawWindow{
+                chunkIdx:  ci,
+                start:     startPos,
+                end:       endPos,
+                text:      windowText,
+                windowIdx: windowIndex,
+            })
+
+            i += len(accumulated)
+            currentPos = endPos + 1
+            windowIndex++
+        }
+        perChunkCounts[ci] = windowIndex
+    }
+
+    // Flatten texts for a single embedding call
+    flatTexts := make([]string, len(allWindows))
+    for i, w := range allWindows {
+        flatTexts[i] = w.text
+    }
+
+    embeddings, err := r.embedBatch(ctx, flatTexts)
+    if err != nil {
+        return nil, err
+    }
+    if len(embeddings) != len(allWindows) {
+        return nil, fmt.Errorf("embedding batch size mismatch: got %d, want %d", len(embeddings), len(allWindows))
+    }
+
+    // Distribute embeddings back to per-chunk windows
+    result := make([][]EmbeddingWindow, len(chunks))
+    for i := range result {
+        if perChunkCounts[i] > 0 {
+            result[i] = make([]EmbeddingWindow, 0, perChunkCounts[i])
+        }
+    }
+
+    for i, w := range allWindows {
+        result[w.chunkIdx] = append(result[w.chunkIdx], EmbeddingWindow{
+            WindowIndex: w.windowIdx,
+            WindowStart: w.start,
+            WindowEnd:   w.end,
+            WindowText:  w.text,
+            Embedding:   embeddings[i],
+        })
+    }
+
+    return result, nil
 }

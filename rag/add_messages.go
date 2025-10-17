@@ -660,63 +660,78 @@ func (r *RAG) persistDocumentChunks(ctx context.Context, baseMetadata map[string
 		}
 	}
 
-	// NO OVERLAP - store chunks directly
-	for _, chunkContent := range chunks {
-		chunkContent = strings.TrimSpace(chunkContent)
-		if chunkContent == "" {
-			continue
-		}
+    // NO OVERLAP - store chunks directly (batch embeddings)
+    // First, persist documents and collect contents for batch embedding
+    type docInfo struct { id uuid.UUID; metadata map[string]string }
+    var (
+        chunkContents []string
+        docIDs        []uuid.UUID
+        metaList      []map[string]string
+    )
 
-		chunkDocID := uuid.New()
-		chunkMetadata := cloneStringMap(baseMetadata)
-		chunkMetadata["type"] = "document_chunk"
-		chunkMetadata["chunk_index"] = strconv.Itoa(chunkIndex)
-		// NO parent_document_id - retrieval returns chunk directly
-		chunkMetadata["document_id"] = chunkDocID.String()
+    for _, chunkContent := range chunks {
+        chunkContent = strings.TrimSpace(chunkContent)
+        if chunkContent == "" {
+            continue
+        }
 
-		chunkHash := HashContent(NormalizeForHash(chunkContent))
-		if chunkHash != "" {
-			chunkMetadata["content_hash"] = chunkHash
-		}
+        chunkDocID := uuid.New()
+        chunkMetadata := cloneStringMap(baseMetadata)
+        chunkMetadata["type"] = "document_chunk"
+        chunkMetadata["chunk_index"] = strconv.Itoa(chunkIndex)
+        // NO parent_document_id - retrieval returns chunk directly
+        chunkMetadata["document_id"] = chunkDocID.String()
 
-		// Filter chunk metadata to structural fields only
-		structuralChunkMetadata := filterStructuralMetadata(chunkMetadata)
+        chunkHash := HashContent(NormalizeForHash(chunkContent))
+        if chunkHash != "" {
+            chunkMetadata["content_hash"] = chunkHash
+        }
 
-		// Store document first
-		docID, err := r.store.UpsertDocument(ctx, chunkDocID, chunkContent, structuralChunkMetadata, chunkHash)
-		if err != nil {
-			r.logger.Warn("Failed to store document chunk",
-				zap.Error(err),
-				zap.String("document_id", chunkDocID.String()),
-				zap.Int("chunk_index", chunkIndex))
-			chunkIndex++
-			continue
-		}
+        // Filter chunk metadata to structural fields only
+        structuralChunkMetadata := filterStructuralMetadata(chunkMetadata)
 
-		// Create embedding windows (document chunks may have multiple windows if large)
-		windows, err := r.createEmbeddingWindows(ctx, chunkContent)
-		if err != nil {
-			r.logger.Warn("Failed to create embedding windows for document chunk",
-				zap.Error(err),
-				zap.String("document_id", chunkDocID.String()),
-				zap.Int("chunk_index", chunkIndex))
-			chunkIndex++
-			continue
-		}
+        // Store document first
+        docID, err := r.store.UpsertDocument(ctx, chunkDocID, chunkContent, structuralChunkMetadata, chunkHash)
+        if err != nil {
+            r.logger.Warn("Failed to store document chunk",
+                zap.Error(err),
+                zap.String("document_id", chunkDocID.String()),
+                zap.Int("chunk_index", chunkIndex))
+            chunkIndex++
+            continue
+        }
 
-		// Store all embedding windows
-		for _, window := range windows {
-			if err := r.store.CreateEmbedding(ctx, docID, window.WindowIndex, window.WindowStart, window.WindowEnd, window.WindowText, window.Embedding); err != nil {
-				r.logger.Warn("Failed to store embedding window for document chunk",
-					zap.Error(err),
-					zap.String("document_id", chunkDocID.String()),
-					zap.Int("chunk_index", chunkIndex),
-					zap.Int("window_index", window.WindowIndex))
-			}
-		}
+        // Collect for batch embedding
+        chunkContents = append(chunkContents, chunkContent)
+        docIDs = append(docIDs, docID)
+        metaList = append(metaList, structuralChunkMetadata)
+        chunkIndex++
+    }
 
-		chunkIndex++
-	}
+    if len(chunkContents) == 0 {
+        return
+    }
+
+    // Perform batch windowing + embedding
+    windowsPerChunk, err := r.createEmbeddingWindowsBatch(ctx, chunkContents)
+    if err != nil {
+        r.logger.Warn("Failed to batch create embedding windows for document chunks", zap.Error(err))
+        return
+    }
+
+    // Store all embedding windows for each persisted doc
+    for i := range windowsPerChunk {
+        docID := docIDs[i]
+        for _, window := range windowsPerChunk[i] {
+            if err := r.store.CreateEmbedding(ctx, docID, window.WindowIndex, window.WindowStart, window.WindowEnd, window.WindowText, window.Embedding); err != nil {
+                r.logger.Warn("Failed to store embedding window for document chunk",
+                    zap.Error(err),
+                    zap.String("document_id", docID.String()),
+                    zap.String("chunk_index", metaList[i]["chunk_index"]),
+                    zap.Int("window_index", window.WindowIndex))
+            }
+        }
+    }
 }
 
 func (r *RAG) persistSummaryDocument(ctx context.Context, summaryDoc *summaryDocument) {

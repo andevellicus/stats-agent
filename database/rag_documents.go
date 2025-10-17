@@ -10,8 +10,8 @@ import (
     "strings"
     "time"
 
-	"github.com/google/uuid"
-	"github.com/pgvector/pgvector-go"
+    "github.com/google/uuid"
+    "github.com/pgvector/pgvector-go"
 )
 
 // RAGDocument represents a document in the rag_documents table (content and metadata only).
@@ -363,6 +363,45 @@ func (s *PostgresStore) GetRAGDocumentContent(ctx context.Context, documentID uu
 		return "", fmt.Errorf("failed to fetch rag document content: %w", err)
 	}
 	return content, nil
+}
+
+// GetDocumentsBatch returns contents for multiple document IDs using a single query.
+// Returns a map of id.String() -> content.
+func (s *PostgresStore) GetDocumentsBatch(ctx context.Context, ids []uuid.UUID) (map[string]string, error) {
+    result := make(map[string]string)
+    if len(ids) == 0 {
+        return result, nil
+    }
+
+    var b strings.Builder
+    b.WriteString("SELECT id, content FROM rag_documents WHERE id IN (")
+    args := make([]any, 0, len(ids))
+    for i, id := range ids {
+        if i > 0 { b.WriteString(", ") }
+        b.WriteString("$")
+        b.WriteString(strconv.Itoa(i + 1))
+        args = append(args, id)
+    }
+    b.WriteString(")")
+
+    rows, err := s.DB.QueryContext(ctx, b.String(), args...)
+    if err != nil {
+        return nil, fmt.Errorf("failed to batch fetch documents: %w", err)
+    }
+    defer rows.Close()
+
+    for rows.Next() {
+        var id uuid.UUID
+        var content string
+        if err := rows.Scan(&id, &content); err != nil {
+            return nil, fmt.Errorf("failed to scan batch document row: %w", err)
+        }
+        result[id.String()] = content
+    }
+    if err := rows.Err(); err != nil {
+        return nil, fmt.Errorf("error iterating batch document rows: %w", err)
+    }
+    return result, nil
 }
 
 // GetDocument retrieves a full document record by ID.
