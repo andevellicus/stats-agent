@@ -1,26 +1,26 @@
 package database
 
 import (
-    "context"
-    "database/sql"
-    "encoding/json"
-    "errors"
-    "fmt"
-    "strconv"
-    "strings"
-    "time"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
 
-    "github.com/google/uuid"
-    "github.com/pgvector/pgvector-go"
+	"github.com/google/uuid"
+	"github.com/pgvector/pgvector-go"
 )
 
 // RAGDocument represents a document in the rag_documents table (content and metadata only).
 type RAGDocument struct {
-    ID          uuid.UUID
-    Content     string
-    Metadata    map[string]string
-    ContentHash string
-    CreatedAt   time.Time
+	ID          uuid.UUID
+	Content     string
+	Metadata    map[string]string
+	ContentHash string
+	CreatedAt   time.Time
 }
 
 // RAGEmbedding represents an embedding window in the rag_embeddings table.
@@ -184,10 +184,10 @@ func (s *PostgresStore) UpsertRAGDocument(ctx context.Context, documentID uuid.U
 
 // FindStateDocument returns the most recent state document for a (sessionID, dataset, stage).
 func (s *PostgresStore) FindStateDocument(ctx context.Context, sessionID, dataset, stage string) (uuid.UUID, string, map[string]string, error) {
-    if sessionID == "" || dataset == "" || stage == "" {
-        return uuid.Nil, "", nil, sql.ErrNoRows
-    }
-    const query = `
+	if sessionID == "" || dataset == "" || stage == "" {
+		return uuid.Nil, "", nil, sql.ErrNoRows
+	}
+	const query = `
         SELECT id, content, metadata
         FROM rag_documents
         WHERE (metadata ->> 'session_id') = $1
@@ -197,68 +197,102 @@ func (s *PostgresStore) FindStateDocument(ctx context.Context, sessionID, datase
         ORDER BY created_at DESC
         LIMIT 1`
 
-    var (
-        id       uuid.UUID
-        content  string
-        metaJSON []byte
-    )
-    err := s.DB.QueryRowContext(ctx, query, sessionID, dataset, stage).Scan(&id, &content, &metaJSON)
-    if err != nil {
-        return uuid.Nil, "", nil, err
-    }
-    meta := make(map[string]string)
-    if len(metaJSON) > 0 {
-        if err := json.Unmarshal(metaJSON, &meta); err != nil {
-            return uuid.Nil, "", nil, err
-        }
-    }
-    return id, content, meta, nil
+	var (
+		id       uuid.UUID
+		content  string
+		metaJSON []byte
+	)
+	err := s.DB.QueryRowContext(ctx, query, sessionID, dataset, stage).Scan(&id, &content, &metaJSON)
+	if err != nil {
+		return uuid.Nil, "", nil, err
+	}
+	meta := make(map[string]string)
+	if len(metaJSON) > 0 {
+		if err := json.Unmarshal(metaJSON, &meta); err != nil {
+			return uuid.Nil, "", nil, err
+		}
+	}
+	return id, content, meta, nil
+}
+
+// FindStateDocumentWithFilters returns the most recent state document for a (sessionID, dataset, stage, filters_key).
+func (s *PostgresStore) FindStateDocumentWithFilters(ctx context.Context, sessionID, dataset, stage, filtersKey string) (uuid.UUID, string, map[string]string, error) {
+	if sessionID == "" || dataset == "" || stage == "" {
+		return uuid.Nil, "", nil, sql.ErrNoRows
+	}
+	const query = `
+        SELECT id, content, metadata
+        FROM rag_documents
+        WHERE (metadata ->> 'session_id') = $1
+          AND (metadata ->> 'type') = 'state'
+          AND (metadata ->> 'dataset') = $2
+          AND (metadata ->> 'stage') = $3
+          AND COALESCE((metadata ->> 'filters_key'), '') = $4
+        ORDER BY created_at DESC
+        LIMIT 1`
+
+	var (
+		id       uuid.UUID
+		content  string
+		metaJSON []byte
+	)
+	err := s.DB.QueryRowContext(ctx, query, sessionID, dataset, stage, strings.TrimSpace(filtersKey)).Scan(&id, &content, &metaJSON)
+	if err != nil {
+		return uuid.Nil, "", nil, err
+	}
+	meta := make(map[string]string)
+	if len(metaJSON) > 0 {
+		if err := json.Unmarshal(metaJSON, &meta); err != nil {
+			return uuid.Nil, "", nil, err
+		}
+	}
+	return id, content, meta, nil
 }
 
 // ListStateDocuments lists all state documents for a session ordered by newest first.
 func (s *PostgresStore) ListStateDocuments(ctx context.Context, sessionID string) ([]RAGDocument, error) {
-    const query = `
+	const query = `
         SELECT id, content, metadata, content_hash, created_at
         FROM rag_documents
         WHERE (metadata ->> 'session_id') = $1 AND (metadata ->> 'type') = 'state'
         ORDER BY created_at DESC`
 
-    rows, err := s.DB.QueryContext(ctx, query, sessionID)
-    if err != nil {
-        return nil, err
-    }
-    defer rows.Close()
+	rows, err := s.DB.QueryContext(ctx, query, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 
-    var docs []RAGDocument
-    for rows.Next() {
-        var (
-            id         uuid.UUID
-            content    string
-            metaJSON   []byte
-            hash       sql.NullString
-            createdAt  time.Time
-        )
-        if err := rows.Scan(&id, &content, &metaJSON, &hash, &createdAt); err != nil {
-            return nil, err
-        }
-        meta := make(map[string]string)
-        if len(metaJSON) > 0 {
-            if err := json.Unmarshal(metaJSON, &meta); err != nil {
-                return nil, err
-            }
-        }
-        docs = append(docs, RAGDocument{ID: id, Content: content, Metadata: meta, ContentHash: hash.String, CreatedAt: createdAt})
-    }
-    if err := rows.Err(); err != nil {
-        return nil, err
-    }
-    return docs, nil
+	var docs []RAGDocument
+	for rows.Next() {
+		var (
+			id        uuid.UUID
+			content   string
+			metaJSON  []byte
+			hash      sql.NullString
+			createdAt time.Time
+		)
+		if err := rows.Scan(&id, &content, &metaJSON, &hash, &createdAt); err != nil {
+			return nil, err
+		}
+		meta := make(map[string]string)
+		if len(metaJSON) > 0 {
+			if err := json.Unmarshal(metaJSON, &meta); err != nil {
+				return nil, err
+			}
+		}
+		docs = append(docs, RAGDocument{ID: id, Content: content, Metadata: meta, ContentHash: hash.String, CreatedAt: createdAt})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return docs, nil
 }
 
 // DeleteRAGDocument deletes a rag document by id (cascades delete to embeddings via FK).
 func (s *PostgresStore) DeleteRAGDocument(ctx context.Context, id uuid.UUID) error {
-    _, err := s.DB.ExecContext(ctx, `DELETE FROM rag_documents WHERE id = $1`, id)
-    return err
+	_, err := s.DB.ExecContext(ctx, `DELETE FROM rag_documents WHERE id = $1`, id)
+	return err
 }
 
 // ListRAGDocuments returns all persisted RAG documents including their embeddings.
@@ -327,11 +361,11 @@ func (s *PostgresStore) ListRAGDocuments(ctx context.Context) ([]StoredRAGDocume
 // HasSessionPDFEmbeddings returns true if there is at least one embedding row
 // for documents of type 'pdf' associated with the given session.
 func (s *PostgresStore) HasSessionPDFEmbeddings(ctx context.Context, sessionID uuid.UUID) (bool, error) {
-    // Consider embeddings ready if we have any embeddings for PDF-derived documents:
-    // - type = 'pdf' (single-page windows)
-    // - type = 'document_chunk' with a filename (chunked PDF pages)
-    // - type = 'pdf_summary' (key facts summary)
-    const query = `
+	// Consider embeddings ready if we have any embeddings for PDF-derived documents:
+	// - type = 'pdf' (single-page windows)
+	// - type = 'document_chunk' with a filename (chunked PDF pages)
+	// - type = 'pdf_summary' (key facts summary)
+	const query = `
         SELECT EXISTS (
             SELECT 1
             FROM rag_embeddings e
@@ -343,11 +377,11 @@ func (s *PostgresStore) HasSessionPDFEmbeddings(ctx context.Context, sessionID u
               )
         )
     `
-    var exists bool
-    if err := s.DB.QueryRowContext(ctx, query, sessionID.String()).Scan(&exists); err != nil {
-        return false, fmt.Errorf("failed to check session pdf embeddings: %w", err)
-    }
-    return exists, nil
+	var exists bool
+	if err := s.DB.QueryRowContext(ctx, query, sessionID.String()).Scan(&exists); err != nil {
+		return false, fmt.Errorf("failed to check session pdf embeddings: %w", err)
+	}
+	return exists, nil
 }
 
 // GetRAGDocumentContent returns the stored content for a given document ID.
@@ -368,40 +402,42 @@ func (s *PostgresStore) GetRAGDocumentContent(ctx context.Context, documentID uu
 // GetDocumentsBatch returns contents for multiple document IDs using a single query.
 // Returns a map of id.String() -> content.
 func (s *PostgresStore) GetDocumentsBatch(ctx context.Context, ids []uuid.UUID) (map[string]string, error) {
-    result := make(map[string]string)
-    if len(ids) == 0 {
-        return result, nil
-    }
+	result := make(map[string]string)
+	if len(ids) == 0 {
+		return result, nil
+	}
 
-    var b strings.Builder
-    b.WriteString("SELECT id, content FROM rag_documents WHERE id IN (")
-    args := make([]any, 0, len(ids))
-    for i, id := range ids {
-        if i > 0 { b.WriteString(", ") }
-        b.WriteString("$")
-        b.WriteString(strconv.Itoa(i + 1))
-        args = append(args, id)
-    }
-    b.WriteString(")")
+	var b strings.Builder
+	b.WriteString("SELECT id, content FROM rag_documents WHERE id IN (")
+	args := make([]any, 0, len(ids))
+	for i, id := range ids {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString("$")
+		b.WriteString(strconv.Itoa(i + 1))
+		args = append(args, id)
+	}
+	b.WriteString(")")
 
-    rows, err := s.DB.QueryContext(ctx, b.String(), args...)
-    if err != nil {
-        return nil, fmt.Errorf("failed to batch fetch documents: %w", err)
-    }
-    defer rows.Close()
+	rows, err := s.DB.QueryContext(ctx, b.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to batch fetch documents: %w", err)
+	}
+	defer rows.Close()
 
-    for rows.Next() {
-        var id uuid.UUID
-        var content string
-        if err := rows.Scan(&id, &content); err != nil {
-            return nil, fmt.Errorf("failed to scan batch document row: %w", err)
-        }
-        result[id.String()] = content
-    }
-    if err := rows.Err(); err != nil {
-        return nil, fmt.Errorf("error iterating batch document rows: %w", err)
-    }
-    return result, nil
+	for rows.Next() {
+		var id uuid.UUID
+		var content string
+		if err := rows.Scan(&id, &content); err != nil {
+			return nil, fmt.Errorf("failed to scan batch document row: %w", err)
+		}
+		result[id.String()] = content
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating batch document rows: %w", err)
+	}
+	return result, nil
 }
 
 // GetDocument retrieves a full document record by ID.
@@ -529,111 +565,114 @@ func (s *PostgresStore) FindDocumentIDsByContentHash(ctx context.Context, sessio
 // SearchRAGDocumentsBM25 performs a BM25-style full-text search over the stored RAG documents.
 // It returns ranked results ordered by their textual relevance to the provided query.
 func (s *PostgresStore) SearchRAGDocumentsBM25(ctx context.Context, query string, limit int, sessionID string, excludeHashes []string) ([]BM25SearchResult, error) {
-    trimmed := strings.TrimSpace(query)
-    if trimmed == "" || limit <= 0 {
-        return nil, nil
-    }
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" || limit <= 0 {
+		return nil, nil
+	}
 
-    // Try rich websearch_to_tsquery first, then fallback to simpler plainto_tsquery on error
-    results, err := s.searchBM25With(ctx, trimmed, limit, sessionID, excludeHashes, "websearch_to_tsquery")
-    if err == nil {
-        return results, nil
-    }
-    // Fallback attempt
-    fallback, fbErr := s.searchBM25With(ctx, trimmed, limit, sessionID, excludeHashes, "plainto_tsquery")
-    if fbErr == nil {
-        return fallback, nil
-    }
-    return nil, fmt.Errorf("failed BM25 search: %v; fallback failed: %w", err, fbErr)
+	// Try rich websearch_to_tsquery first, then fallback to simpler plainto_tsquery on error
+	results, err := s.searchBM25With(ctx, trimmed, limit, sessionID, excludeHashes, "websearch_to_tsquery")
+	if err == nil {
+		return results, nil
+	}
+	// Fallback attempt
+	fallback, fbErr := s.searchBM25With(ctx, trimmed, limit, sessionID, excludeHashes, "plainto_tsquery")
+	if fbErr == nil {
+		return fallback, nil
+	}
+	return nil, fmt.Errorf("failed BM25 search: %v; fallback failed: %w", err, fbErr)
 }
 
 // searchBM25With builds and executes a BM25-like query using the provided tsquery function name
 // (e.g., "websearch_to_tsquery" or "plainto_tsquery").
 func (s *PostgresStore) searchBM25With(ctx context.Context, trimmed string, limit int, sessionID string, excludeHashes []string, tsFunc string) ([]BM25SearchResult, error) {
-    const searchableTextExpr = "rd.content || ' ' || COALESCE(meta.metadata_text, '')"
-    rankExpr := "ts_rank_cd(to_tsvector('english', " + searchableTextExpr + "), " + tsFunc + "('english', $1))"
-    positionExpr := "position(lower($1) in lower(" + searchableTextExpr + "))"
-    bonusExpr := "CASE WHEN " + positionExpr + " > 0 THEN 0.2 ELSE 0 END"
+	const searchableTextExpr = "rd.content || ' ' || COALESCE(meta.metadata_text, '')"
+	rankExpr := "ts_rank_cd(to_tsvector('english', " + searchableTextExpr + "), " + tsFunc + "('english', $1))"
+	positionExpr := "position(lower($1) in lower(" + searchableTextExpr + "))"
+	bonusExpr := "CASE WHEN " + positionExpr + " > 0 THEN 0.2 ELSE 0 END"
 
-    var builder strings.Builder
-    args := []any{trimmed}
+	var builder strings.Builder
+	args := []any{trimmed}
 
-    builder.WriteString("SELECT rd.id, rd.metadata, rd.content, ")
-    builder.WriteString(rankExpr)
-    builder.WriteString(" AS rank, ")
-    builder.WriteString(bonusExpr)
-    builder.WriteString(" AS exact_bonus FROM rag_documents rd")
-    builder.WriteString(" LEFT JOIN LATERAL (SELECT string_agg(replace(j.key, '_', ' ') || ' ' || j.value || ' ' || replace(j.value, '_', ' '), ' ') AS metadata_text FROM jsonb_each_text(rd.metadata) AS j(key, value)) AS meta ON TRUE")
+	builder.WriteString("SELECT rd.id, rd.metadata, rd.content, ")
+	builder.WriteString(rankExpr)
+	builder.WriteString(" AS rank, ")
+	builder.WriteString(bonusExpr)
+	builder.WriteString(" AS exact_bonus FROM rag_documents rd")
+	builder.WriteString(" LEFT JOIN LATERAL (SELECT string_agg(replace(j.key, '_', ' ') || ' ' || j.value || ' ' || replace(j.value, '_', ' '), ' ') AS metadata_text FROM jsonb_each_text(rd.metadata) AS j(key, value)) AS meta ON TRUE")
 
-    if sessionID != "" {
-        builder.WriteString(" WHERE COALESCE(rd.metadata ->> 'session_id', '') = $")
-        builder.WriteString(strconv.Itoa(len(args) + 1))
-        args = append(args, sessionID)
-        builder.WriteString(" AND (" + rankExpr + " > 0 OR " + positionExpr + " > 0)")
-    } else {
-        builder.WriteString(" WHERE " + rankExpr + " > 0 OR " + positionExpr + " > 0")
-    }
+	if sessionID != "" {
+		builder.WriteString(" WHERE COALESCE(rd.metadata ->> 'session_id', '') = $")
+		builder.WriteString(strconv.Itoa(len(args) + 1))
+		args = append(args, sessionID)
+		builder.WriteString(" AND (" + rankExpr + " > 0 OR " + positionExpr + " > 0)")
+	} else {
+		builder.WriteString(" WHERE " + rankExpr + " > 0 OR " + positionExpr + " > 0")
+	}
 
-    // Exclude documents with matching content hashes
-    if len(excludeHashes) > 0 {
-        builder.WriteString(" AND (rd.content_hash IS NULL OR rd.content_hash NOT IN (")
-        for i, hash := range excludeHashes {
-            if i > 0 {
-                builder.WriteString(", ")
-            }
-            builder.WriteString("$")
-            builder.WriteString(strconv.Itoa(len(args) + 1))
-            args = append(args, hash)
-        }
-        builder.WriteString("))")
-    }
+	// Exclude superseded state cards while preserving all other document types
+	builder.WriteString(" AND (COALESCE(rd.metadata ->> 'type', '') <> 'state' OR COALESCE(rd.metadata ->> 'state_status', '') <> 'superseded')")
 
-    builder.WriteString(" ORDER BY (" + rankExpr + " + " + bonusExpr + ") DESC LIMIT $")
-    builder.WriteString(strconv.Itoa(len(args) + 1))
-    args = append(args, limit)
+	// Exclude documents with matching content hashes
+	if len(excludeHashes) > 0 {
+		builder.WriteString(" AND (rd.content_hash IS NULL OR rd.content_hash NOT IN (")
+		for i, hash := range excludeHashes {
+			if i > 0 {
+				builder.WriteString(", ")
+			}
+			builder.WriteString("$")
+			builder.WriteString(strconv.Itoa(len(args) + 1))
+			args = append(args, hash)
+		}
+		builder.WriteString("))")
+	}
 
-    rows, err := s.DB.QueryContext(ctx, builder.String(), args...)
-    if err != nil {
-        return nil, fmt.Errorf("failed to execute BM25 search (%s): %w", tsFunc, err)
-    }
-    defer rows.Close()
+	builder.WriteString(" ORDER BY (" + rankExpr + " + " + bonusExpr + ") DESC LIMIT $")
+	builder.WriteString(strconv.Itoa(len(args) + 1))
+	args = append(args, limit)
 
-    var results []BM25SearchResult
-    for rows.Next() {
-        var (
-            documentID   uuid.UUID
-            metadataJSON []byte
-            content      string
-            rank         float64
-            exactBonus   float64
-        )
+	rows, err := s.DB.QueryContext(ctx, builder.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute BM25 search (%s): %w", tsFunc, err)
+	}
+	defer rows.Close()
 
-        if err := rows.Scan(&documentID, &metadataJSON, &content, &rank, &exactBonus); err != nil {
-            return nil, fmt.Errorf("failed to scan BM25 search result: %w", err)
-        }
+	var results []BM25SearchResult
+	for rows.Next() {
+		var (
+			documentID   uuid.UUID
+			metadataJSON []byte
+			content      string
+			rank         float64
+			exactBonus   float64
+		)
 
-        metadata := make(map[string]string)
-        if len(metadataJSON) > 0 {
-            if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
-                return nil, fmt.Errorf("failed to unmarshal BM25 metadata: %w", err)
-            }
-        }
+		if err := rows.Scan(&documentID, &metadataJSON, &content, &rank, &exactBonus); err != nil {
+			return nil, fmt.Errorf("failed to scan BM25 search result: %w", err)
+		}
 
-        results = append(results, BM25SearchResult{
-            DocumentID:       documentID,
-            Metadata:         metadata,
-            Content:          content,
-            EmbeddingContent: "",
-            BM25Score:        rank,
-            ExactMatchBonus:  exactBonus,
-        })
-    }
+		metadata := make(map[string]string)
+		if len(metadataJSON) > 0 {
+			if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal BM25 metadata: %w", err)
+			}
+		}
 
-    if err := rows.Err(); err != nil {
-        return nil, fmt.Errorf("error iterating BM25 search results: %w", err)
-    }
+		results = append(results, BM25SearchResult{
+			DocumentID:       documentID,
+			Metadata:         metadata,
+			Content:          content,
+			EmbeddingContent: "",
+			BM25Score:        rank,
+			ExactMatchBonus:  exactBonus,
+		})
+	}
 
-    return results, nil
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating BM25 search results: %w", err)
+	}
+
+	return results, nil
 }
 
 // VectorSearchResult represents a vector similarity search hit from pgvector.
@@ -673,6 +712,9 @@ func (s *PostgresStore) VectorSearchRAGDocuments(ctx context.Context, queryVecto
 		args = append(args, sessionID)
 		builder.WriteString(" ")
 	}
+
+	// Exclude superseded state cards while preserving other types
+	builder.WriteString("AND (COALESCE(rd.metadata ->> 'type', '') <> 'state' OR COALESCE(rd.metadata ->> 'state_status', '') <> 'superseded') ")
 
 	// Exclude documents with matching content hashes
 	if len(excludeHashes) > 0 {

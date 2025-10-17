@@ -1,15 +1,15 @@
 package agent
 
 import (
-    "context"
-    "fmt"
-    "stats-agent/config"
-    "stats-agent/llmclient"
-    "stats-agent/web/format"
-    "stats-agent/web/types"
-    "time"
+	"context"
+	"fmt"
+	"stats-agent/config"
+	"stats-agent/llmclient"
+	"stats-agent/web/format"
+	"stats-agent/web/types"
+	"time"
 
-    "go.uber.org/zap"
+	"go.uber.org/zap"
 )
 
 // MemoryManager handles token counting, context window management, and history trimming.
@@ -28,8 +28,8 @@ func NewMemoryManager(cfg *config.Config, logger *zap.Logger) *MemoryManager {
 
 // CountTokens returns the token count for the given text using the LLM's tokenize endpoint.
 func (m *MemoryManager) CountTokens(ctx context.Context, text string) (int, error) {
-    client := llmclient.New(m.cfg, m.logger)
-    return client.Tokenize(ctx, m.cfg.MainLLMHost, text)
+	client := llmclient.New(m.cfg, m.logger)
+	return client.Tokenize(ctx, m.cfg.MainLLMHost, text)
 }
 
 // CalculateHistorySize returns the total token count for the entire message history.
@@ -109,10 +109,6 @@ func (m *MemoryManager) ManageHistory(ctx context.Context, sessionID string, his
 
 	if totalTokens <= contextWindowThreshold {
 		return nil // No action needed
-	}
-
-	if stream != nil {
-		_ = stream.Status("Trimming conversation history....")
 	}
 
 	// Cut history in half
