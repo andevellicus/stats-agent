@@ -41,15 +41,6 @@ func InitLogger(logLevelStr string) (*zap.Logger, error) {
 	return logger, nil
 }
 
-// GetLogger returns the global logger instance (for backward compatibility during transition)
-func GetLogger() *zap.Logger {
-	if globalLogger == nil {
-		// Fallback to a basic logger if not initialized
-		globalLogger, _ = zap.NewDevelopment()
-	}
-	return globalLogger
-}
-
 // Cleanup flushes any buffered log entries
 func Cleanup() {
 	if globalLogger != nil {

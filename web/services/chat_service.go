@@ -239,262 +239,188 @@ func (cs *ChatService) StreamAgentResponse(
 
 // streamDatasetResponse handles the original agentic workflow with Python code execution
 func (cs *ChatService) streamDatasetResponse(
-	ctx context.Context,
-	w http.ResponseWriter,
-	input string,
-	userMessageID string,
-	sessionID string,
-	history []types.AgentMessage,
+    ctx context.Context,
+    w http.ResponseWriter,
+    input string,
+    userMessageID string,
+    sessionID string,
+    history []types.AgentMessage,
 ) {
-	agentMessageID := uuid.New().String()
-	var writeMu sync.Mutex
-	runCtx, cancelRun := context.WithCancel(context.Background())
-	token := cs.registerRun(sessionID, cancelRun, userMessageID)
-	defer func() {
-		cancelRun()
-		cs.deregisterRun(sessionID, token)
-	}()
-	var sseActive atomic.Bool
-	sseActive.Store(true)
-
-	// Helper function to write SSE data without aborting background work on failure.
-	safeWrite := func(data StreamData) {
-		if runCtx.Err() != nil {
-			return
-		}
-		if !sseActive.Load() {
-			return
-		}
-		if err := cs.streamService.WriteSSEData(ctx, w, data, &writeMu); err != nil {
-			if sseActive.CompareAndSwap(true, false) {
-				cs.logger.Info("SSE stream closed, continuing agent in background",
-					zap.Error(err),
-					zap.String("session_id", sessionID),
-					zap.String("user_message_id", userMessageID))
-			}
-		}
-	}
-
-	// Send initial SSE messages - best effort for active clients
-	safeWrite(StreamData{Type: "remove_loader", Content: "loading-" + userMessageID})
-	safeWrite(StreamData{Type: "create_container", Content: agentMessageID})
-
-	pipeReader, pipeWriter := io.Pipe()
-	defer pipeReader.Close()
-
-	var captureBuffer bytes.Buffer
-
-	var lastAssistantMu sync.Mutex
-	var lastAssistantID string
-
-	persist := func(assistant string, tool *string) {
-		assistant = strings.TrimSpace(assistant)
-		toolStr := ""
-		if tool != nil {
-			toolStr = strings.TrimSpace(*tool)
-		}
-		if assistant == "" && toolStr == "" {
-			return
-		}
-
-		ctxPersist, cancelPersist := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancelPersist()
-
-		var toolPtr *string
-		if toolStr != "" {
-			toolPtr = &toolStr
-		}
-
-		id, err := cs.messageService.SaveAssistantAndTool(ctxPersist, sessionID, assistant, toolPtr, "")
-		if err != nil {
-			cs.logger.Error("Incremental message persistence failed",
-				zap.Error(err),
-				zap.String("session_id", sessionID))
-			return
-		}
-		if id != "" {
-			lastAssistantMu.Lock()
-			lastAssistantID = id
-			lastAssistantMu.Unlock()
-		}
-	}
-
-	agentStream := agent.NewStream(&captureBuffer, pipeWriter, persist)
-
-	streamDone := make(chan struct{})
-	go func() {
-		defer close(streamDone)
-		cs.streamService.ProcessStreamByWord(runCtx, pipeReader, func(data StreamData) error {
-			safeWrite(data)
-			return nil
-		})
-	}()
-
-	agentDone := make(chan struct{})
-	go func() {
-		defer close(agentDone)
-		cs.agent.RunDatasetMode(runCtx, input, sessionID, history, agentStream)
-		_ = pipeWriter.Close()
-	}()
-
-	go func() {
-		<-runCtx.Done()
-		pipeWriter.CloseWithError(runCtx.Err())
-	}()
-
-	<-agentDone
-	<-streamDone
-
-	agentStream.Finalize()
-
-	// Use background context for DB operations after request context might be cancelled
-	backgroundCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Discover and mark new files - non-critical, continue if fails
-	newFilePaths, err := cs.fileService.GetAndMarkNewFiles(backgroundCtx, sessionID)
-	if err != nil {
-		cs.logger.Error("Failed to get and mark new file paths",
-			zap.Error(err),
-			zap.String("session_id", sessionID))
-		// Continue - files won't be displayed this time but can be discovered later
-	}
-
-	// Stream new files as OOB updates - non-critical
-	if len(newFilePaths) > 0 {
-		fileContainerID := fmt.Sprintf("file-container-agent-msg-%s", agentMessageID)
-		oobHTML, err := cs.fileService.RenderFileOOBWrapper(backgroundCtx, fileContainerID, newFilePaths)
-		if err != nil {
-			cs.logger.Error("Failed to render file OOB wrapper",
-				zap.Error(err),
-				zap.Int("file_count", len(newFilePaths)))
-		} else {
-			safeWrite(StreamData{Type: "file_append_html", Content: oobHTML})
-		}
-	}
-
-	// Send end signal - best effort
-	safeWrite(StreamData{Type: "end"})
-
-	// Render file blocks for DB storage - non-critical
-	dbFilesHTML, err := cs.fileService.RenderFileBlocksForDB(backgroundCtx, newFilePaths)
-	if err != nil {
-		cs.logger.Error("Failed to render file blocks for DB",
-			zap.Error(err),
-			zap.Int("file_count", len(newFilePaths)))
-		// Continue without file HTML in DB
-		dbFilesHTML = ""
-	}
-
-	if dbFilesHTML != "" {
-		lastAssistantMu.Lock()
-		assistantID := lastAssistantID
-		lastAssistantMu.Unlock()
-		if assistantID != "" {
-			if err := cs.messageService.AppendFilesToMessage(backgroundCtx, assistantID, dbFilesHTML); err != nil {
-				cs.logger.Error("Failed to append files HTML to assistant message",
-					zap.Error(err),
-					zap.String("message_id", assistantID))
-			}
-		}
-	}
+    cs.streamWithRunner(ctx, w, input, userMessageID, sessionID, history, true,
+        func(runCtx context.Context, input string, sessionID string, history []types.AgentMessage, stream *agent.Stream) {
+            cs.agent.RunDatasetMode(runCtx, input, sessionID, history, stream)
+        })
 }
 
 // streamDocumentResponse handles document Q&A mode without code execution
 func (cs *ChatService) streamDocumentResponse(
-	ctx context.Context,
-	w http.ResponseWriter,
-	input string,
-	userMessageID string,
-	sessionID string,
-	history []types.AgentMessage,
+    ctx context.Context,
+    w http.ResponseWriter,
+    input string,
+    userMessageID string,
+    sessionID string,
+    history []types.AgentMessage,
 ) {
-	agentMessageID := uuid.New().String()
-	var writeMu sync.Mutex
-	runCtx, cancelRun := context.WithCancel(context.Background())
-	token := cs.registerRun(sessionID, cancelRun, userMessageID)
-	defer func() {
-		cancelRun()
-		cs.deregisterRun(sessionID, token)
-	}()
-	var sseActive atomic.Bool
-	sseActive.Store(true)
+    cs.streamWithRunner(ctx, w, input, userMessageID, sessionID, history, false,
+        func(runCtx context.Context, input string, sessionID string, history []types.AgentMessage, stream *agent.Stream) {
+            cs.agent.RunDocumentMode(runCtx, input, sessionID, history, stream)
+        })
+}
 
-	// Helper function to write SSE data without aborting background work on failure
-	safeWrite := func(data StreamData) {
-		if runCtx.Err() != nil {
-			return
-		}
-		if !sseActive.Load() {
-			return
-		}
-		if err := cs.streamService.WriteSSEData(ctx, w, data, &writeMu); err != nil {
-			if sseActive.CompareAndSwap(true, false) {
-				cs.logger.Info("SSE stream closed, continuing document response in background",
-					zap.Error(err),
-					zap.String("session_id", sessionID),
-					zap.String("user_message_id", userMessageID))
-			}
-		}
-	}
+// streamWithRunner wraps common SSE + streaming + persistence logic for both modes.
+func (cs *ChatService) streamWithRunner(
+    ctx context.Context,
+    w http.ResponseWriter,
+    input string,
+    userMessageID string,
+    sessionID string,
+    history []types.AgentMessage,
+    includeFiles bool,
+    runFn func(context.Context, string, string, []types.AgentMessage, *agent.Stream),
+) {
+    agentMessageID := uuid.New().String()
+    var writeMu sync.Mutex
+    runCtx, cancelRun := context.WithCancel(context.Background())
+    token := cs.registerRun(sessionID, cancelRun, userMessageID)
+    defer func() {
+        cancelRun()
+        cs.deregisterRun(sessionID, token)
+    }()
+    var sseActive atomic.Bool
+    sseActive.Store(true)
 
-	// Send initial SSE messages
-	safeWrite(StreamData{Type: "remove_loader", Content: "loading-" + userMessageID})
-	safeWrite(StreamData{Type: "create_container", Content: agentMessageID})
+    safeWrite := func(data StreamData) {
+        if runCtx.Err() != nil {
+            return
+        }
+        if !sseActive.Load() {
+            return
+        }
+        if err := cs.streamService.WriteSSEData(ctx, w, data, &writeMu); err != nil {
+            if sseActive.CompareAndSwap(true, false) {
+                cs.logger.Info("SSE stream closed, continuing in background",
+                    zap.Error(err),
+                    zap.String("session_id", sessionID),
+                    zap.String("user_message_id", userMessageID))
+            }
+        }
+    }
 
-	pipeReader, pipeWriter := io.Pipe()
-	defer pipeReader.Close()
+    // Initial SSE events
+    safeWrite(StreamData{Type: "remove_loader", Content: "loading-" + userMessageID})
+    safeWrite(StreamData{Type: "create_container", Content: agentMessageID})
 
-	var captureBuffer bytes.Buffer
+    pipeReader, pipeWriter := io.Pipe()
+    defer pipeReader.Close()
 
-	// Document mode uses simpler persistence (no tool messages)
-	persist := func(assistant string, tool *string) {
-		assistant = strings.TrimSpace(assistant)
-		if assistant == "" {
-			return
-		}
+    var captureBuffer bytes.Buffer
 
-		ctxPersist, cancelPersist := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancelPersist()
+    var lastAssistantMu sync.Mutex
+    var lastAssistantID string
 
-		// Document mode: only save assistant messages (no tools)
-		_, err := cs.messageService.SaveAssistantAndTool(ctxPersist, sessionID, assistant, nil, "")
-		if err != nil {
-			cs.logger.Error("Document mode message persistence failed",
-				zap.Error(err),
-				zap.String("session_id", sessionID))
-		}
-	}
+    persist := func(assistant string, tool *string) {
+        assistant = strings.TrimSpace(assistant)
+        toolStr := ""
+        if tool != nil {
+            toolStr = strings.TrimSpace(*tool)
+        }
+        if assistant == "" && toolStr == "" {
+            return
+        }
 
-	agentStream := agent.NewStream(&captureBuffer, pipeWriter, persist)
+        ctxPersist, cancelPersist := context.WithTimeout(context.Background(), 30*time.Second)
+        defer cancelPersist()
 
-	streamDone := make(chan struct{})
-	go func() {
-		defer close(streamDone)
-		cs.streamService.ProcessStreamByWord(runCtx, pipeReader, func(data StreamData) error {
-			safeWrite(data)
-			return nil
-		})
-	}()
+        var toolPtr *string
+        if toolStr != "" {
+            toolPtr = &toolStr
+        }
 
-	agentDone := make(chan struct{})
-	go func() {
-		defer close(agentDone)
-		// Call document mode agent workflow (no code execution)
-		cs.agent.RunDocumentMode(runCtx, input, sessionID, history, agentStream)
-		_ = pipeWriter.Close()
-	}()
+        id, err := cs.messageService.SaveAssistantAndTool(ctxPersist, sessionID, assistant, toolPtr, "")
+        if err != nil {
+            cs.logger.Error("Incremental message persistence failed",
+                zap.Error(err),
+                zap.String("session_id", sessionID))
+            return
+        }
+        if id != "" {
+            lastAssistantMu.Lock()
+            lastAssistantID = id
+            lastAssistantMu.Unlock()
+        }
+    }
 
-	go func() {
-		<-runCtx.Done()
-		pipeWriter.CloseWithError(runCtx.Err())
-	}()
+    agentStream := agent.NewStream(&captureBuffer, pipeWriter, persist)
 
-	<-agentDone
-	<-streamDone
+    streamDone := make(chan struct{})
+    go func() {
+        defer close(streamDone)
+        cs.streamService.ProcessStreamByWord(runCtx, pipeReader, func(data StreamData) error {
+            safeWrite(data)
+            return nil
+        })
+    }()
 
-	agentStream.Finalize()
+    agentDone := make(chan struct{})
+    go func() {
+        defer close(agentDone)
+        runFn(runCtx, input, sessionID, history, agentStream)
+        _ = pipeWriter.Close()
+    }()
 
-	// Send end signal
-	safeWrite(StreamData{Type: "end"})
+    go func() {
+        <-runCtx.Done()
+        pipeWriter.CloseWithError(runCtx.Err())
+    }()
+
+    <-agentDone
+    <-streamDone
+
+    agentStream.Finalize()
+
+    // Post-run work
+    backgroundCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+
+    if includeFiles {
+        newFilePaths, err := cs.fileService.GetAndMarkNewFiles(backgroundCtx, sessionID)
+        if err != nil {
+            cs.logger.Error("Failed to get and mark new file paths",
+                zap.Error(err),
+                zap.String("session_id", sessionID))
+        }
+        if len(newFilePaths) > 0 {
+            fileContainerID := fmt.Sprintf("file-container-agent-msg-%s", agentMessageID)
+            oobHTML, err := cs.fileService.RenderFileOOBWrapper(backgroundCtx, fileContainerID, newFilePaths)
+            if err != nil {
+                cs.logger.Warn("Failed to render OOB file wrapper",
+                    zap.Error(err),
+                    zap.Int("file_count", len(newFilePaths)))
+            } else {
+                safeWrite(StreamData{Type: "file_append_html", Content: oobHTML})
+            }
+
+            dbFilesHTML, err := cs.fileService.RenderFileBlocksForDB(backgroundCtx, newFilePaths)
+            if err != nil {
+                cs.logger.Error("Failed to render file blocks for DB",
+                    zap.Error(err),
+                    zap.Int("file_count", len(newFilePaths)))
+                dbFilesHTML = ""
+            }
+            if dbFilesHTML != "" {
+                lastAssistantMu.Lock()
+                assistantID := lastAssistantID
+                lastAssistantMu.Unlock()
+                if assistantID != "" {
+                    if err := cs.messageService.AppendFilesToMessage(backgroundCtx, assistantID, dbFilesHTML); err != nil {
+                        cs.logger.Error("Failed to append files HTML to assistant message",
+                            zap.Error(err),
+                            zap.String("message_id", assistantID))
+                    }
+                }
+            }
+        }
+    }
+
+    safeWrite(StreamData{Type: "end"})
 }

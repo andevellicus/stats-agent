@@ -46,9 +46,9 @@ func (h *WorkspaceHandler) ServeFile(c *gin.Context) {
 	}
 	userID := userIDValue.(uuid.UUID)
 
-	// Verify the session exists and belongs to this user
-	session, err := h.store.GetSessionByID(c.Request.Context(), sessionID)
-	if err != nil {
+    // Verify the session exists
+    session, err := h.store.GetSessionByID(c.Request.Context(), sessionID)
+    if err != nil {
 		h.logger.Warn("Session not found for workspace access",
 			zap.String("session_id", sessionID.String()),
 			zap.String("user_id", userID.String()),
@@ -57,15 +57,15 @@ func (h *WorkspaceHandler) ServeFile(c *gin.Context) {
 		return
 	}
 
-	// Verify session ownership
-	if session.UserID == nil || *session.UserID != userID {
-		h.logger.Warn("Unauthorized workspace access attempt",
-			zap.String("session_id", sessionID.String()),
-			zap.String("requesting_user_id", userID.String()),
-			zap.Any("session_owner_id", session.UserID))
-		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
-		return
-	}
+    // Enforce ownership strictly for workspace files; do not auto-claim here
+    if session.UserID == nil || *session.UserID != userID {
+        h.logger.Warn("Unauthorized workspace access attempt",
+            zap.String("session_id", sessionID.String()),
+            zap.String("requesting_user_id", userID.String()),
+            zap.Any("session_owner_id", session.UserID))
+        c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
+        return
+    }
 
 	// Get the file path from the URL (everything after /workspaces/:sessionID/)
 	filename := c.Param("filepath")

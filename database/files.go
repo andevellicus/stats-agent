@@ -213,26 +213,6 @@ func (s *PostgresStore) GetTrackedFilenames(ctx context.Context, sessionID uuid.
 	return filenames, nil
 }
 
-// DeleteFile removes a file record from the database
-func (s *PostgresStore) DeleteFile(ctx context.Context, fileID uuid.UUID) error {
-	query := `DELETE FROM files WHERE id = $1`
-	result, err := s.DB.ExecContext(ctx, query, fileID)
-	if err != nil {
-		return fmt.Errorf("failed to delete file: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return errors.New("file not found")
-	}
-
-	return nil
-}
-
 // Helper functions for UUID <-> sql.NullString conversion
 func uuidToNullString(u *uuid.UUID) sql.NullString {
 	if u == nil {

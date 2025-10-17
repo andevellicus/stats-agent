@@ -1,12 +1,13 @@
 package agent
 
 import (
-	"context"
-	"strings"
+    "context"
+    "strings"
 
-	"stats-agent/prompts"
-	"stats-agent/rag"
-	"stats-agent/web/types"
+    "stats-agent/prompts"
+    "stats-agent/rag"
+    "stats-agent/web/format"
+    "stats-agent/web/types"
 
 	"go.uber.org/zap"
 )
@@ -172,17 +173,48 @@ func (a *Agent) RunDocumentMode(ctx context.Context, input string, sessionID str
 		return
 	}
 
-	// 6. Store assistant response to RAG (user message stored separately via chat handler)
-	assistantMsg := types.AgentMessage{
-		Role:        "assistant",
-		Content:     llmResponse,
-		ContentHash: rag.ComputeMessageContentHash("assistant", llmResponse),
-	}
-	if a.rag != nil {
-		a.rag.AddMessagesAsync(sessionID, []types.AgentMessage{assistantMsg})
-	}
+    // 6. If the response includes code, execute it and stream tool output
+    if format.HasCodeBlock(llmResponse) {
+        execResult, err := a.executionCoordinator.ProcessResponse(ctx, llmResponse, sessionID, stream)
+        if err != nil {
+            a.logger.Error("Failed to process LLM response in document mode",
+                zap.Error(err),
+                zap.String("session_id", sessionID))
+            _ = stream.Status("Response processing error")
+            return
+        }
+        // Record assistant/tool in RAG for retrieval as context
+        if a.rag != nil {
+            assistantMsg := types.AgentMessage{
+                Role:        "assistant",
+                Content:     llmResponse,
+                ContentHash: rag.ComputeMessageContentHash("assistant", llmResponse),
+            }
+            if execResult.WasCodeExecuted {
+                toolMsg := types.AgentMessage{
+                    Role:        "tool",
+                    Content:     execResult.Result,
+                    ContentHash: rag.ComputeMessageContentHash("tool", execResult.Result),
+                }
+                a.rag.AddMessagesAsync(sessionID, []types.AgentMessage{assistantMsg, toolMsg})
+            } else {
+                a.rag.AddMessagesAsync(sessionID, []types.AgentMessage{assistantMsg})
+            }
+        }
+        return
+    }
 
-	// Done - single response, no iteration
+    // 7. Store assistant response to RAG (user message stored separately via chat handler)
+    assistantMsg := types.AgentMessage{
+        Role:        "assistant",
+        Content:     llmResponse,
+        ContentHash: rag.ComputeMessageContentHash("assistant", llmResponse),
+    }
+    if a.rag != nil {
+        a.rag.AddMessagesAsync(sessionID, []types.AgentMessage{assistantMsg})
+    }
+
+    // Done - single response, no iteration
 }
 
 // buildDocEvidenceSnippet constructs a 150–300 token snippet from the retrieved

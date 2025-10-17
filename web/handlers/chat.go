@@ -1,26 +1,25 @@
 package handlers
 
 import (
-	"context"
-	"fmt"
-	"net/http"
-	"os"
-	"path/filepath"
-	"stats-agent/agent"
-	"stats-agent/config"
-	"stats-agent/database"
-	"stats-agent/rag"
-	"stats-agent/web/middleware"
-	"stats-agent/web/services"
-	"stats-agent/web/templates/components"
-	"stats-agent/web/templates/pages"
-	"stats-agent/web/types"
-	"strings"
-	"sync"
+    "fmt"
+    "net/http"
+    "os"
+    "path/filepath"
+    "stats-agent/agent"
+    "stats-agent/config"
+    "stats-agent/database"
+    "stats-agent/rag"
+    "stats-agent/web/middleware"
+    "stats-agent/web/services"
+    "stats-agent/web/templates/components"
+    "stats-agent/web/templates/pages"
+    "stats-agent/web/types"
+    "strings"
+    "sync"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
-	"go.uber.org/zap"
+    "github.com/gin-gonic/gin"
+    "github.com/google/uuid"
+    "go.uber.org/zap"
 )
 
 type ChatHandler struct {
@@ -136,20 +135,34 @@ func (h *ChatHandler) DeleteSession(c *gin.Context) {
 	c.Status(http.StatusOK)
 }
 
+// Legacy session claiming removed - no longer needed
 func (h *ChatHandler) Index(c *gin.Context) {
-	sessionID, exists := c.Get("sessionID")
-	if !exists {
-		h.logger.Error("Session ID not found in context")
-		c.String(http.StatusInternalServerError, "Session not found")
-		return
-	}
-	sessionUUID := sessionID.(uuid.UUID)
-
-	userID, userExists := c.Get("userID")
+	sessionIDPtr, exists := c.Get("sessionID")
+	var sessionUUID uuid.UUID
 	var userUUIDPtr *uuid.UUID
-	if userExists {
-		userUUID := userID.(uuid.UUID)
-		userUUIDPtr = &userUUID
+
+	// Check if session exists
+	if exists && sessionIDPtr != nil {
+		sessionUUIDPtr := sessionIDPtr.(*uuid.UUID)
+		if sessionUUIDPtr != nil {
+			sessionUUID = *sessionUUIDPtr
+		}
+	}
+
+	// Get user if it exists
+	if userIDPtr, userExists := c.Get("userID"); userExists && userIDPtr != nil {
+		userUUIDPtr = userIDPtr.(*uuid.UUID)
+	}
+
+	// If no session exists yet, render empty page - session will be created on first message
+	if sessionUUID == uuid.Nil {
+		// Create a temporary/placeholder ID for the frontend (not persisted yet)
+		sessionUUID = uuid.New()
+		c.Set("sessionID", &sessionUUID)
+		sessions := h.sessionService.GetSessionsForSidebar(c.Request.Context(), userUUIDPtr)
+		component := pages.ChatPage(sessionUUID, sessions, nil)
+		component.Render(c.Request.Context(), c.Writer)
+		return
 	}
 
 	// Create workspace using service
@@ -171,48 +184,40 @@ func (h *ChatHandler) Index(c *gin.Context) {
 		return
 	}
 
-	messageGroups := groupMessages(messages)
-	component := pages.ChatPage(sessionUUID, sessions, messageGroups)
-	component.Render(c.Request.Context(), c.Writer)
+    messageGroups := groupMessages(messages)
+    component := pages.ChatPage(sessionUUID, sessions, messageGroups)
+    component.Render(c.Request.Context(), c.Writer)
 }
 
 func (h *ChatHandler) LoadSession(c *gin.Context) {
-	sessionID, err := uuid.Parse(c.Param("sessionID"))
-	if err != nil {
-		c.String(http.StatusBadRequest, "invalid session ID")
-		return
-	}
+    sessionID, err := uuid.Parse(c.Param("sessionID"))
+    if err != nil {
+        c.String(http.StatusBadRequest, "invalid session ID")
+        return
+    }
 
-	userID, userExists := c.Get("userID")
-	var userUUIDPtr *uuid.UUID
-	if userExists {
-		userUUID := userID.(uuid.UUID)
-		userUUIDPtr = &userUUID
-	}
+    userIDPtr, userExists := c.Get("userID")
+    var userUUIDPtr *uuid.UUID
+    if userExists && userIDPtr != nil {
+        userUUIDPtr = userIDPtr.(*uuid.UUID)
+    }
 
-	// Validate and get session using service
-	session, shouldCreate, err := h.sessionService.ValidateAndGetSession(c.Request.Context(), sessionID, userUUIDPtr)
-	if err != nil {
-		h.logger.Error("Session validation failed",
-			zap.Error(err),
-			zap.String("session_id", sessionID.String()))
-		c.Redirect(http.StatusFound, "/")
-		return
-	}
+    // Validate and get session using service
+    session, shouldCreate, err := h.sessionService.ValidateAndGetSession(c.Request.Context(), sessionID, userUUIDPtr)
+    if err != nil {
+        h.logger.Error("Session validation failed",
+            zap.Error(err),
+            zap.String("session_id", sessionID.String()))
+        c.Redirect(http.StatusFound, "/")
+        return
+    }
 
-	// If session not found, create new one
+	// If session not found, don't create - redirect to home
+	// Session will be created on first message if needed
 	if shouldCreate {
-		h.logger.Info("Requested session not found, creating new one",
+		h.logger.Info("Requested session not found, redirecting to home",
 			zap.String("requested_session_id", sessionID.String()))
-		newSessionID, createErr := h.store.CreateSession(c.Request.Context(), userUUIDPtr)
-		if createErr != nil {
-			h.logger.Error("Failed to create replacement session",
-				zap.Error(createErr))
-			c.String(http.StatusInternalServerError, "Could not create new session")
-			return
-		}
-		middleware.SetSecureCookie(c, middleware.SessionCookieName, newSessionID.String(), middleware.CookieMaxAge)
-		c.Redirect(http.StatusFound, fmt.Sprintf("/chat/%s", newSessionID.String()))
+		c.Redirect(http.StatusFound, "/")
 		return
 	}
 
@@ -229,9 +234,9 @@ func (h *ChatHandler) LoadSession(c *gin.Context) {
 		return
 	}
 
-	messageGroups := groupMessages(messages)
-	pages.ChatPage(sessionID, sessions, messageGroups).Render(c.Request.Context(), c.Writer)
-	_ = session // Mark as used
+		messageGroups := groupMessages(messages)
+		pages.ChatPage(sessionID, sessions, messageGroups).Render(c.Request.Context(), c.Writer)
+    _ = session // Mark as used
 }
 
 func (h *ChatHandler) SendMessage(c *gin.Context) {
@@ -251,6 +256,65 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid session ID"})
 		return
+	}
+
+	// Check if user and session need to be created
+	userIDPtr, userExists := c.Get("userID")
+	var userUUID *uuid.UUID
+	if userExists && userIDPtr != nil {
+		userUUID = userIDPtr.(*uuid.UUID)
+	}
+
+	sessionIDPtr, sessionExists := c.Get("sessionID")
+	var persistedSessionID *uuid.UUID
+	if sessionExists && sessionIDPtr != nil {
+		persistedSessionID = sessionIDPtr.(*uuid.UUID)
+	}
+
+	// Create user if doesn't exist
+	if userUUID == nil {
+		var creationErr error
+		newUserID, creationErr := h.store.CreateUser(c.Request.Context())
+		if creationErr != nil {
+			h.logger.Error("Failed to create user on first message",
+				zap.Error(creationErr),
+				zap.String("session_id", req.SessionID))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not create user account"})
+			return
+		}
+		userUUID = &newUserID
+		middleware.SetSecureCookie(c, middleware.UserCookieName, newUserID.String(), middleware.CookieMaxAge)
+		h.logger.Info("User created on first message", zap.String("user_id", newUserID.String()))
+	}
+
+	// Create session if doesn't exist (or placeholder needs to be persisted)
+	if persistedSessionID == nil || *persistedSessionID != sessionID {
+		var creationErr error
+		newSessionID, creationErr := h.store.CreateSession(c.Request.Context(), userUUID)
+		if creationErr != nil {
+			h.logger.Error("Failed to create session on first message",
+				zap.Error(creationErr),
+				zap.String("user_id", userUUID.String()))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not create session"})
+			return
+		}
+		// If the frontend sent a placeholder ID, update the reference
+		if sessionID != newSessionID {
+			sessionID = newSessionID
+			req.SessionID = newSessionID.String()
+		}
+		middleware.SetSecureCookie(c, middleware.SessionCookieName, newSessionID.String(), middleware.CookieMaxAge)
+		h.logger.Info("Session created on first message",
+			zap.String("session_id", newSessionID.String()),
+			zap.String("user_id", userUUID.String()))
+
+		// Create workspace after session is persisted
+		if err := h.sessionService.CreateWorkspace(newSessionID); err != nil {
+			h.logger.Error("Failed to create workspace",
+				zap.Error(err),
+				zap.String("session_id", newSessionID.String()))
+			// Don't fail the entire request, workspace creation is less critical
+		}
 	}
 
 	// Handle potential file upload using upload service
@@ -438,12 +502,13 @@ func (h *ChatHandler) StreamResponse(c *gin.Context) {
 		return
 	}
 
-	// Check if this is the first message in the session to trigger initialization and title generation
-	if len(messages) == 1 {
-		// Pass the service method to the goroutine
-		go h.chatService.GenerateAndSetTitle(context.Background(), sessionID, userMessage.Content, func(data services.StreamData) error {
-			return h.streamService.WriteSSEData(context.Background(), c.Writer, data, &mu)
-		})
+    // Check if this is the first message in the session to trigger initialization and title generation
+    if len(messages) == 1 {
+        // Use the request context for both the background title generation and SSE writes.
+        // This prevents writes after the client disconnects, avoiding nil deref in Flush.
+        go h.chatService.GenerateAndSetTitle(ctx, sessionID, userMessage.Content, func(data services.StreamData) error {
+            return h.streamService.WriteSSEData(ctx, c.Writer, data, &mu)
+        })
 
 		if err := h.chatService.InitializeSession(ctx, sessionID.String()); err != nil {
 			h.logger.Error("Failed to initialize session", zap.Error(err))

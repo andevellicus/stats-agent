@@ -13,11 +13,31 @@ import (
     "go.uber.org/zap"
 )
 
-// Tokenize request/response now shared via llmclient.
+// Embedding token counting and windowing constants.
+const (
+	// embeddingCheckIntervalSmall: check tokens every N words during truncation to reduce API calls
+	embeddingCheckIntervalSmall = 5
+	// embeddingCheckIntervalLarge: check tokens every N words during window splitting
+	embeddingCheckIntervalLarge = 10
+	// embeddingSafetyMargin: safety margin for token limits to account for tokenizer variance
+	embeddingSafetyMargin = 32
+	// tokenShortInputThreshold: length threshold below which we compute tokens synchronously
+	tokenShortInputThreshold = 1000
+	// tokenCacheBackgroundTimeout: timeout for background token count validation
+	tokenCacheBackgroundTimeout = 5 * time.Second
+	// tokenMultiplierEnglish: estimated tokens per word for English text
+	tokenMultiplierEnglish = 1.3
+	// embeddingShrinkFactor: conservative shrinking factor before attempting embedding
+	embeddingShrinkFactorPre = 0.95
+	// embeddingShrinkMinRatio: minimum shrinking ratio to prevent over-aggressive truncation
+	embeddingShrinkMinRatio = 0.1
+	// embeddingProgressiveShrinkAttempts: progressive shrinking factors for handling backend size limits
+	embeddingProgressiveShrinkCount = 4
+)
 
 func (r *RAG) ensureEmbeddingTokenLimit(ctx context.Context, content string) string {
-	trimmed := strings.TrimSpace(content)
-	minCharThreshold := r.minTokenCheckCharThreshold
+    trimmed := strings.TrimSpace(content)
+    minCharThreshold := r.minTokenCheckCharThreshold
 	if minCharThreshold > 0 && len(trimmed) <= minCharThreshold {
 		return content
 	}
@@ -31,7 +51,7 @@ func (r *RAG) ensureEmbeddingTokenLimit(ctx context.Context, content string) str
 		return content
 	}
 
-    targetTokens := r.embeddingTokenTarget
+    targetTokens := r.effectiveEmbeddingTarget()
 
 	if tokenCount <= targetTokens {
 		return content
@@ -45,13 +65,12 @@ func (r *RAG) ensureEmbeddingTokenLimit(ctx context.Context, content string) str
 	}
 
 	var accumulated []string
-	const checkInterval = 5 // Check tokens every 5 words to reduce API calls
 
 	for i, word := range words {
 		accumulated = append(accumulated, word)
 
 		// Check token count every N words or at the end
-		shouldCheck := (len(accumulated)%checkInterval == 0) || (i == len(words)-1)
+		shouldCheck := (len(accumulated)%embeddingCheckIntervalSmall == 0) || (i == len(words)-1)
 		if !shouldCheck {
 			continue
 		}
@@ -70,7 +89,7 @@ func (r *RAG) ensureEmbeddingTokenLimit(ctx context.Context, content string) str
 
 		if tokens > targetTokens {
 			// Exceeded limit - backtrack by removing last batch of words
-			wordsToRemove := min(checkInterval, len(accumulated))
+			wordsToRemove := min(embeddingCheckIntervalSmall, len(accumulated))
 			accumulated = accumulated[:len(accumulated)-wordsToRemove]
 
 			// Fine-tune by adding back words one at a time
@@ -101,15 +120,15 @@ func (r *RAG) ensureEmbeddingTokenLimit(ctx context.Context, content string) str
 	}
 
     result := strings.Join(accumulated, " ")
-    if r.logger != nil {
-        finalTokens, _ := r.countTokensForEmbedding(ctx, result)
-        r.logger.Debug("Truncated embedding content using token accumulation",
-            zap.Int("original_tokens", tokenCount),
-            zap.Int("final_tokens", finalTokens),
-            zap.Int("target_tokens", targetTokens),
-            zap.Int("original_words", len(words)),
-            zap.Int("final_words", len(accumulated)))
-    }
+        if r.logger != nil {
+            finalTokens, _ := r.countTokensForEmbedding(ctx, result)
+            r.logger.Debug("Truncated embedding content using token accumulation",
+                zap.Int("original_tokens", tokenCount),
+                zap.Int("final_tokens", finalTokens),
+                zap.Int("target_tokens", targetTokens),
+                zap.Int("original_words", len(words)),
+                zap.Int("final_words", len(accumulated)))
+        }
     return result
 }
 
@@ -138,7 +157,7 @@ func (r *RAG) countTokensWithCache(ctx context.Context, text string) (int, error
     }
 
     // For short inputs, compute exact synchronously
-    if len(trimmed) < 1000 {
+    if len(trimmed) < tokenShortInputThreshold {
         count, err := r.countTokensForEmbeddingExact(ctx, trimmed)
         if err == nil && r.tokenCache != nil {
             r.tokenCacheMu.Lock()
@@ -154,7 +173,7 @@ func (r *RAG) countTokensWithCache(ctx context.Context, text string) (int, error
     if r.tokenCache != nil {
         go func(txt string, cacheKey string) {
             // Background context with timeout to avoid hanging
-            ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+            ctx2, cancel := context.WithTimeout(context.Background(), tokenCacheBackgroundTimeout)
             defer cancel()
             if count, err := r.countTokensForEmbeddingExact(ctx2, txt); err == nil {
                 r.tokenCacheMu.Lock()
@@ -169,8 +188,8 @@ func (r *RAG) countTokensWithCache(ctx context.Context, text string) (int, error
 
 // estimateTokens uses a conservative multiplier based on word count.
 func estimateTokens(text string) int {
-    // Roughly ~1.3 tokens per word for English (empirical)
-    return int(float64(len(strings.Fields(text))) * 1.3)
+    // Empirically, approximately tokenMultiplierEnglish tokens per word
+    return int(float64(len(strings.Fields(text))) * tokenMultiplierEnglish)
 }
 
 func (r *RAG) countTokensForEmbedding(ctx context.Context, text string) (int, error) {
@@ -204,7 +223,7 @@ func (r *RAG) createEmbeddingWindows(ctx context.Context, content string) ([]Emb
 		return nil, nil
 	}
 
-    targetTokens := r.embeddingTokenTarget
+    targetTokens := r.effectiveEmbeddingTarget()
 
 	// Check total token count
     totalTokens, err := r.countTokensForEmbedding(ctx, trimmed)
@@ -238,12 +257,11 @@ func (r *RAG) createEmbeddingWindows(ctx context.Context, content string) ([]Emb
 		startPos := currentPos
 
 		// Build up words until we hit the token limit
-		const checkInterval = 10
 		for j := i; j < len(words); j++ {
 			accumulated = append(accumulated, words[j])
 
 			// Check token count every N words or at the end
-			if (len(accumulated)%checkInterval == 0) || (j == len(words)-1) {
+			if (len(accumulated)%embeddingCheckIntervalLarge == 0) || (j == len(words)-1) {
 				testText := strings.Join(accumulated, " ")
             tokens, err := r.countTokensForEmbedding(ctx, testText)
 				if err != nil {
@@ -252,7 +270,7 @@ func (r *RAG) createEmbeddingWindows(ctx context.Context, content string) ([]Emb
 
 				if tokens > targetTokens {
 					// Backtrack
-					wordsToRemove := min(checkInterval, len(accumulated))
+					wordsToRemove := min(embeddingCheckIntervalLarge, len(accumulated))
 					accumulated = accumulated[:len(accumulated)-wordsToRemove]
 
 					// Fine-tune by adding back one word at a time
@@ -277,10 +295,14 @@ func (r *RAG) createEmbeddingWindows(ctx context.Context, content string) ([]Emb
 		}
 
 		windowText := strings.Join(accumulated, " ")
-        embedding, err := r.embedder(ctx, windowText)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create embedding for window %d: %w", windowIndex, err)
-		}
+        var embedding []float32
+        var err error
+        // Try embedding with progressive shrinking if backend rejects size.
+        // Start by ensuring tokens are comfortably below target.
+        embedding, windowText, err = r.tryEmbedWithShrink(ctx, windowText, r.effectiveEmbeddingTarget())
+        if err != nil {
+            return nil, fmt.Errorf("failed to create embedding for window %d: %w", windowIndex, err)
+        }
 
 		endPos := currentPos + len(windowText)
 		windows = append(windows, EmbeddingWindow{
@@ -299,6 +321,62 @@ func (r *RAG) createEmbeddingWindows(ctx context.Context, content string) ([]Emb
     return windows, nil
 }
 
+// tryEmbedWithShrink attempts to embed text, shrinking progressively when the backend
+// rejects the input size. It also enforces a conservative token limit before trying.
+func (r *RAG) tryEmbedWithShrink(ctx context.Context, text string, target int) ([]float32, string, error) {
+    // First, ensure token count is under target using exact tokenization where possible
+    if tok, err := r.countTokensForEmbeddingExact(ctx, text); err == nil && tok > target {
+        // shrink proportionally with safety factor
+        ratio := (float64(target) / float64(tok)) * embeddingShrinkFactorPre
+        if ratio < embeddingShrinkMinRatio {
+            ratio = embeddingShrinkMinRatio
+        }
+        runes := []rune(text)
+        text = string(runes[:int(float64(len(runes))*ratio)])
+    }
+
+    // Progressive shrink attempts
+    attempts := []float64{1.0, 0.85, 0.70, 0.55} // embeddingProgressiveShrinkCount different shrinking factors
+    var lastErr error
+    var emb []float32
+    var used string
+    for _, factor := range attempts {
+        candidate := text
+        if factor < 0.999 {
+            rns := []rune(text)
+            if len(rns) > 1 {
+                candidate = string(rns[:max(1, int(float64(len(rns))*factor))])
+            }
+        }
+        // One more exact check if possible
+        if tok, err := r.countTokensForEmbeddingExact(ctx, candidate); err == nil && tok > target {
+            // cut to target with safety margin
+            rns := []rune(candidate)
+            cut := int(float64(len(rns)) * (float64(target) / float64(tok)) * embeddingShrinkFactorPre)
+            if cut < 1 {
+                cut = 1
+            }
+            candidate = string(rns[:cut])
+        }
+        if e, err := r.embedder(ctx, candidate); err == nil {
+            emb = e
+            used = candidate
+            lastErr = nil
+            break
+        } else {
+            lastErr = err
+            if r.logger != nil {
+                r.logger.Warn("Embedding window rejected; shrinking and retrying",
+                    zap.Int("target_tokens", target))
+            }
+        }
+    }
+    if lastErr != nil {
+        return nil, text, lastErr
+    }
+    return emb, used, nil
+}
+
 // createEmbeddingWindowsBatch splits each chunk into windows and generates embeddings in a single batch call.
 // It returns a slice of windows per input chunk, preserving order.
 func (r *RAG) createEmbeddingWindowsBatch(ctx context.Context, chunks []string) ([][]EmbeddingWindow, error) {
@@ -306,7 +384,7 @@ func (r *RAG) createEmbeddingWindowsBatch(ctx context.Context, chunks []string) 
         return nil, nil
     }
 
-    targetTokens := r.embeddingTokenTarget
+    targetTokens := r.effectiveEmbeddingTarget()
 
     // First pass: compute window texts and positions per chunk
     type rawWindow struct {
@@ -352,11 +430,10 @@ func (r *RAG) createEmbeddingWindowsBatch(ctx context.Context, chunks []string) 
         for i := 0; i < len(words); {
             accumulated := []string{}
             startPos := currentPos
-            const checkInterval = 10
 
             for j := i; j < len(words); j++ {
                 accumulated = append(accumulated, words[j])
-                if (len(accumulated)%checkInterval == 0) || (j == len(words)-1) {
+                if (len(accumulated)%embeddingCheckIntervalLarge == 0) || (j == len(words)-1) {
                     testText := strings.Join(accumulated, " ")
                     tokens, err := r.countTokensForEmbedding(ctx, testText)
                     if err != nil {
@@ -364,7 +441,7 @@ func (r *RAG) createEmbeddingWindowsBatch(ctx context.Context, chunks []string) 
                     }
                     if tokens > targetTokens {
                         // Backtrack
-                        wordsToRemove := min(checkInterval, len(accumulated))
+                        wordsToRemove := min(embeddingCheckIntervalLarge, len(accumulated))
                         accumulated = accumulated[:len(accumulated)-wordsToRemove]
                         for k := 0; k < wordsToRemove; k++ {
                             testWithOne := append(accumulated, words[j-wordsToRemove+k+1])
@@ -436,4 +513,21 @@ func (r *RAG) createEmbeddingWindowsBatch(ctx context.Context, chunks []string) 
     }
 
     return result, nil
+}
+
+// effectiveEmbeddingTarget returns a conservative target tokens per window, honoring
+// the configured soft limit and applying a safety margin to avoid backend batch limits.
+func (r *RAG) effectiveEmbeddingTarget() int {
+    target := r.embeddingTokenTarget
+    if r.embeddingTokenSoftLimit > 0 && r.embeddingTokenSoftLimit < target {
+        target = r.embeddingTokenSoftLimit
+    }
+    // Apply safety margin to account for tokenizer variance and backend n_batch limits.
+    if target > embeddingSafetyMargin {
+        target -= embeddingSafetyMargin
+    }
+    if target < 1 {
+        target = 1
+    }
+    return target
 }

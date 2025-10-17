@@ -312,6 +312,10 @@ func (s *PostgresStore) UpdateSessionMode(ctx context.Context, sessionID uuid.UU
 	return nil
 }
 
+// UpdateSessionUser sets the user_id for a session if it is currently NULL.
+// Returns nil if the update succeeds (including when it was already set by another request).
+// UpdateSessionUser removed - legacy claiming disabled
+
 func (s *PostgresStore) GetSessions(ctx context.Context, userID *uuid.UUID) ([]types.Session, error) {
 	var query string
 	var rows *sql.Rows

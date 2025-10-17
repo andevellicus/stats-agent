@@ -18,6 +18,10 @@ import (
 
 const (
     EOM_TOKEN = "<|EOM|>"
+	// tcpBufferSize is the buffer size for reading TCP responses from Python executors
+	tcpBufferSize = 4096
+	// sanitizeOutputMaxLen is the max length for sanitized log output preview
+	sanitizeOutputMaxLen = 100
 )
 
 type executorNode struct {
@@ -308,7 +312,7 @@ func (t *StatefulPythonTool) execute(conn net.Conn, input string, sessionID stri
 
 	reader := bufio.NewReader(conn)
 	var b strings.Builder
-	buf := make([]byte, 4096)
+	buf := make([]byte, tcpBufferSize)
 
 	for {
 		n, err := reader.Read(buf)
@@ -520,7 +524,7 @@ func (t *StatefulPythonTool) ExecutePythonCode(ctx context.Context, text string,
 	} else {
 		// Only log result preview in debug mode, and sanitize it
 		if t.logger.Core().Enabled(zap.DebugLevel) {
-			preview := sanitizeLogOutput(execResult, 100)
+			preview := sanitizeLogOutput(execResult, sanitizeOutputMaxLen)
 			t.logger.Debug("Python code executed successfully",
 				zap.String("session_id", sessionID),
 				zap.String("result_preview", preview))

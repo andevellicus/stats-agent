@@ -1,11 +1,11 @@
 package services
 
 import (
-	"context"
-	"database/sql"
-	"errors"
-	"fmt"
-	"os"
+    "context"
+    "database/sql"
+    "errors"
+    "fmt"
+    "os"
 	"path/filepath"
 	"stats-agent/database"
 	"stats-agent/web/types"
@@ -42,31 +42,32 @@ func (ss *SessionService) CreateWorkspace(sessionID uuid.UUID) error {
 // Returns the session if valid, or creates a new one if session not found.
 // Returns error for other failures or ownership violations.
 func (ss *SessionService) ValidateAndGetSession(
-	ctx context.Context,
-	sessionID uuid.UUID,
-	userID *uuid.UUID,
+    ctx context.Context,
+    sessionID uuid.UUID,
+    userID *uuid.UUID,
 ) (*types.Session, bool, error) {
-	session, err := ss.store.GetSessionByID(ctx, sessionID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			// Session not found - caller should create new one
-			return nil, true, nil // true = should create new session
-		}
-		ss.logger.Error("Failed to get session",
-			zap.Error(err),
-			zap.String("session_id", sessionID.String()))
-		return nil, false, fmt.Errorf("could not load session: %w", err)
-	}
+    session, err := ss.store.GetSessionByID(ctx, sessionID)
+    if err != nil {
+        if errors.Is(err, sql.ErrNoRows) {
+            // Session not found - caller should create new one
+            return nil, true, nil // true = should create new session
+        }
+        ss.logger.Error("Failed to get session",
+            zap.Error(err),
+            zap.String("session_id", sessionID.String()))
+        return nil, false, fmt.Errorf("could not load session: %w", err)
+    }
 
-	// Check ownership - security check
-	if userID != nil && (session.UserID == nil || *session.UserID != *userID) {
-		ss.logger.Warn("Attempted to access session belonging to different user",
-			zap.String("session_id", sessionID.String()),
-			zap.String("user_id", userID.String()))
-		return nil, false, fmt.Errorf("unauthorized access to session")
-	}
+    // Enforce ownership strictly; no legacy claiming.
+    if userID != nil && (session.UserID == nil || *session.UserID != *userID) {
+        ss.logger.Warn("Attempted to access session belonging to different user",
+            zap.String("session_id", sessionID.String()),
+            zap.Any("session_owner_id", session.UserID),
+            zap.String("user_id", userID.String()))
+        return nil, false, fmt.Errorf("unauthorized access to session")
+    }
 
-	return &session, false, nil
+    return &session, false, nil
 }
 
 // DetectAndSetMode sets the session mode based on the first uploaded file type.

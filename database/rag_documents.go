@@ -35,17 +35,6 @@ type RAGEmbedding struct {
 	CreatedAt   time.Time
 }
 
-// StoredRAGDocument is the legacy combined struct (for backwards compatibility).
-type StoredRAGDocument struct {
-	ID               uuid.UUID
-	DocumentID       uuid.UUID
-	Content          string
-	EmbeddingContent string
-	Metadata         map[string]string
-	ContentHash      string
-	Embedding        []float32
-	CreatedAt        time.Time
-}
 
 // BM25SearchResult represents a full-text search hit scored via PostgreSQL's ranking engine.
 type BM25SearchResult struct {
@@ -295,68 +284,6 @@ func (s *PostgresStore) DeleteRAGDocument(ctx context.Context, id uuid.UUID) err
 	return err
 }
 
-// ListRAGDocuments returns all persisted RAG documents including their embeddings.
-func (s *PostgresStore) ListRAGDocuments(ctx context.Context) ([]StoredRAGDocument, error) {
-	const query = `
-		SELECT id, document_id, content, embedding_content, metadata, content_hash, embedding, created_at
-		FROM rag_documents
-		ORDER BY created_at ASC
-	`
-
-	rows, err := s.DB.QueryContext(ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list rag documents: %w", err)
-	}
-	defer rows.Close()
-
-	var documents []StoredRAGDocument
-	for rows.Next() {
-		var (
-			id               uuid.UUID
-			documentID       uuid.UUID
-			content          string
-			embeddingContent sql.NullString
-			metadataJSON     []byte
-			contentHash      sql.NullString
-			embedding        pgvector.Vector
-			createdAt        time.Time
-		)
-
-		if err := rows.Scan(&id, &documentID, &content, &embeddingContent, &metadataJSON, &contentHash, &embedding, &createdAt); err != nil {
-			return nil, fmt.Errorf("failed to scan rag document: %w", err)
-		}
-
-		metadata := make(map[string]string)
-		if len(metadataJSON) > 0 {
-			if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal rag document metadata: %w", err)
-			}
-		}
-
-		var embeddingCopy []float32
-		if embeddingSlice := embedding.Slice(); len(embeddingSlice) > 0 {
-			embeddingCopy = make([]float32, len(embeddingSlice))
-			copy(embeddingCopy, embeddingSlice)
-		}
-
-		documents = append(documents, StoredRAGDocument{
-			ID:               id,
-			DocumentID:       documentID,
-			Content:          content,
-			EmbeddingContent: embeddingContent.String,
-			Metadata:         metadata,
-			ContentHash:      contentHash.String,
-			Embedding:        embeddingCopy,
-			CreatedAt:        createdAt,
-		})
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating rag documents: %w", err)
-	}
-
-	return documents, nil
-}
 
 // HasSessionPDFEmbeddings returns true if there is at least one embedding row
 // for documents of type 'pdf' associated with the given session.

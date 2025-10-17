@@ -74,110 +74,109 @@ func SessionMiddleware(store *database.PostgresStore) gin.HandlerFunc {
 		zapLogger, _ := logger.(*zap.Logger)
 
 		// First, handle user authentication
+		// Only validate existing users, don't create new ones
 		userCookie, err := c.Cookie(UserCookieName)
-		var userID uuid.UUID
-		createNewUser := false
+		var userID *uuid.UUID
+		
 
 		if err == http.ErrNoCookie {
-			createNewUser = true
+			// No user cookie - user will be created on first message
+			
 		} else if err != nil {
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse user cookie"})
 			return
 		} else {
 			parsedUserID, parseErr := uuid.Parse(userCookie)
 			if parseErr != nil {
-				// Invalid UUID format in cookie - treat as corrupted and create new user
+				// Invalid UUID format in cookie - treat as corrupted, user will be recreated on first message
 				if zapLogger != nil {
-					zapLogger.Warn("Corrupted user UUID in cookie, creating new user",
+					zapLogger.Warn("Corrupted user UUID in cookie, will recreate on first message",
 						zap.String("cookie_value", userCookie),
 						zap.Error(parseErr))
 				}
-				createNewUser = true
+				
 			} else {
 				// Verify the user exists in the database
 				dbErr := store.GetUserByID(c.Request.Context(), parsedUserID)
 				if dbErr != nil {
 					if dbErr == sql.ErrNoRows {
-						createNewUser = true
+						// User doesn't exist, will be recreated on first message
+						
 					} else {
-						c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify user"})
-						return
+						// Database error during verification
+						if zapLogger != nil {
+							zapLogger.Error("Failed to verify user from cookie",
+								zap.Error(dbErr),
+								zap.String("user_id", parsedUserID.String()))
+						}
+						// Continue anyway - user will be recreated on first message
+						
 					}
 				} else {
-					userID = parsedUserID
+					// User exists and is valid
+					userID = &parsedUserID
+					
 				}
 			}
 		}
 
-		if createNewUser {
-			var creationErr error
-			userID, creationErr = store.CreateUser(c.Request.Context())
-			if creationErr != nil {
-				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
-				return
-			}
-			// Set the user cookie with secure flags
-			setSecureCookie(c, UserCookieName, userID.String())
-		}
-
 		// Now handle session
+		// Only validate existing sessions, don't create new ones
 		sessionCookie, err := c.Cookie(SessionCookieName)
-		var sessionID uuid.UUID
-		createNewSession := false
+		var sessionID *uuid.UUID
+		
 
 		if err == http.ErrNoCookie {
-			createNewSession = true
+			// No session cookie - session will be created on first message
+			
 		} else if err != nil {
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse session cookie"})
 			return
 		} else {
 			parsedID, parseErr := uuid.Parse(sessionCookie)
 			if parseErr != nil {
-				// Invalid UUID format in cookie - treat as corrupted and create new session
+				// Invalid UUID format in cookie - treat as corrupted, session will be recreated on first message
 				if zapLogger != nil {
-					zapLogger.Warn("Corrupted session UUID in cookie, creating new session",
+					zapLogger.Warn("Corrupted session UUID in cookie, will recreate on first message",
 						zap.String("cookie_value", sessionCookie),
 						zap.Error(parseErr))
 				}
-				createNewSession = true
+				
 			} else {
 				// Check if the session from the cookie exists in the database
 				session, dbErr := store.GetSessionByID(c.Request.Context(), parsedID)
 				if dbErr != nil {
 					if dbErr == sql.ErrNoRows {
-						createNewSession = true
+						// Session doesn't exist, will be created on first message
+						
 					} else {
+						// Database error during verification
 						if zapLogger != nil {
-							zapLogger.Warn("Failed to verify session, creating new session",
+							zapLogger.Warn("Failed to verify session from cookie, will recreate on first message",
 								zap.Error(dbErr),
-								zap.String("session_id", parsedID.String()),
-								zap.String("user_id", userID.String()))
+								zap.String("session_id", parsedID.String()))
 						}
-						createNewSession = true
+						// Continue anyway - session will be recreated on first message
+						
 					}
 				} else {
-					// Verify session belongs to this user
-					if session.UserID != nil && *session.UserID == userID {
-						sessionID = parsedID
+					// Verify session belongs to this user if user exists
+					if userID != nil && session.UserID != nil && *session.UserID == *userID {
+						sessionID = &parsedID
+						
+					} else if userID == nil && session.UserID == nil {
+						// Both unowned, session is valid
+						sessionID = &parsedID
+						
 					} else {
-						// Session exists but doesn't belong to this user, create new session
-						createNewSession = true
+						// Session exists but ownership mismatch, will be recreated on first message
+						
 					}
 				}
 			}
 		}
 
-		if createNewSession {
-			var creationErr error
-			sessionID, creationErr = store.CreateSession(c.Request.Context(), &userID)
-			if creationErr != nil {
-				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to create session"})
-				return
-			}
-			// Set the session cookie with secure flags
-			setSecureCookie(c, SessionCookieName, sessionID.String())
-		}
-
+		// Set context values as pointers - nil means not yet created
 		c.Set("userID", userID)
 		c.Set("sessionID", sessionID)
 		c.Next()
