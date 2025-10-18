@@ -90,15 +90,24 @@ func (h *ChatHandler) DeleteSession(c *gin.Context) {
 		return
 	}
 
-	if deleted, err := h.store.DeleteRAGDocumentsBySession(c.Request.Context(), sessionID); err != nil {
-		h.logger.Warn("Failed to delete RAG documents for session",
-			zap.Error(err),
-			zap.String("session_id", sessionIDStr))
-	} else if deleted > 0 {
-		h.logger.Debug("Deleted RAG documents for session",
-			zap.String("session_id", sessionIDStr),
-			zap.Int64("documents_deleted", deleted))
-	}
+    if deleted, err := h.store.DeleteRAGDocumentsBySession(c.Request.Context(), sessionID); err != nil {
+        h.logger.Warn("Failed to delete RAG documents for session",
+            zap.Error(err),
+            zap.String("session_id", sessionIDStr))
+    } else if deleted > 0 {
+        h.logger.Debug("Deleted RAG documents for session",
+            zap.String("session_id", sessionIDStr),
+            zap.Int64("documents_deleted", deleted))
+    }
+
+    // Best-effort graph cleanup via RAG (also clears in-memory dataset cache)
+    if rag := h.agent.GetRAG(); rag != nil {
+        if err := rag.DeleteSessionDocuments(sessionIDStr); err != nil {
+            h.logger.Warn("Failed to cleanup session graph overlays",
+                zap.Error(err),
+                zap.String("session_id", sessionIDStr))
+        }
+    }
 
 	// Delete from database (this cascades to messages)
 	if err := h.store.DeleteSession(c.Request.Context(), sessionID); err != nil {
@@ -315,16 +324,13 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 		h.logger.Debug("User already exists, skipping creation")
 	}
 
-	// Create session if doesn't exist (or placeholder needs to be persisted)
-	sessionNeedsCreation := true
-	if persistedSessionID != nil && *persistedSessionID == sessionID {
-		sessionNeedsCreation = false
-	}
-	h.logger.Debug("Session needs creation check",
-		zap.Bool("needs_creation", sessionNeedsCreation),
-		zap.Bool("persisted_is_nil", persistedSessionID == nil))
+	// Check if session exists in database (source of truth)
+	// Don't rely on in-memory context comparison which can be stale
+	dbSession, sessionErr := h.store.GetSessionByID(c.Request.Context(), sessionID)
+	sessionExistsInDB := (sessionErr == nil && dbSession.ID != uuid.Nil)
 
-	if sessionNeedsCreation {
+	if !sessionExistsInDB {
+		// Session doesn't exist in DB - create it
 		h.logger.Debug("Creating new session", zap.String("user_id", userUUID.String()))
 		var creationErr error
 		newSessionID, creationErr := h.store.CreateSession(c.Request.Context(), userUUID)
@@ -344,6 +350,9 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 				zap.String("persisted", newSessionID.String()))
 			sessionID = newSessionID
 			req.SessionID = newSessionID.String()
+
+			// Signal frontend to update form's session ID via HTMX event
+			c.Header("HX-Trigger-After-Swap", fmt.Sprintf(`{"updateSessionId":"%s"}`, newSessionID.String()))
 		}
 		middleware.SetSecureCookie(c, middleware.SessionCookieName, newSessionID.String(), middleware.CookieMaxAge)
 		h.logger.Info("Session created on first message",
@@ -358,7 +367,17 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 			// Don't fail the entire request, workspace creation is less critical
 		}
 	} else {
-		h.logger.Debug("Session already exists, skipping creation")
+		// Session exists - use it
+		h.logger.Debug("Session exists in database, using it",
+			zap.String("session_id", sessionID.String()),
+			zap.String("user_id", dbSession.UserID.String()))
+
+		// Ensure workspace exists for existing session
+		if err := h.sessionService.CreateWorkspace(sessionID); err != nil {
+			h.logger.Warn("Failed to ensure workspace exists",
+				zap.Error(err),
+				zap.String("session_id", sessionID.String()))
+		}
 	}
 
 	// Handle potential file upload using upload service

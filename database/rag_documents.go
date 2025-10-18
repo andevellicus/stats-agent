@@ -1,14 +1,15 @@
 package database
 
 import (
-	"context"
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"strconv"
-	"strings"
-	"time"
+    "context"
+    "database/sql"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "sort"
+    "strconv"
+    "strings"
+    "time"
 
 	"github.com/google/uuid"
 	"github.com/pgvector/pgvector-go"
@@ -276,6 +277,151 @@ func (s *PostgresStore) ListStateDocuments(ctx context.Context, sessionID string
 		return nil, err
 	}
 	return docs, nil
+}
+
+// FindLatestStateByDataset returns the most recent state document for a (sessionID, dataset).
+func (s *PostgresStore) FindLatestStateByDataset(ctx context.Context, sessionID, dataset string) (uuid.UUID, string, map[string]string, error) {
+    if sessionID == "" || dataset == "" {
+        return uuid.Nil, "", nil, sql.ErrNoRows
+    }
+    const query = `
+        SELECT id, content, metadata
+        FROM rag_documents
+        WHERE (metadata ->> 'session_id') = $1
+          AND (metadata ->> 'type') = 'state'
+          AND (metadata ->> 'dataset') = $2
+        ORDER BY created_at DESC
+        LIMIT 1`
+
+    var (
+        id       uuid.UUID
+        content  string
+        metaJSON []byte
+    )
+    err := s.DB.QueryRowContext(ctx, query, sessionID, dataset).Scan(&id, &content, &metaJSON)
+    if err != nil {
+        return uuid.Nil, "", nil, err
+    }
+    meta := make(map[string]string)
+    if len(metaJSON) > 0 {
+        if err := json.Unmarshal(metaJSON, &meta); err != nil {
+            return uuid.Nil, "", nil, err
+        }
+    }
+    return id, content, meta, nil
+}
+
+// FindLatestStateBySourceHash returns the latest state where metadata->>'source_content_hash' matches the given hash.
+func (s *PostgresStore) FindLatestStateBySourceHash(ctx context.Context, sessionID, dataset, sourceHash string) (uuid.UUID, string, map[string]string, error) {
+    if sessionID == "" || dataset == "" || sourceHash == "" {
+        return uuid.Nil, "", nil, sql.ErrNoRows
+    }
+    const query = `
+        SELECT id, content, metadata
+        FROM rag_documents
+        WHERE (metadata ->> 'session_id') = $1
+          AND (metadata ->> 'type') = 'state'
+          AND (metadata ->> 'dataset') = $2
+          AND (metadata ->> 'source_content_hash') = $3
+        ORDER BY created_at DESC
+        LIMIT 1`
+
+    var (
+        id       uuid.UUID
+        content  string
+        metaJSON []byte
+    )
+    err := s.DB.QueryRowContext(ctx, query, sessionID, dataset, sourceHash).Scan(&id, &content, &metaJSON)
+    if err != nil {
+        return uuid.Nil, "", nil, err
+    }
+    meta := make(map[string]string)
+    if len(metaJSON) > 0 {
+        if err := json.Unmarshal(metaJSON, &meta); err != nil {
+            return uuid.Nil, "", nil, err
+        }
+    }
+    return id, content, meta, nil
+}
+
+// FindLatestAssumptionStateByVariables returns the most recent 'state' document with stage=assumption_check
+// for the given session, dataset, and canonical variable list (comma-joined, sorted).
+func (s *PostgresStore) FindLatestAssumptionStateByVariables(ctx context.Context, sessionID, dataset, variablesCanonical string) (RAGDocument, error) {
+    if sessionID == "" || dataset == "" {
+        return RAGDocument{}, sql.ErrNoRows
+    }
+    const query = `
+        SELECT id, content, metadata, content_hash, created_at
+        FROM rag_documents
+        WHERE (metadata ->> 'session_id') = $1
+          AND (metadata ->> 'type') = 'state'
+          AND (metadata ->> 'dataset') = $2
+          AND (metadata ->> 'stage') = 'assumption_check'
+          AND COALESCE((metadata ->> 'variables'), '') <> ''
+        ORDER BY created_at DESC
+        LIMIT 50`
+
+    rows, err := s.DB.QueryContext(ctx, query, sessionID, dataset)
+    if err != nil {
+        return RAGDocument{}, err
+    }
+    defer rows.Close()
+
+    // Iterate newest to oldest and pick first with canonical vars match if provided.
+    for rows.Next() {
+        var (
+            id uuid.UUID
+            content string
+            metaJSON []byte
+            hash sql.NullString
+            createdAt time.Time
+        )
+        if err := rows.Scan(&id, &content, &metaJSON, &hash, &createdAt); err != nil {
+            return RAGDocument{}, err
+        }
+        meta := make(map[string]string)
+        if len(metaJSON) > 0 {
+            if e := json.Unmarshal(metaJSON, &meta); e != nil {
+                continue
+            }
+        }
+        // Compute canonical join of variables for comparison
+        canon := canonicalizeVariables(meta["variables"])
+        if variablesCanonical == "" || canon == variablesCanonical {
+            return RAGDocument{ID: id, Content: content, Metadata: meta, ContentHash: hash.String, CreatedAt: createdAt}, nil
+        }
+    }
+    if err := rows.Err(); err != nil {
+        return RAGDocument{}, err
+    }
+    return RAGDocument{}, sql.ErrNoRows
+}
+
+// canonicalizeVariables normalizes a comma-separated list into a sorted, lowercase, separator-stripped string.
+func canonicalizeVariables(list string) string {
+    list = strings.TrimSpace(list)
+    if list == "" {
+        return ""
+    }
+    parts := strings.Split(list, ",")
+    var out []string
+    seen := map[string]struct{}{}
+    for _, p := range parts {
+        p = strings.TrimSpace(p)
+        if p == "" {
+            continue
+        }
+        n := strings.ToLower(p)
+        n = strings.ReplaceAll(n, "_", "")
+        n = strings.ReplaceAll(n, "-", "")
+        n = strings.ReplaceAll(n, " ", "")
+        if _, ok := seen[n]; !ok {
+            seen[n] = struct{}{}
+            out = append(out, n)
+        }
+    }
+    sort.Strings(out)
+    return strings.Join(out, ",")
 }
 
 // DeleteRAGDocument deletes a rag document by id (cascades delete to embeddings via FK).

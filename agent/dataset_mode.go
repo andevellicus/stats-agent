@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"fmt"
 	"regexp"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"stats-agent/web/format"
 	"stats-agent/web/types"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -46,7 +48,37 @@ func (a *Agent) RunDatasetMode(ctx context.Context, input string, sessionID stri
 			break
 		}
 
-		// Query RAG for state before each turn
+		// === STATE CARD: Explicitly fetch current state card ===
+		// State cards contain critical dataset context (n, schema, stage) that should always be available
+		// Fetch it explicitly before RAG query to ensure it's not missed due to low similarity scores
+		var stateCard string
+		currentDataset := getCurrentDataset(history)
+		currentStage := "descriptive" // Default stage; could be inferred from action cache
+
+		// Only fetch state card if we have a valid dataset name
+		if currentDataset != "" && currentDataset != "unknown.csv" {
+			stateCtx, stateCancel := context.WithTimeout(ctx, a.cfg.LLMRequestTimeout)
+			defer stateCancel()
+
+			// Try to find the most recent state card for this (session, dataset, stage)
+			if stateDocID, stateContent, stateMeta, stateErr := a.rag.GetStore().FindStateDocument(stateCtx, sessionID, currentDataset, currentStage); stateErr == nil && stateDocID != uuid.Nil {
+				// Verify state is active (not superseded)
+				if stateMeta["state_status"] != "superseded" {
+					stateCard = stateContent
+					a.logger.Debug("State card fetched explicitly",
+						zap.String("dataset", currentDataset),
+						zap.String("stage", currentStage),
+						zap.Int("length", len(stateCard)))
+				}
+			} else if stateErr != nil && stateErr != sql.ErrNoRows {
+				a.logger.Warn("Failed to fetch state card, continuing without it",
+					zap.Error(stateErr),
+					zap.String("dataset", currentDataset),
+					zap.String("stage", currentStage))
+			}
+		}
+
+		// Query RAG for additional memory (facts, summaries, tool outputs)
 		// This ensures newly added content (PDFs, facts) is available
 		// Build structured query using QueryBuilder (combines fact summaries, metadata, values, synonyms)
 		queryText := a.queryBuilder.BuildRAGQuery(ctx, input, sessionID, history, turn)
@@ -114,14 +146,18 @@ func (a *Agent) RunDatasetMode(ctx context.Context, input string, sessionID stri
 		// Add timeout to RAG query to avoid hangs
 		ragCtx, ragCancel := context.WithTimeout(ctx, a.cfg.LLMRequestTimeout)
 		defer ragCancel()
-		state, err := a.rag.Query(ragCtx, sessionID, queryText, a.cfg.RAGResults, excludeHashes, historyDocIDs, doneLedger, "dataset")
+		ragMemory, err := a.rag.Query(ragCtx, sessionID, queryText, a.cfg.RAGResults, excludeHashes, historyDocIDs, doneLedger, "dataset")
 		if err != nil {
-			a.logger.Warn("Failed to query RAG for state, continuing without it",
+			a.logger.Warn("Failed to query RAG for memory, continuing with state card only",
 				zap.Error(err),
 				zap.String("session_id", sessionID),
 				zap.Int("turn", turn))
-			state = "" // Ensure empty on error
+			ragMemory = "" // Ensure empty on error
 		}
+
+		// Combine state card + RAG memory
+		// State card goes first to ensure it's always seen, then additional facts/summaries
+		state := buildCombinedState(stateCard, ragMemory)
 
 		// Build messages for LLM (combine state + history + current user message)
 		// On turn 0, append user message. On turn 1+, it's already in history
@@ -204,23 +240,24 @@ func (a *Agent) RunDatasetMode(ctx context.Context, input string, sessionID stri
 					overheadTokens = systemTokens + stateTokens
 				}
 
-				// Allowed tokens for all messages (state + evidence + history), excluding system prompt
-				allowed := maxPrompt - systemTokens
-				if allowed < 0 {
-					allowed = 0
-				}
+				// Check if we exceed the HARD context limit (not the soft limit)
+				// ManageHistory() already handles trimming at the 75% soft limit
+				// This only trims if we truly exceed the hard budget after overhead compression
+				hardLimit := a.cfg.ContextLength
+				if totalTokens > hardLimit {
+					a.logger.Warn("Payload exceeds hard context limit after overhead compression",
+						zap.Int("totalTokens", totalTokens),
+						zap.Int("hardLimit", hardLimit))
 
-				if totalTokens > allowed {
-					a.logger.Warn("Compressing payload to fit context window", zap.Int("totalTokens", totalTokens))
 					// Recalculate after overhead adjustments
 					totalTokens, err = a.memoryManager.CalculateHistorySize(ctx, messagesForLLM)
 					if err != nil {
 						a.logger.Warn("Token recount after overhead adjustment failed", zap.Error(err))
 					}
 
-					// If still over, trim history tokens in one pass
-					if totalTokens > allowed {
-						tokensToRemove := totalTokens - allowed
+					// If still over hard limit, trim history minimally to fit
+					if totalTokens > hardLimit {
+						tokensToRemove := totalTokens - hardLimit
 						tokensAccumulated := 0
 						cutoffIndex := 0
 
@@ -270,7 +307,7 @@ func (a *Agent) RunDatasetMode(ctx context.Context, input string, sessionID stri
 
 							messagesForLLM = a.responseHandler.BuildMessagesForLLMWithEvidence(state, evidenceForThisTurn, history)
 
-							a.logger.Info("Trimmed history to fit context window",
+							a.logger.Warn("Emergency trim: exceeded hard context limit",
 								zap.Int("messages_removed", cutoffIndex),
 								zap.Int("tokens_removed", tokensAccumulated),
 								zap.Int("remaining_messages", len(history)))
@@ -619,4 +656,36 @@ func (a *Agent) userRequestsRerun(input string) bool {
 		}
 	}
 	return false
+}
+
+// buildCombinedState combines explicit state card with RAG memory.
+// State card is prepended to ensure it's always visible to the LLM.
+func buildCombinedState(stateCard, ragMemory string) string {
+	stateCard = strings.TrimSpace(stateCard)
+	ragMemory = strings.TrimSpace(ragMemory)
+
+	// No state at all
+	if stateCard == "" && ragMemory == "" {
+		return ""
+	}
+
+	// Only RAG memory (no state card)
+	if stateCard == "" {
+		return ragMemory
+	}
+
+	// Only state card (no RAG memory)
+	if ragMemory == "" {
+		return "<memory>\n- state: " + stateCard + "\n</memory>"
+	}
+
+	// Both present: inject state card at top of memory block
+	// RAG memory already has <memory>...</memory> wrapper
+	if strings.HasPrefix(ragMemory, "<memory>") {
+		// Insert state card right after opening tag
+		return "<memory>\n- state: " + stateCard + "\n" + ragMemory[9:]
+	}
+
+	// Fallback: wrap both in memory tags
+	return "<memory>\n- state: " + stateCard + "\n" + ragMemory + "\n</memory>"
 }

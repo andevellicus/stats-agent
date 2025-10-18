@@ -28,7 +28,7 @@ CONSECUTIVE_ERRORS: 5
 LLM_REQUEST_TIMEOUT: 300
 
 # --- Dynamic Temperature Adjustment ---
-BASE_TEMPERATURE: 0.2    # Starting temperature for fine-tuned model (deterministic)
+BASE_TEMPERATURE: 0.3    # Starting temperature for fine-tuned model (deterministic)
 MAX_TEMPERATURE: 0.7      # Maximum temperature cap (prevents wild outputs)
 TEMPERATURE_STEP: 0.1     # Increase per consecutive error (encourages exploration)
 
@@ -76,6 +76,10 @@ SEMANTIC_SIMILARITY_THRESHOLD: 0.5  # Minimum cosine similarity for vector hits
 BM25_SCORE_THRESHOLD: 0.10           # Minimum BM25+bonus score for text hits
 ENABLE_METADATA_FALLBACK: true      # Enable metadata-based fallback search when hybrid results are empty
 METADATA_FALLBACK_MAX_FILTERS: 3     # Limit number of auto-derived metadata filters
+
+# --- Graph Overlay ---
+GRAPH_ENABLED: true
+GRAPH_SUPPORTS_BOOST: 1.08          # Multiplier for results with supporting assumption edges
 
 # --- PDF Processing Configuration ---
 PDF_TOKEN_THRESHOLD: 0.75                 # Use 75% of context window for PDF content

@@ -205,20 +205,78 @@ func (r *RAG) queryHybrid(ctx context.Context, sessionID string, query string, n
 		return "", 0, nil
 	}
 
-	// 2) Score and rank hybrid
-	candidateList := r.scoreHybrid(query, mode, metadataHints, candidates, isQueryForError)
+    // 2) Graph pre-filter: drop superseded/blocked where applicable
+    candidates = r.validateCandidatesWithGraph(ctx, candidates)
 
-	// 3) Filter by history
-	filtered1 := r.filterHistory(candidateList, historyDocIDs)
+    // 3) Score and rank hybrid
+    candidateList := r.scoreHybrid(query, mode, metadataHints, candidates, isQueryForError)
 
-	// 4) Bucket summaries
-	filtered2 := r.bucketSummaries(filtered1)
+    // 4) Filter by history
+    filtered1 := r.filterHistory(candidateList, historyDocIDs)
 
-	// 5) Deduplicate via shingles/hash
-	filtered3 := r.deduplicateShingles(filtered2, excludeHashes)
+    // 5) Bucket summaries
+    filtered2 := r.bucketSummaries(filtered1)
 
-	// 6) Format output memory block
-	return r.formatMemoryBlock(ctx, filtered3, nResults, doneLedger, docContents, excludeHashes)
+    // 6) Deduplicate via shingles/hash
+    filtered3 := r.deduplicateShingles(filtered2, excludeHashes)
+
+    // 7) Boost via graph valid path (supports edges to tests; prefer latest states)
+    filtered3 = r.boostByValidPath(ctx, filtered3)
+
+    // 8) Format output memory block
+    return r.formatMemoryBlock(ctx, filtered3, nResults, doneLedger, docContents, excludeHashes)
+}
+
+// validateCandidatesWithGraph removes candidates that are superseded or blocked by assumptions.
+func (r *RAG) validateCandidatesWithGraph(ctx context.Context, candidates map[string]*hybridCandidate) map[string]*hybridCandidate {
+    if r.graph == nil || !r.graph.Enabled() || len(candidates) == 0 {
+        return candidates
+    }
+    out := make(map[string]*hybridCandidate, len(candidates))
+    for id, cand := range candidates {
+        if cand == nil {
+            continue
+        }
+        lookupID := ResolveLookupID(cand.DocumentID, cand.Metadata)
+        if lookupID == "" {
+            continue
+        }
+        // Superseded check
+        if sup, err := r.graph.IsSuperseded(ctx, lookupID); err == nil && sup {
+            continue
+        }
+        // Blocked check
+        if blk, err := r.graph.IsBlocked(ctx, lookupID); err == nil && blk {
+            continue
+        }
+        out[id] = cand
+    }
+    return out
+}
+
+// boostByValidPath increases the score for candidates with supportive assumption edges.
+func (r *RAG) boostByValidPath(ctx context.Context, list []*hybridCandidate) []*hybridCandidate {
+    if r.graph == nil || !r.graph.Enabled() || len(list) == 0 {
+        return list
+    }
+    for _, cand := range list {
+        if cand == nil {
+            continue
+        }
+        lookupID := ResolveLookupID(cand.DocumentID, cand.Metadata)
+        if lookupID == "" {
+            continue
+        }
+        // Boost if there is an incoming 'supports' edge
+        if has, err := r.graph.HasIncomingEdgeType(ctx, lookupID, "supports"); err == nil && has {
+            boost := r.cfg.GraphSupportsBoost
+            if boost <= 0 {
+                boost = 1.0
+            }
+            cand.Score *= boost
+        }
+    }
+    return list
 }
 
 // gatherCandidates performs vector and BM25 searches, merges signals into candidates,

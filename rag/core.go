@@ -11,6 +11,7 @@ import (
 
     "stats-agent/config"
     "stats-agent/database"
+    "stats-agent/graph"
     "stats-agent/llmclient"
 
     "github.com/google/uuid"
@@ -28,6 +29,7 @@ type RAG struct {
     store                      *database.PostgresStore
     embedder                   EmbeddingFunc
     logger                     *zap.Logger
+    graph                      *graph.Graph
     embeddingTokenSoftLimit    int
     embeddingTokenTarget       int
     minTokenCheckCharThreshold int
@@ -100,6 +102,7 @@ func New(cfg *config.Config, store *database.PostgresStore, logger *zap.Logger) 
         store:                      store,
         embedder:                   embedder,
         logger:                     logger,
+        graph:                      graph.New(store.DB, logger, cfg.GraphEnabled),
         embeddingTokenSoftLimit:    embeddingSoftLimit,
         embeddingTokenTarget:       embeddingTarget,
         minTokenCheckCharThreshold: minTokenThreshold,
@@ -274,6 +277,12 @@ func (r *RAG) clearSessionDataset(sessionID string) {
 	r.datasetMu.Lock()
 	delete(r.sessionDatasets, sessionID)
 	r.datasetMu.Unlock()
+}
+
+// GetStore returns the underlying PostgreSQL store for direct queries.
+// This is used by the agent to explicitly fetch state cards and other documents.
+func (r *RAG) GetStore() *database.PostgresStore {
+	return r.store
 }
 
 // GetDocumentIDsByContentHash looks up document IDs by content hashes.

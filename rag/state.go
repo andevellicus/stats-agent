@@ -1,16 +1,18 @@
 package rag
 
 import (
-	"context"
-	"crypto/sha256"
-	"fmt"
-	"regexp"
-	"sort"
-	"strings"
-	"time"
+    "context"
+    "crypto/sha256"
+    "fmt"
+    "regexp"
+    "sort"
+    "strings"
+    "time"
 
-	"github.com/google/uuid"
-	"go.uber.org/zap"
+    "stats-agent/graph"
+
+    "github.com/google/uuid"
+    "go.uber.org/zap"
 )
 
 // buildStateSignatureID returns a stable UUID for (session, dataset, stage, filtersKey).
@@ -35,11 +37,11 @@ func parseColumnList(input string) []string {
 
 // extractSchemaFromResult tries to derive schema columns and n from a tool result output
 func extractSchemaFromResult(result string) (cols []string, n int) {
-	// Columns via Index([...]) or Columns: [...]
-	idxPattern := regexp.MustCompile(`Index\(\[([^\]]+)\]`)
-	if m := idxPattern.FindStringSubmatch(result); len(m) > 1 {
-		cols = parseColumnList(m[1])
-	}
+    // Columns via Index([...]) or Columns: [...]
+    idxPattern := regexp.MustCompile(`Index\(\[([^\]]+)\]`)
+    if m := idxPattern.FindStringSubmatch(result); len(m) > 1 {
+        cols = parseColumnList(m[1])
+    }
 	if len(cols) == 0 {
 		colsPattern := regexp.MustCompile(`(?i)columns?[:\s]*\[([^\]]+)\]`)
 		if m := colsPattern.FindStringSubmatch(result); len(m) > 1 {
@@ -58,13 +60,61 @@ func extractSchemaFromResult(result string) (cols []string, n int) {
 			fmt.Sscanf(m[1], "%d", &n)
 		}
 	}
-	if n == 0 {
-		obsPattern := regexp.MustCompile(`(?i)observations?[:\s]+(\d+)`)
-		if m := obsPattern.FindStringSubmatch(result); len(m) > 1 {
-			fmt.Sscanf(m[1], "%d", &n)
-		}
-	}
-	return cols, n
+    if n == 0 {
+        obsPattern := regexp.MustCompile(`(?i)observations?[:\s]+(\d+)`)
+        if m := obsPattern.FindStringSubmatch(result); len(m) > 1 {
+            fmt.Sscanf(m[1], "%d", &n)
+        }
+    }
+
+    // Additional heuristics for common pandas prints
+    // Case: Name: <col>, dtype: ... (Series head print)
+    if len(cols) == 0 {
+        if m := regexp.MustCompile(`(?m)Name:\s*([^,\n]+),\s*dtype:`).FindStringSubmatch(result); len(m) > 1 {
+            name := strings.TrimSpace(m[1])
+            if name != "" {
+                cols = []string{name}
+            }
+        }
+    }
+    // Case: DataFrame dtypes print for single/multiple columns
+    // Looks like:
+    //   col1    int64\ncol2   float64\n...\ndtype: object
+    if len(cols) == 0 && strings.Contains(strings.ToLower(result), "dtype:") {
+        lines := strings.Split(result, "\n")
+        // Collect column names found before a line starting with 'dtype:'
+        for _, line := range lines {
+            l := strings.TrimSpace(line)
+            if l == "" {
+                continue
+            }
+            if strings.HasPrefix(strings.ToLower(l), "dtype:") {
+                break
+            }
+            // Heuristic: a dtype line has at least two fields: <name> <dtype>
+            fields := regexp.MustCompile(`\s+`).Split(l, -1)
+            if len(fields) >= 2 {
+                // Reconstruct column name portion excluding last token (dtype)
+                name := strings.TrimSpace(strings.Join(fields[:len(fields)-1], " "))
+                if name != "" && !strings.Contains(strings.ToLower(name), "index") {
+                    cols = append(cols, name)
+                }
+            }
+        }
+        // Dedup
+        if len(cols) > 0 {
+            set := map[string]struct{}{}
+            uniq := make([]string, 0, len(cols))
+            for _, c := range cols {
+                if _, ok := set[c]; !ok {
+                    set[c] = struct{}{}
+                    uniq = append(uniq, c)
+                }
+            }
+            cols = uniq
+        }
+    }
+    return cols, n
 }
 
 // computeSchemaHash returns short hash used across the agent (first 8 hex)
@@ -99,8 +149,8 @@ func extractFiltersFromCode(code string) []string {
 	dfRe := regexp.MustCompile(`(?i)\b[a-zA-Z_]\w*\s*\[\s*([^\]]+)\s*\]`)
 	matches := dfRe.FindAllStringSubmatch(code, -1)
 	var preds []string
-	atomRe1 := regexp.MustCompile(`(?i)\b[a-zA-Z_]\w*\s*\.\s*([A-Za-z_]\w*)\s*(==|!=|>=|<=|>|<)\s*(([\"\'])([^\"\']+)\4|\d+(?:\.\d+)?)`)
-	atomRe2 := regexp.MustCompile(`(?i)\b[a-zA-Z_]\w*\s*\[\s*['\"]([^'\"]+)['\"]\s*\]\s*(==|!=|>=|<=|>|<)\s*(([\"\'])([^\"\']+)\4|\d+(?:\.\d+)?)`)
+    atomRe1 := regexp.MustCompile(`(?i)\b[a-zA-Z_]\w*\s*\.\s*([A-Za-z_]\w*)\s*(==|!=|>=|<=|>|<)\s*((?:"[^"]+"|'[^']+'|\d+(?:\.\d+)?))`)
+    atomRe2 := regexp.MustCompile(`(?i)\b[a-zA-Z_]\w*\s*\[\s*['\"]([^'\"]+)['\"]\s*\]\s*(==|!=|>=|<=|>|<)\s*((?:"[^"]+"|'[^']+'|\d+(?:\.\d+)?))`)
 	for _, m := range matches {
 		cond := m[1]
 		// Split conjunctions conservatively
@@ -251,11 +301,11 @@ func sumChi2Counts(result string) int {
 }
 
 // buildStateCardContent constructs the canonical state card text.
-func buildStateCardContent(dataset string, n int, stage string, schemaCols []string, schemaHash string, result string, logger *zap.Logger) (string, bool) {
-	// 1) Sanity: required fields
-	if dataset == "" || n <= 0 || stage == "" || len(schemaCols) == 0 || schemaHash == "" {
-		return "", false
-	}
+func buildStateCardContent(dataset string, n int, stage string, schemaCols []string, schemaHash string, result string, primaryTest string, variables string, logger *zap.Logger) (string, bool) {
+    // 1) Sanity: required fields (allow empty schema when not available yet)
+    if dataset == "" || n <= 0 || stage == "" {
+        return "", false
+    }
 
 	// 2) Extract verbatim numeric evidence and validate ranges where applicable
 	ev := extractNumericEvidence(result)
@@ -320,10 +370,18 @@ func buildStateCardContent(dataset string, n int, stage string, schemaCols []str
 		details = append(details, fmt.Sprintf("Association: Cramér's V=%s.", ev.V))
 	}
 
-	if len(details) == 0 {
-		// No reliable numeric details; store only header
-		return header, true
-	}
+    if len(details) == 0 {
+        // No reliable numeric details; include test/variables if present to avoid blank cards
+        if strings.TrimSpace(primaryTest) != "" {
+            details = append(details, fmt.Sprintf("Test: %s.", strings.TrimSpace(primaryTest)))
+        }
+        if strings.TrimSpace(variables) != "" {
+            details = append(details, fmt.Sprintf("Variables: %s.", strings.TrimSpace(variables)))
+        }
+        if len(details) == 0 {
+            return header, true
+        }
+    }
 	if len(details) > 3 {
 		details = details[:3]
 	}
@@ -345,52 +403,133 @@ func (r *RAG) ingestStateCard(ctx context.Context, sessionID string, baseMeta ma
 		return
 	}
 
-	// derive schema from tool output
-	schemaCols, n := extractSchemaFromResult(toolContent)
-	if len(schemaCols) == 0 || n <= 0 {
-		// evidence-only policy: skip if we cannot prove schema and n from tool output
-		return
-	}
-	// enforce name coherence: columns as-is; variables inferred from code must be subset of schema cols when present
-	vars := ExtractStatisticalMetadata(code, toolContent)["variables"]
-	if vars != "" {
-		varSet := make(map[string]struct{}, len(schemaCols))
-		for _, c := range schemaCols {
-			varSet[c] = struct{}{}
-		}
-		for _, v := range strings.Split(vars, ",") {
-			v = strings.TrimSpace(v)
-			if v == "" {
-				continue
-			}
-			if _, ok := varSet[v]; !ok {
-				// reject due to key drift
-				if r.logger != nil {
-					r.logger.Warn("Dropping state: variable not in schema_cols", zap.String("var", v))
-				}
-				return
-			}
-		}
-	}
+    // derive schema from tool output (best-effort; we will fallback later if missing)
+    schemaCols, n := extractSchemaFromResult(toolContent)
+    // Resolve variables early (alias-aware), but defer schema membership checks until schema is finalized
+    varsRaw := ExtractStatisticalMetadata(code, toolContent)["variables"]
+    resolvedVars := make([]string, 0)
+    if varsRaw != "" {
+        seen := map[string]struct{}{}
+        for _, v := range strings.Split(varsRaw, ",") {
+            v = strings.TrimSpace(v)
+            if v == "" {
+                continue
+            }
+            rv := v
+            if r.graph != nil && r.graph.Enabled() {
+                if canon, err := r.graph.ResolveVariable(ctx, sessionID, dataset, v); err == nil && strings.TrimSpace(canon) != "" {
+                    rv = canon
+                }
+            }
+            if _, ok := seen[rv]; !ok {
+                seen[rv] = struct{}{}
+                resolvedVars = append(resolvedVars, rv)
+            }
+        }
+    }
 
-	// stage from metadata extractor
-	meta := ExtractStatisticalMetadata(code, toolContent)
-	stage := strings.TrimSpace(meta["analysis_stage"])
-	if stage == "" {
-		// default to descriptive if we cannot identify; but only if numeric evidence exists
-		stage = "descriptive"
-	}
+    // stage from metadata extractor
+    meta := ExtractStatisticalMetadata(code, toolContent)
+    // Use sample size from metadata if present and n not yet known
+    if n == 0 {
+        if sn := strings.TrimSpace(meta["sample_size"]); sn != "" {
+            var nParsed int
+            fmt.Sscanf(sn, "%d", &nParsed)
+            if nParsed > 0 {
+                n = nParsed
+            }
+        }
+    }
+    stage := strings.TrimSpace(meta["analysis_stage"])
+    if stage == "" {
+        // default to descriptive if we cannot identify; but only if numeric evidence exists
+        stage = "descriptive"
+    }
 
 	// Extract filters from code and build filters key/signature
-	filters := extractFiltersFromCode(code)
-	filtersKey := makeFiltersKey(filters)
+    filters := extractFiltersFromCode(code)
+    filtersKey := makeFiltersKey(filters)
 
-	schemaHash := computeSchemaHash(schemaCols)
-	schemaVersionID := computeSchemaVersionID(schemaCols, n, filtersKey)
-	content, ok := buildStateCardContent(dataset, n, stage, schemaCols, schemaHash, toolContent, r.logger)
-	if !ok || strings.TrimSpace(content) == "" {
-		return
-	}
+    // Fallback to previous state for schema/n if missing
+    if (len(schemaCols) == 0 || n <= 0) && r.store != nil {
+        prevColsBefore := len(schemaCols)
+        prevNBefore := n
+        if prevID, _, prevMeta, err := r.store.FindLatestStateByDataset(ctx, sessionID, dataset); err == nil && prevID != uuid.Nil && prevMeta != nil {
+            if len(schemaCols) == 0 {
+                if prevCols := strings.TrimSpace(prevMeta["schema_cols"]); prevCols != "" {
+                    schemaCols = strings.Split(prevCols, ",")
+                }
+            }
+            if n <= 0 {
+                if prevN := strings.TrimSpace(prevMeta["schema_n"]); prevN != "" {
+                    var nPrev int
+                    fmt.Sscanf(prevN, "%d", &nPrev)
+                    if nPrev > 0 {
+                        n = nPrev
+                    }
+                }
+            }
+            if r.logger != nil && (len(schemaCols) != prevColsBefore || n != prevNBefore) {
+                r.logger.Debug("Backfilled state schema/n from previous state",
+                    zap.String("dataset", dataset),
+                    zap.Int("n", n),
+                    zap.Int("schema_cols_count", len(schemaCols)))
+            }
+        }
+    }
+
+    // If schema cols still unknown, bootstrap from resolved variables (best-effort)
+    if len(schemaCols) == 0 && len(resolvedVars) > 0 {
+        schemaCols = make([]string, len(resolvedVars))
+        copy(schemaCols, resolvedVars)
+    }
+    // Require at least n to proceed; schema columns may still be empty for a minimal state
+    if n <= 0 {
+        return
+    }
+
+    // Enforce name coherence only when we have a concrete schema
+    if varsRaw != "" && len(schemaCols) > 0 {
+        normSchema := make(map[string]string, len(schemaCols))
+        for _, c := range schemaCols {
+            norm := graph.NormalizeVariableName(c)
+            if norm != "" {
+                normSchema[norm] = c
+            }
+        }
+        for _, v := range strings.Split(varsRaw, ",") {
+            v = strings.TrimSpace(v)
+            if v == "" {
+                continue
+            }
+            rv := v
+            if r.graph != nil && r.graph.Enabled() {
+                if canon, err := r.graph.ResolveVariable(ctx, sessionID, dataset, v); err == nil && strings.TrimSpace(canon) != "" {
+                    rv = canon
+                }
+            }
+            nv := graph.NormalizeVariableName(rv)
+            if _, ok := normSchema[nv]; !ok {
+                if r.logger != nil {
+                    r.logger.Warn("Dropping state: variable not in schema_cols", zap.String("var", v), zap.String("resolved", rv))
+                }
+                return
+            }
+            // resolvedVars already populated
+        }
+    }
+
+    schemaHash := computeSchemaHash(schemaCols)
+    schemaVersionID := computeSchemaVersionID(schemaCols, n, filtersKey)
+    // Prepare variables text (resolved if available)
+    varsText := strings.Join(resolvedVars, ",")
+    if varsText == "" {
+        varsText = strings.TrimSpace(meta["variables"])
+    }
+    content, ok := buildStateCardContent(dataset, n, stage, schemaCols, schemaHash, toolContent, meta["primary_test"], varsText, r.logger)
+    if !ok || strings.TrimSpace(content) == "" {
+        return
+    }
 
 	// Signature ID per (session,dataset,stage,filters)
 	signatureID := buildStateSignatureID(sessionID, dataset, stage, filtersKey)
@@ -398,23 +537,36 @@ func (r *RAG) ingestStateCard(ctx context.Context, sessionID string, baseMeta ma
 	docID := uuid.New()
 
 	// Prepare metadata
-	md := map[string]string{
-		"session_id":         sessionID,
-		"role":               "state",
-		"type":               "state",
-		"dataset":            dataset,
-		"stage":              stage,
-		"schema_hash":        schemaHash,
-		"schema_cols":        strings.Join(schemaCols, ","),
-		"schema_n":           fmt.Sprintf("%d", n),
-		"schema_version_id":  schemaVersionID,
-		"source_type":        "tool",
-		"source_captured_at": time.Now().UTC().Format(time.RFC3339),
-		"filters_key":        filtersKey,
-		"filters":            strings.Join(filters, " & "),
-		"signature_id":       signatureID.String(),
-		"state_status":       "active",
-	}
+    md := map[string]string{
+        "session_id":         sessionID,
+        "role":               "state",
+        "type":               "state",
+        "dataset":            dataset,
+        "stage":              stage,
+        "schema_hash":        schemaHash,
+        "schema_cols":        strings.Join(schemaCols, ","),
+        "schema_n":           fmt.Sprintf("%d", n),
+        "schema_version_id":  schemaVersionID,
+        "source_type":        "tool",
+        "source_captured_at": time.Now().UTC().Format(time.RFC3339),
+        "filters_key":        filtersKey,
+        "filters":            strings.Join(filters, " & "),
+        "signature_id":       signatureID.String(),
+        "state_status":       "active",
+    }
+    // Copy basic statistical metadata for graph utility (use resolved vars if available)
+    if len(resolvedVars) > 0 {
+        md["variables"] = strings.Join(resolvedVars, ",")
+    } else if v := strings.TrimSpace(meta["variables"]); v != "" {
+        md["variables"] = v
+    }
+    if pt := strings.TrimSpace(meta["primary_test"]); pt != "" {
+        md["primary_test"] = pt
+    }
+    if p := strings.TrimSpace(meta["p_value"]); p != "" {
+        md["p_value"] = p
+        md["has_p_value"] = "true"
+    }
 	if h := baseMeta["tool_content_hash"]; h != "" {
 		md["source_content_hash"] = h
 	}
@@ -447,13 +599,41 @@ func (r *RAG) ingestStateCard(ctx context.Context, sessionID string, baseMeta ma
 		}
 	}
 
-	// Upsert document (content as StoredContent and also as window text via createEmbeddingWindows downstream)
-	if _, err := r.store.UpsertDocument(ctx, docID, content, md, HashContent(NormalizeForHash(content))); err != nil {
-		if r.logger != nil {
-			r.logger.Warn("Failed to upsert state document", zap.Error(err))
-		}
-		return
-	}
+    // If this is an assumption check, persist basic outcome markers in metadata
+    if stage == "assumption_check" {
+        assumptionType := ""
+        if strings.Contains(strings.ToLower(md["primary_test"]), "shapiro") ||
+            strings.Contains(strings.ToLower(md["primary_test"]), "kolmogorov") ||
+            strings.Contains(strings.ToLower(md["primary_test"]), "anderson") ||
+            strings.Contains(strings.ToLower(md["primary_test"]), "jarque") {
+            assumptionType = "normality"
+        }
+        if assumptionType != "" {
+            status := "unknown"
+            if p := strings.TrimSpace(md["p_value"]); p != "" {
+                var pv float64
+                fmt.Sscanf(p, "%f", &pv)
+                if pv >= 0.05 {
+                    status = "pass"
+                } else {
+                    status = "fail"
+                }
+            }
+            md["assumption_type"] = assumptionType
+            md["assumption_outcome"] = status
+            if p := strings.TrimSpace(md["p_value"]); p != "" {
+                md["assumption_p_value"] = p
+            }
+        }
+    }
+
+    // Upsert document (content as StoredContent and also as window text via createEmbeddingWindows downstream)
+    if _, err := r.store.UpsertDocument(ctx, docID, content, md, HashContent(NormalizeForHash(content))); err != nil {
+        if r.logger != nil {
+            r.logger.Warn("Failed to upsert state document", zap.Error(err))
+        }
+        return
+    }
 
 	// Create a minimal embedding window for search (use full content)
 	// Reuse createEmbeddingWindows path used by persistPreparedDocument by calling it directly here
@@ -470,9 +650,58 @@ func (r *RAG) ingestStateCard(ctx context.Context, sessionID string, baseMeta ma
 
 	// Rolling window: keep most recent 4 state docs for this session
 	docs, err := r.store.ListStateDocuments(ctx, sessionID)
-	if err == nil && len(docs) > 4 {
-		for i := 4; i < len(docs); i++ { // delete older beyond first 4 (newest first)
-			_ = r.store.DeleteRAGDocument(ctx, docs[i].ID)
-		}
-	}
+    if err == nil && len(docs) > 4 {
+        for i := 4; i < len(docs); i++ { // delete older beyond first 4 (newest first)
+            _ = r.store.DeleteRAGDocument(ctx, docs[i].ID)
+        }
+    }
+
+    // --- Graph integration: create lightweight edges and aliases ---
+    if r.graph != nil && r.graph.Enabled() {
+        dataset := md["dataset"]
+        // 1) Supersedes edge (new → previous)
+        if parent := strings.TrimSpace(md["parent_state_id"]); parent != "" {
+            _ = r.graph.CreateEdge(ctx, graph.StatEdge{
+                FromID:    docID.String(),
+                ToID:      parent,
+                EdgeType:  "supersedes",
+                Metadata:  map[string]interface{}{"reason": "schema_version_change"},
+                SessionID: sessionID,
+                Dataset:   dataset,
+            })
+        }
+
+        // emitted_in edges are created after fact persistence in postPersistGraphIntegration
+
+        // 3) Variable alias learning + canonical list
+        if vars := strings.TrimSpace(md["variables"]); vars != "" {
+            raw := strings.Split(vars, ",")
+            canonSet := make(map[string]struct{})
+            for _, v := range raw {
+                v = strings.TrimSpace(v)
+                if v == "" {
+                    continue
+                }
+                canon := graph.NormalizeVariableName(v)
+                if canon != "" {
+                    canonSet[canon] = struct{}{}
+                    // learn aliases per canonical
+                    _ = r.graph.CreateOrUpdateAlias(ctx, sessionID, dataset, canon, []string{v})
+                }
+            }
+            if len(canonSet) > 0 {
+                var canonList []string
+                for c := range canonSet {
+                    canonList = append(canonList, c)
+                }
+                sort.Strings(canonList)
+                // store canonical variable list in state metadata for downstream joins
+                // (best-effort; errors ignored since we don't want to mutate stored JSON here)
+                // Note: md already used for storage above; this write is only for edge creation downstream when fetched.
+                // If needed, callers can recompute canonical list from variables.
+            }
+        }
+
+        // Assumption markers were already stored in state metadata above if applicable.
+    }
 }

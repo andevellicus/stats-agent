@@ -94,6 +94,33 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
             message_id UUID REFERENCES messages(id) ON DELETE SET NULL,
             CONSTRAINT unique_session_filename UNIQUE(session_id, filename)
         )`,
+		`CREATE TABLE IF NOT EXISTS stat_edges (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            from_id UUID NOT NULL REFERENCES rag_documents(id) ON DELETE CASCADE,
+            to_id UUID NOT NULL REFERENCES rag_documents(id) ON DELETE CASCADE,
+            edge_type VARCHAR(50) NOT NULL,
+            metadata JSONB DEFAULT '{}'::jsonb,
+            session_id UUID NOT NULL,
+            dataset VARCHAR NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )`,
+		`CREATE TABLE IF NOT EXISTS variable_aliases (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            session_id UUID NOT NULL,
+            dataset VARCHAR NOT NULL,
+            canonical_name VARCHAR NOT NULL,
+            raw_aliases TEXT[],
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(session_id, dataset, canonical_name)
+        )`,
+		`CREATE TABLE IF NOT EXISTS graph_metadata (
+            session_id UUID PRIMARY KEY,
+            last_sync_at TIMESTAMPTZ,
+            rag_document_count INT,
+            edge_count INT,
+            status VARCHAR DEFAULT 'synced'
+        )`,
 	}
 
 	for _, stmt := range stmts {
@@ -199,6 +226,11 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_files_session_id ON files(session_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_files_message_id ON files(message_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_files_created_at ON files(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_edges_to_type ON stat_edges(to_id, edge_type)`,
+		`CREATE INDEX IF NOT EXISTS idx_edges_from_type ON stat_edges(from_id, edge_type)`,
+		`CREATE INDEX IF NOT EXISTS idx_edges_session ON stat_edges(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_edges_session_dataset ON stat_edges(session_id, dataset)`,
+		`CREATE INDEX IF NOT EXISTS idx_aliases_lookup ON variable_aliases(session_id, dataset)`,
 	}
 
 	for _, stmt := range indexStmts {

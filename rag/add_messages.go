@@ -4,16 +4,19 @@ import (
     "context"
     "encoding/json"
     "fmt"
+    "sort"
     "regexp"
     "strconv"
     "strings"
     "time"
 
-	"stats-agent/web/format"
-	"stats-agent/web/types"
+    "stats-agent/web/format"
+    "stats-agent/web/types"
 
-	"github.com/google/uuid"
-	"go.uber.org/zap"
+    "stats-agent/graph"
+
+    "github.com/google/uuid"
+    "go.uber.org/zap"
 )
 
 func (r *RAG) AddMessagesToStore(ctx context.Context, sessionID string, messages []types.AgentMessage) error {
@@ -113,18 +116,26 @@ func (r *RAG) prepareDocumentForMessage(
 
 		// Extract statistical metadata FIRST (before fact generation)
 		var statMeta map[string]string
-		if format.HasCodeBlock(message.Content) {
-			code, _ := format.ExtractCodeContent(message.Content)
-			statMeta = ExtractStatisticalMetadata(code, toolContent)
+        if format.HasCodeBlock(message.Content) {
+            code, _ := format.ExtractCodeContent(message.Content)
+            statMeta = ExtractStatisticalMetadata(code, toolContent)
 
-			// Ensure dataset is resolved and added to both structural metadata AND statistical metadata
-			if dataset := r.ensureDatasetMetadata(sessionID, metadata, code, toolContent); dataset != "" {
-				if statMeta == nil {
-					statMeta = make(map[string]string)
-				}
-				statMeta["dataset"] = dataset
-			}
-		}
+            // Ensure dataset is resolved and added to both structural metadata AND statistical metadata
+            if dataset := r.ensureDatasetMetadata(sessionID, metadata, code, toolContent); dataset != "" {
+                if statMeta == nil {
+                    statMeta = make(map[string]string)
+                }
+                statMeta["dataset"] = dataset
+            }
+            // Merge statistical metadata into metadata map for downstream graph integration (not stored; filtered out later)
+            if statMeta != nil {
+                for k, v := range statMeta {
+                    if strings.TrimSpace(v) != "" {
+                        metadata[k] = v
+                    }
+                }
+            }
+        }
 
 		userContent := ""
 		for prev := index - 1; prev >= 0; prev-- {
@@ -366,13 +377,13 @@ func (r *RAG) persistPreparedDocument(ctx context.Context, data *ragDocumentData
 	// - Long content: Creates multiple windows with full text distributed
 
 	// Store document first (with full StoredContent, not truncated)
-	docID, err := r.store.UpsertDocument(ctx, data.ID, data.StoredContent, structuralMetadata, data.ContentHash)
-	if err != nil {
-		r.logger.Warn("Failed to store document for RAG",
-			zap.Error(err),
-			zap.String("document_id", data.Metadata["document_id"]))
-		return
-	}
+    docID, err := r.store.UpsertDocument(ctx, data.ID, data.StoredContent, structuralMetadata, data.ContentHash)
+    if err != nil {
+        r.logger.Warn("Failed to store document for RAG",
+            zap.Error(err),
+            zap.String("document_id", data.Metadata["document_id"]))
+        return
+    }
 
 	// Create embedding windows (may be 1 or more depending on content length)
 	// This uses EmbedContent for embedding, but stores FULL content as window_text
@@ -384,19 +395,114 @@ func (r *RAG) persistPreparedDocument(ctx context.Context, data *ragDocumentData
 		return
 	}
 
-	// Store all embedding windows
-	for _, window := range windows {
-		if err := r.store.CreateEmbedding(ctx, docID, window.WindowIndex, window.WindowStart, window.WindowEnd, window.WindowText, window.Embedding); err != nil {
-			r.logger.Warn("Failed to store embedding window",
-				zap.Error(err),
-				zap.String("document_id", data.Metadata["document_id"]),
-				zap.Int("window_index", window.WindowIndex))
-		}
-	}
+    // Store all embedding windows
+    for _, window := range windows {
+        if err := r.store.CreateEmbedding(ctx, docID, window.WindowIndex, window.WindowStart, window.WindowEnd, window.WindowText, window.Embedding); err != nil {
+            r.logger.Warn("Failed to store embedding window",
+                zap.Error(err),
+                zap.String("document_id", data.Metadata["document_id"]),
+                zap.Int("window_index", window.WindowIndex))
+        }
+    }
+
+    // After successful storage, emit graph edges and update variable aliases (best-effort)
+    r.postPersistGraphIntegration(ctx, docID.String(), structuralMetadata, data.Metadata)
 
 	if data.SummaryDoc != nil {
 		r.persistSummaryDocument(ctx, data.SummaryDoc)
 	}
+}
+
+// postPersistGraphIntegration creates graph edges and variable aliases for a newly stored document.
+// storedMeta contains structural metadata saved to JSONB; fullMeta may include ephemeral statistical metadata.
+func (r *RAG) postPersistGraphIntegration(ctx context.Context, docID string, storedMeta map[string]string, fullMeta map[string]string) {
+    if r.graph == nil || !r.graph.Enabled() {
+        return
+    }
+    role := strings.TrimSpace(storedMeta["role"])
+    sessionID := strings.TrimSpace(storedMeta["session_id"])
+    dataset := strings.TrimSpace(storedMeta["dataset"])
+    if sessionID == "" || dataset == "" {
+        return
+    }
+
+    // Learn variable aliases for any document that carries variables (primarily facts)
+    if vars := strings.TrimSpace(fullMeta["variables"]); vars != "" {
+        for _, v := range strings.Split(vars, ",") {
+            v = strings.TrimSpace(v)
+            if v == "" {
+                continue
+            }
+            canon := graph.NormalizeVariableName(v)
+            if canon != "" {
+                _ = r.graph.CreateOrUpdateAlias(ctx, sessionID, dataset, canon, []string{v})
+            }
+        }
+    }
+
+    // emitted_in: link state card (created from the same tool output) to this fact document
+    if role == "fact" {
+        toolHash := strings.TrimSpace(fullMeta["tool_content_hash"])
+        if toolHash != "" {
+            if stateID, _, _, err := r.store.FindLatestStateBySourceHash(ctx, sessionID, dataset, toolHash); err == nil && stateID != uuid.Nil {
+                // Avoid duplicate linking
+                if has, err := r.graph.HasIncomingEdgeType(ctx, docID, "emitted_in"); err == nil && !has {
+                    _ = r.graph.CreateEdge(ctx, graph.StatEdge{
+                        FromID:    stateID.String(),
+                        ToID:      docID,
+                        EdgeType:  "emitted_in",
+                        Metadata:  map[string]interface{}{"via": "tool_content_hash"},
+                        SessionID: sessionID,
+                        Dataset:   dataset,
+                    })
+                }
+            }
+        }
+    }
+
+    // supports/blocks: If this is a test run (not an assumption), link from most recent matching assumption state
+    stage := strings.TrimSpace(fullMeta["analysis_stage"])
+    if role == "fact" && stage != "assumption_check" {
+        // Build canonical variable set to match state
+        var canonVars []string
+        if vars := strings.TrimSpace(fullMeta["variables"]); vars != "" {
+            seen := map[string]struct{}{}
+            for _, v := range strings.Split(vars, ",") {
+                v = strings.TrimSpace(v)
+                if v == "" {
+                    continue
+                }
+                c := graph.NormalizeVariableName(v)
+                if c == "" {
+                    continue
+                }
+                if _, ok := seen[c]; !ok {
+                    seen[c] = struct{}{}
+                    canonVars = append(canonVars, c)
+                }
+            }
+        }
+        sort.Strings(canonVars)
+        canonJoined := strings.Join(canonVars, ",")
+
+        // Lookup the most recent assumption state for this dataset and variable set
+        if assumption, err := r.store.FindLatestAssumptionStateByVariables(ctx, sessionID, dataset, canonJoined); err == nil && assumption.ID != uuid.Nil {
+            // Determine outcome: fall back to pass when unknown
+            out := strings.TrimSpace(assumption.Metadata["assumption_outcome"])
+            edgeType := "supports"
+            if out == "fail" {
+                edgeType = "blocks"
+            }
+            _ = r.graph.CreateEdge(ctx, graph.StatEdge{
+                FromID:    assumption.ID.String(),
+                ToID:      docID,
+                EdgeType:  edgeType,
+                Metadata:  map[string]interface{}{"assumption_type": assumption.Metadata["assumption_type"], "outcome": out},
+                SessionID: sessionID,
+                Dataset:   dataset,
+            })
+        }
+    }
 }
 
 // persistConversationChunks chunks conversation messages (facts, user/assistant messages)

@@ -20,9 +20,11 @@ type documentRecord struct {
 }
 
 var (
-	metadataKeyPattern   = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
-	datasetQueryRegex    = regexp.MustCompile(`(?i)([A-Za-z0-9_\-]+\.(?:csv|tsv|xlsx?|xls))`)
-	metadataColonPattern = regexp.MustCompile(`(?i)\b(dataset|role|primary_test|analysis_stage)\s*:\s*["']?([^'"\n;,]+)`)
+    metadataKeyPattern   = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+    datasetQueryRegex    = regexp.MustCompile(`(?i)([A-Za-z0-9_\-]+\.(?:csv|tsv|xlsx?|xls))`)
+    // Capture compact key:value tokens like dataset:unique.csv appearing inline in the query.
+    // Stop the value at whitespace or common delimiters to avoid swallowing the rest of the sentence.
+    metadataColonPattern = regexp.MustCompile(`(?i)\b(dataset|role|primary_test|analysis_stage)\s*:\s*["']?([^\s'";,]+)`)
 	metadataTestKeywords = []struct {
 		value  string
 		tokens []string

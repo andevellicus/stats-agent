@@ -279,6 +279,19 @@ document.addEventListener('DOMContentLoaded', () => {
     checkAndAttachToActiveRun();
 });
 
+// Listen for HTMX event to update session ID after it's created
+document.body.addEventListener('updateSessionId', function(event) {
+    const form = document.getElementById('chat-form');
+    if (!form) return;
+
+    const sessionInput = form.querySelector('input[name="session_id"]');
+    if (sessionInput && event.detail && event.detail.value) {
+        const newSessionId = event.detail.value;
+        sessionInput.value = newSessionId;
+        console.log('Session ID updated from placeholder to:', newSessionId);
+    }
+});
+
 document.body.addEventListener('htmx:afterSwap', function(event) {
     focusInput();
     initiateSSE();

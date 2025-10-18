@@ -295,33 +295,33 @@ func inferAnalysisStage(testType string) string {
 
 // extractVariables identifies variable/column names from code and result
 func extractVariables(code, result string) []string {
-	unique := make(map[string]struct{})
+    unique := make(map[string]struct{})
 
-	// Process code with all patterns
-	for _, pattern := range variablePatterns {
-		matches := pattern.FindAllStringSubmatch(code, -1)
-		for _, match := range matches {
-			if len(match) < 2 {
-				continue
-			}
+    // Process code with all patterns
+    for _, pattern := range variablePatterns {
+        matches := pattern.FindAllStringSubmatch(code, -1)
+        for _, match := range matches {
+            if len(match) < 2 {
+                continue
+            }
 
-			// Handle multiple columns in brackets: [['col1', 'col2']]
-			if strings.Contains(match[1], ",") {
-				cols := strings.Split(match[1], ",")
-				for _, col := range cols {
-					cleaned := strings.Trim(strings.TrimSpace(col), `'"`)
-					if isValidVariable(cleaned) {
-						unique[strings.ToLower(cleaned)] = struct{}{}
-					}
-				}
-			} else {
-				cleaned := strings.TrimSpace(match[1])
-				if isValidVariable(cleaned) {
-					unique[strings.ToLower(cleaned)] = struct{}{}
-				}
-			}
-		}
-	}
+            // Handle multiple columns in brackets: [['col1', 'col2']]
+            if strings.Contains(match[1], ",") || strings.Contains(match[0], "[[") {
+                // Extract quoted items robustly so commas inside names don't split items
+                for _, item := range parseQuotedList(match[1]) {
+                    cleaned := strings.TrimSpace(item)
+                    if isValidVariable(cleaned) {
+                        unique[strings.ToLower(cleaned)] = struct{}{}
+                    }
+                }
+            } else {
+                cleaned := strings.TrimSpace(match[1])
+                if isValidVariable(cleaned) {
+                    unique[strings.ToLower(cleaned)] = struct{}{}
+                }
+            }
+        }
+    }
 
 	// Also check result for column names in output tables
 	// Common pattern: "column_name    value" in describe() or head() output
@@ -339,7 +339,26 @@ func extractVariables(code, result string) []string {
 	}
 	sort.Strings(variables)
 
-	return variables
+    return variables
+}
+
+// parseQuotedList extracts items wrapped in single or double quotes from a list string.
+// Example: "'Age','Gender','Failure (yes-1, no=0)'" -> [Age, Gender, Failure (yes-1, no=0)]
+func parseQuotedList(s string) []string {
+    var items []string
+    // Match either '...'(no quotes inside) or "..."
+    re := regexp.MustCompile(`'([^']*)'|"([^"]*)"`)
+    matches := re.FindAllStringSubmatch(s, -1)
+    for _, m := range matches {
+        if len(m) >= 3 {
+            if m[1] != "" {
+                items = append(items, m[1])
+            } else if m[2] != "" {
+                items = append(items, m[2])
+            }
+        }
+    }
+    return items
 }
 
 // isValidVariable checks if a string is a valid variable name

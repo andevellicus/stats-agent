@@ -1,6 +1,9 @@
 package rag
 
-import "strings"
+import (
+    "context"
+    "strings"
+)
 
 // querySynonyms maps statistical and domain-specific terms to their synonyms and variations.
 // Organized by category for maintainability. Phrases should be lowercase.
@@ -222,8 +225,8 @@ var querySynonyms = map[string][]string{
 
 // expandQuery augments the user query with statistical synonyms and related terms.
 // This improves recall by ensuring searches match documents using different terminology.
-func (r *RAG) expandQuery(query string) string {
-	lower := strings.ToLower(query)
+func (r *RAG) expandQuery(ctx context.Context, sessionID string, query string) string {
+    lower := strings.ToLower(query)
 
 	// Track additions to avoid duplicates
 	additionSet := make(map[string]struct{})
@@ -258,17 +261,57 @@ func (r *RAG) expandQuery(query string) string {
 		}
 	}
 
-	// If no expansions found, return original query
-	if len(additionSet) == 0 {
-		return query
-	}
+    // Variable alias-based expansion via Graph (session- + dataset-scoped)
+    if r.graph != nil && r.graph.Enabled() && sessionID != "" {
+        if dataset := strings.TrimSpace(r.getSessionDataset(sessionID)); dataset != "" {
+            if aliases, err := r.graph.GetAliasesForDataset(ctx, sessionID, dataset); err == nil && len(aliases) > 0 {
+                existingLower := " " + lower + " "
+                for _, alias := range aliases {
+                    // Collect all names to consider
+                    names := make([]string, 0, 1+len(alias.RawAliases))
+                    if alias.CanonicalName != "" {
+                        names = append(names, alias.CanonicalName)
+                    }
+                    names = append(names, alias.RawAliases...)
+                    // Trigger if any name appears in the query
+                    triggered := false
+                    for _, n := range names {
+                        n = strings.TrimSpace(strings.ToLower(n))
+                        if n == "" {
+                            continue
+                        }
+                        if containsPhrase(existingLower, n) {
+                            triggered = true
+                            break
+                        }
+                    }
+                    if !triggered {
+                        continue
+                    }
+                    // Add all other variations to the addition set
+                    for _, n := range names {
+                        n = strings.TrimSpace(n)
+                        if n == "" {
+                            continue
+                        }
+                        additionSet[n] = struct{}{}
+                    }
+                }
+            }
+        }
+    }
+
+    // If no expansions found, return original query
+    if len(additionSet) == 0 {
+        return query
+    }
 
 	// Build expanded query, avoiding duplicates
 	builder := strings.Builder{}
 	builder.WriteString(query)
 
 	// Pad existing query for boundary detection
-	existingLower := " " + lower + " "
+    existingLower := " " + lower + " "
 
 	for syn := range additionSet {
 		synLower := strings.ToLower(syn)

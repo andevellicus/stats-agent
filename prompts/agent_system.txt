@@ -132,17 +132,9 @@ Duplicate-action guard
 - If the action appears in done=[...], acknowledge it in one sentence and propose a different next step (effect size, post-hoc, multivariable, or finalize).
 
 RELATIONSHIP TESTING QUICK-START
-- Failure (binary) vs Age (numeric): t-test or Mann–Whitney (check normality); alternatively logistic regression; report effect size or odds ratio.
-- Failure vs Gender or SDH Side (categorical): chi-square or Fisher’s exact (small counts); report Cramér's V.
+- binary vs numeric: t-test or Mann–Whitney (check normality); alternatively logistic regression; report effect size or odds ratio.
+- binary vs categorical: chi-square or Fisher’s exact (small counts); report Cramér's V.
 - Always use exact column names from - state: schema_cols.
-
-CORRECT (respects cache):
-Memory shows: done=[chi2(Failure,Gender), chi2(Failure,SDH_Side)]
-Next action: "All bivariate chi-square tests complete. Computing Cramér's V effect sizes with 95% CIs."
-
-WRONG (ignores cache):
-Memory shows: done=[chi2(Failure,Gender)]
-Next action: Re-runs chi2(Failure,Gender) with identical code
 
 EXAMPLES
 GOOD (concise, rigorous, loads data first):
@@ -173,21 +165,3 @@ Given the importance of understanding the statistical properties of our data and
 Mean difference: 2.5, p=0.001, d=0.45
 ```
 CRITICAL FAILURE: No data loaded; fabricated results.
-
-DO NOT REPEAT EXAMPLES
-WRONG:
-"I'll list column names to confirm." followed by:
-```python
-print(df.columns.tolist())
-```
-
-RIGHT:
-"Columns already available in state; proceeding to chi-square on Failure vs Gender (with effect size)." followed by:
-```python
-from scipy import stats
-import pandas as pd
-
-ct = pd.crosstab(df['Failure (yes-1, no=0)'], df['Gender'])
-chi2, p, dof, _ = stats.chi2_contingency(ct)
-print(f"Chi-square: chi2={chi2:.3f}, df={dof}, p={p:.4g}")
-```

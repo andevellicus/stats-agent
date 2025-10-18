@@ -63,6 +63,8 @@ const (
     defaultDocumentChunkOverlap             = 0.0
     // Completion headroom for assistant response
     defaultResponseTokenBudget              = 512
+    // Graph overlay boosts
+    defaultGraphSupportsBoost               = 1.08
 )
 
 // Config holds the application's configuration
@@ -146,6 +148,9 @@ type Config struct {
     DocumentModeEnabled              bool          `mapstructure:"DOCUMENT_MODE_ENABLED"`
     DocumentModeRAGResults           int           `mapstructure:"DOCUMENT_MODE_RAG_RESULTS"`
     ResponseTokenBudget              int           `mapstructure:"RESPONSE_TOKEN_BUDGET"`
+    // Graph overlay
+    GraphEnabled                    bool          `mapstructure:"GRAPH_ENABLED"`
+    GraphSupportsBoost              float64       `mapstructure:"GRAPH_SUPPORTS_BOOST"`
 }
 
 func Load(logger *zap.Logger) *Config {
@@ -235,6 +240,9 @@ func Load(logger *zap.Logger) *Config {
     viper.SetDefault("DOCUMENT_MODE_ENABLED", defaultDocumentModeEnabled)
     viper.SetDefault("DOCUMENT_MODE_RAG_RESULTS", defaultDocumentModeRAGResults)
     viper.SetDefault("RESPONSE_TOKEN_BUDGET", defaultResponseTokenBudget)
+    // Graph overlay defaults
+    viper.SetDefault("GRAPH_ENABLED", true)
+    viper.SetDefault("GRAPH_SUPPORTS_BOOST", defaultGraphSupportsBoost)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if logger != nil {
@@ -399,6 +407,9 @@ func Load(logger *zap.Logger) *Config {
     }
     if config.ResponseTokenBudget <= 0 {
         config.ResponseTokenBudget = defaultResponseTokenBudget
+    }
+    if config.GraphSupportsBoost <= 0 {
+        config.GraphSupportsBoost = defaultGraphSupportsBoost
     }
 
 	return &config
